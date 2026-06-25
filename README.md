@@ -150,6 +150,8 @@ export PROJECT_OS_GRAPH_CMD="your-graph-command"
 export PROJECT_OS_VECTOR_CMD="your-vector-command"
 ```
 
+Model routing is different: Project OS records the desired routing plan, but whether each sub-agent can run on a different model depends on the AI app. Configure that in Cursor, Claude, Codex, or whichever tool is running the project; it is not detected by the graph/vector environment variables.
+
 ## Quick Start
 
 Requirements: Git, Python 3, and an AI coding tool that reads `AGENTS.md` or `CLAUDE.md`.
@@ -159,6 +161,8 @@ git clone https://github.com/YOUR-USERNAME/project-os-template.git
 cd project-os-template
 ./install.sh ../my-new-project --check-tools
 ```
+
+Replace `YOUR-USERNAME` with the GitHub account that owns the template repo.
 
 Then open `../my-new-project` in your AI coding tool and say:
 

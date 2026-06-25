@@ -9,7 +9,7 @@ When the user says `$project-os`, `/project`, `project os`, or asks to start, pl
 3. Choose Solo Agent Loop, Mini Swarm, or Full Swarm.
 4. If the user explicitly chooses a tier, log it and stop re-deciding.
 5. Maintain `blackboard/` as the human-readable source of truth.
-6. Use the CFO Agent for cost mode, model routing, and project cost estimates.
+6. Use the CFO Agent for cost mode, a model-routing plan, and project cost estimates.
 7. Separate AI workflow cost from product/app cost and human time.
 8. Run capability preflight before serious work.
 9. Use shared memory safely. Use summaries, not raw private dumps.
@@ -27,7 +27,7 @@ When the user says `$project-os`, `/project`, `project os`, or asks to start, pl
 Project OS is a workflow template. Do not overclaim capabilities.
 
 - Say `implemented` only for files, scripts, tests, and behaviors that exist and were verified.
-- Say `optional` for Vector Memory, Knowledge Graph, model routing, browser QA, external research tools, and swarm runners unless those tools are actually configured in the current project.
+- Say `optional` for Vector Memory, Knowledge Graph, actual different-model execution, browser QA, external research tools, and swarm runners unless those tools are actually configured in the current project.
 - If a platform cannot route sub-agents to different models, record that in `blackboard/11-model-routing.md`.
 - If Knowledge Graph, Vector Memory, browser QA, containers, or network controls were not actually used, record `Not used`, `Unavailable`, or `Not configured`; do not imply they ran.
 - Markdown rules are not security enforcement. Treat sandboxing, egress filtering, and container isolation as separate capabilities that must be verified before relying on them.
@@ -111,13 +111,13 @@ Log the result in:
 
 If web or market facts may have changed, use current research instead of stale memory.
 
-## Model Routing
+## Model Routing Plan
 
 Do not blindly put every sub-agent on the strongest model.
 
 - Use strong/frontier models for strategy, architecture, hard debugging, security, final review, ambiguous reasoning, and user-facing synthesis.
 - Use smaller/faster/local models for extraction, formatting, file inventory, checklist updates, and simple summaries when the platform allows it.
-- If sub-agents must inherit the parent model because the platform does not expose model routing, record that limitation in `blackboard/11-model-routing.md`.
+- If sub-agents must inherit the parent model because the platform does not expose actual different-model execution, record that limitation in `blackboard/11-model-routing.md`.
 - In Max-effort mode, default toward stronger agents, but still avoid obviously wasteful max-model use on trivial work.
 
 ## Memory

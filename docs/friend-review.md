@@ -11,7 +11,7 @@ The goal is not to prove the template is impressive. The goal is to find anythin
 3. Does the template clearly separate implemented files/scripts from optional future tooling?
 4. Does anything sound like it promises a real vector database, knowledge graph, model router, autonomous swarm runner, or security sandbox that is not actually bundled?
 5. Does `./install.sh` create a usable starter project in a blank folder?
-6. Does `./install.sh --check-tools` write an honest graph/vector capability report?
+6. Does `./install.sh --check-tools` write an honest capability report, including that model routing is configured in the AI tool rather than auto-detected through graph/vector environment variables?
 7. Does `.gitignore` block private memory, raw imports, local memory, vector indexes, knowledge graph output, secrets, and env files?
 8. Does the chat importer feel safe and appropriately limited?
 9. Are the delivery report and artifact manifest clear enough to tell current work from drafts or experiments?

@@ -59,6 +59,14 @@ def build_report() -> str:
 
     rows = [
         (
+            "Model routing",
+            (
+                "Not auto-detected",
+                "Configure this in your AI tool; Project OS cannot verify per-agent model routing from PATH.",
+            ),
+            "Record the platform limitation in blackboard/11-model-routing.md.",
+        ),
+        (
             "File search",
             search_status,
             "Install ripgrep if missing. Project OS still works without it, but searches are slower.",
@@ -109,6 +117,7 @@ def build_report() -> str:
             "",
             "- Project OS core works without graph or vector tools.",
             "- Knowledge Graph and Vector Memory become active only when a real tool is installed or connected.",
+            "- Model routing is configured in the AI tool, not through `PROJECT_OS_GRAPH_CMD` or `PROJECT_OS_VECTOR_CMD`.",
             "- If a capability is `Not configured`, the assistant should say that honestly and keep using the markdown blackboard.",
             "- To connect custom tools, set `PROJECT_OS_GRAPH_CMD` and/or `PROJECT_OS_VECTOR_CMD` before running this check.",
             "",

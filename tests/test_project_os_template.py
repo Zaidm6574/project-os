@@ -51,6 +51,8 @@ class SetupProjectOSTests(unittest.TestCase):
             self.assertIn("Automated Optional Tool Check", text)
             self.assertIn("Knowledge Graph", text)
             self.assertIn("Vector Memory", text)
+            self.assertIn("Model routing", text)
+            self.assertIn("not through `PROJECT_OS_GRAPH_CMD`", text)
             self.assertIn("PROJECT_OS_GRAPH_CMD", text)
 
     def test_setup_installs_private_ignore_rules_and_scripts(self):
@@ -176,6 +178,25 @@ class OptionalToolCheckTests(unittest.TestCase):
             text = (Path(tmp) / "blackboard" / "17-capability-preflight.md").read_text(encoding="utf-8")
             self.assertIn("Automated Optional Tool Check", text)
             self.assertIn("Project OS core works without graph or vector tools", text)
+            self.assertIn("Model routing is configured in the AI tool", text)
+            self.assertIn("| Model routing | Not auto-detected |", text)
+            self.assertIn("blackboard/11-model-routing.md", text)
+
+    def test_tool_check_statuses_match_template_labels(self):
+        tool_check = load_module(TOOL_CHECK, "check_optional_tools")
+        template = (ROOT / "blackboard-template" / "17-capability-preflight.md").read_text(encoding="utf-8")
+        label_line = next(line for line in template.splitlines() if line.startswith("Status labels:"))
+        labels = {label.strip().rstrip(".") for label in label_line.removeprefix("Status labels:").split(",")}
+        report = tool_check.build_report()
+        statuses = set()
+        for line in report.splitlines():
+            if not line.startswith("| ") or line.startswith("| Capability") or line.startswith("|---"):
+                continue
+            cells = [cell.strip() for cell in line.strip("|").split("|")]
+            statuses.add(cells[1])
+
+        self.assertTrue(statuses)
+        self.assertLessEqual(statuses, labels)
 
 
 if __name__ == "__main__":

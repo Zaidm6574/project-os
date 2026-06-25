@@ -10,8 +10,9 @@ Key rules:
 - Clarify before building.
 - Keep `blackboard/` as the source of truth.
 - Use Solo Agent Loop, Mini Swarm, or Full Swarm based on project complexity.
-- Use the CFO Agent for model routing and cost visibility.
+- Use the CFO Agent for a model-routing plan and cost visibility.
 - Do not blindly keep every sub-agent on the strongest model if the sub-task is simple.
+- Actual different-model execution depends on Claude or the AI tool; it is not detected through `PROJECT_OS_GRAPH_CMD` or `PROJECT_OS_VECTOR_CMD`.
 - Use memory summaries only with user approval.
 - Never ingest raw private exports by default.
 - Close serious runs with evaluation, delivery, artifacts, cost actuals, and memory harvest.
@@ -24,7 +25,7 @@ If Claude-specific features differ from Codex, write the limitation in `blackboa
 Reality check:
 
 - This is a workflow template, not an autonomous swarm platform by itself.
-- Vector Memory, Knowledge Graph, model routing, browser QA, containers, and network controls are optional capabilities. Mark them as `Not configured`, `Unavailable`, or `Not used` unless they were actually verified.
+- Vector Memory, Knowledge Graph, model routing, browser QA, containers, and network controls are optional capabilities. Mark them as `Not configured`, `Not auto-detected`, `Unavailable`, or `Not used` unless they were actually verified.
 - Do not claim a run is complete because an artifact exists. A serious run also needs evaluation, delivery notes, artifact status, cost notes, and memory harvest.
 - Markdown security rules are guidance, not enforcement. Real sandboxing and network restrictions must be provided by the local toolchain.
 

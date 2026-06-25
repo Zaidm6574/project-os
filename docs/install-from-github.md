@@ -12,6 +12,8 @@ cd project-os-template
 ./install.sh ../my-new-project --check-tools
 ```
 
+Replace `YOUR-USERNAME` with the GitHub account that owns the template repo.
+
 Then open `../my-new-project` in Codex, Claude, or another AI coding tool and say:
 
 ```text
@@ -80,6 +82,8 @@ Advanced users can expose their own tools with:
 export PROJECT_OS_GRAPH_CMD="your-graph-command"
 export PROJECT_OS_VECTOR_CMD="your-vector-command"
 ```
+
+Model routing is configured in the AI tool itself. The optional tool check will not prove that sub-agents can use different models; if the tool inherits the parent model, write that limitation into `blackboard/11-model-routing.md`.
 
 ## What The Installer Does
 
