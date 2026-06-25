@@ -3,16 +3,25 @@ private-memory/
 private-imports/
 local-memory/
 vector-index/
+vector-store/
+.turbovec/
 knowledge-graph/
+graphify-out/
+private-screenshots/
+private-exports/
+raw-exports/
 
 # Secrets
 .env
 .env.*
+.envrc
 secret.env
 *.key
 *.pem
 *.p12
 *.pfx
+id_rsa
+id_ed25519
 secrets/
 secrets
 .secrets
@@ -34,3 +43,8 @@ tmp/
 temp/
 dist/
 build/
+*.sqlite
+*.sqlite3
+*.db
+*.log
+*.tvim

@@ -66,6 +66,8 @@ class SetupProjectOSTests(unittest.TestCase):
             text = gitignore.read_text(encoding="utf-8")
             self.assertIn("private-memory/", text)
             self.assertIn("private-imports/", text)
+            self.assertIn("graphify-out/", text)
+            self.assertIn("*.tvim", text)
             self.assertIn("secrets/", text)
             self.assertTrue((target / "scripts" / "import_chat_history.py").exists())
             self.assertTrue((target / "scripts" / "setup_project_os.py").exists())
@@ -75,6 +77,8 @@ class SetupProjectOSTests(unittest.TestCase):
             self.assertIn("Self-Improvement Loop", (target / "memory" / "self-improvement-loop.md").read_text(encoding="utf-8"))
 
             (target / "private-memory" / "chat-memory.md").write_text("private\n", encoding="utf-8")
+            (target / "graphify-out").mkdir()
+            (target / "graphify-out" / "graph.json").write_text('{"private": true}\n', encoding="utf-8")
             subprocess.run(["git", "init", str(target)], check=True, capture_output=True, text=True)
             status = subprocess.run(
                 ["git", "-C", str(target), "status", "--short", "--untracked-files=all"],
@@ -83,6 +87,7 @@ class SetupProjectOSTests(unittest.TestCase):
                 text=True,
             ).stdout
             self.assertNotIn("private-memory/chat-memory.md", status)
+            self.assertNotIn("graphify-out/graph.json", status)
 
     def test_setup_merges_gitignore_without_overwriting_existing_content(self):
         setup = load_module(SETUP, "setup_project_os")
@@ -107,6 +112,7 @@ class SetupProjectOSTests(unittest.TestCase):
             text = (target / ".gitignore").read_text(encoding="utf-8")
             self.assertIn("private-memory/", text)
             self.assertIn("private-imports/", text)
+            self.assertIn("graphify-out/", text)
             self.assertIn("secrets/", text)
             self.assertIn(".secrets", text)
 
@@ -149,6 +155,7 @@ class ImportChatHistoryTests(unittest.TestCase):
                         "I want to build a project app with sk-FAKEFAKEFAKEFAKEFAKEFAKE.",
                         "I prefer local tools, but my home address is 123 Main Street and my medical condition is private.",
                         "My GitHub token ghp_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE and email friend@example.com should be hidden.",
+                        "My Google key AIzaFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE should be hidden too.",
                     ]
                 ),
                 encoding="utf-8",
@@ -161,6 +168,7 @@ class ImportChatHistoryTests(unittest.TestCase):
             self.assertNotIn("medical condition", text)
             self.assertNotIn("ghp_", text)
             self.assertNotIn("sk-", text)
+            self.assertNotIn("AIza", text)
             self.assertNotIn("friend@example.com", text)
             self.assertIn("Candidate preference lines", text)
 

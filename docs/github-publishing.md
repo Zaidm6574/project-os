@@ -22,7 +22,9 @@ From this folder:
 ```bash
 git init
 git status --short --ignored
-rg -n --hidden --no-ignore -S "/Users|sk-|private key|\\.env" .
+git log --format=fuller --max-count=5
+git remote -v
+rg -n --hidden --no-ignore -S "/Users|[A-Za-z]:\\\\|sk-|sk-proj-|ghp_|github_pat_|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|BEGIN [A-Z ]*PRIVATE KEY|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}|\\.env|graphify-out|private-memory|private-imports" .
 git add .
 git commit -m "Initial Project OS template"
 git branch -M main
@@ -32,7 +34,7 @@ git push -u origin main
 
 Replace `YOUR-USERNAME` with your GitHub username or organization name. If `git remote add origin` says the remote already exists, run `git remote -v` and confirm it points to the intended empty GitHub repo before pushing.
 
-Expected benign `rg` hits include `.gitignore` entries, documentation that mentions privacy checks, tests with fake keys, and redaction regexes in `scripts/import_chat_history.py`. Stop before `git add .` if the scan shows real local paths, real keys, raw exports, or personal notes.
+Expected benign `rg` hits include `.gitignore` entries, documentation that mentions privacy checks, tests with fake keys, and redaction regexes in `scripts/import_chat_history.py`. Stop before `git add .` if the scan shows real local paths, real keys, raw exports, personal notes, or unwanted Git author/remote metadata.
 
 Also read `docs/friend-review.md` before pushing if other people will use the template. It lists the checks a beginner or skeptical reviewer should run.
 

@@ -233,10 +233,12 @@ Private memory folders are ignored by Git in this template and in projects creat
 
 ```bash
 git status --short --ignored
-rg -n --hidden --no-ignore -S "/Users|sk-|private key|\\.env" .
+git log --format=fuller --max-count=5
+git remote -v
+rg -n --hidden --no-ignore -S "/Users|[A-Za-z]:\\\\|sk-|sk-proj-|ghp_|github_pat_|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|BEGIN [A-Z ]*PRIVATE KEY|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}|\\.env|graphify-out|private-memory|private-imports" .
 ```
 
-Expected benign hits include `.gitignore` entries, documentation that mentions privacy checks, tests with fake keys, and redaction regexes in `scripts/import_chat_history.py`. Investigate any real local paths, real keys, raw exports, or personal notes before `git add .`.
+Expected benign hits include `.gitignore` entries, documentation that mentions privacy checks, tests with fake keys, and redaction regexes in `scripts/import_chat_history.py`. Investigate any real local paths, real keys, raw exports, personal notes, or unwanted Git author/remote metadata before `git add .`.
 
 3. From this folder, run:
 
