@@ -89,6 +89,7 @@ Before sharing broadly, add or review:
 - `LICENSE`, so friends know how they may reuse the template.
 - `SECURITY.md`, so people know how to report privacy or security issues.
 - `install.sh`, so a friend can run one local installer after cloning.
-- `scripts/check_optional_tools.py`, so the install path can recommend graph/vector/tool add-ons without claiming they are already active.
+- `scripts/check_optional_tools.py`, so the install path can recommend GraphOS, OSVec, and full-engine add-ons without claiming they are already active.
+- `scripts/install_full_engine.py` and `addons/full-engine/`, so the opt-in engine path is reviewable before publishing.
 - `docs/friend-review.md`, so reviewers know what feedback is useful.
 - A final `git status --short --ignored` check.

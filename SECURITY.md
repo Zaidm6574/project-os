@@ -21,7 +21,7 @@ In scope:
 Out of scope:
 
 - private memories, raw chat exports, or local projects created from the template
-- optional Vector Memory or Knowledge Graph tools that users add later
+- optional OSVec or GraphOS tools that users add later
 - AI tool/provider behavior outside this repository
 
 ## Policy Versus Enforcement

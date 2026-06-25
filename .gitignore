@@ -4,9 +4,13 @@ private-imports/
 local-memory/
 vector-index/
 vector-store/
+memory/store/
 .turbovec/
 knowledge-graph/
 graphify-out/
+brain/shared-brain.jsonl
+central-brain/
+.project-os-central-brain/
 private-screenshots/
 private-exports/
 raw-exports/

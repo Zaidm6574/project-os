@@ -1,6 +1,6 @@
-# Vector Memory
+# OSVec Index
 
-Vector Memory is optional.
+OSVec is Project OS's optional vector and memory layer.
 
 Use it for searchable summaries, preferences, lessons, project patterns, and research snippets.
 
@@ -13,4 +13,3 @@ Index path:
 Stable ID map:
 Last update:
 ```
-

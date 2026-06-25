@@ -27,8 +27,8 @@ Current status:
 
 | Capability | Status | Evidence / Notes |
 |---|---|---|
-| Vector Memory | Not configured |  |
-| Knowledge Graph | Not configured |  |
+| OSVec | Not configured |  |
+| GraphOS | Not configured |  |
 | Model routing | Not checked |  |
 | Browser/UI QA | Not checked |  |
 | External research | Not checked |  |

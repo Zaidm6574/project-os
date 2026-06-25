@@ -18,6 +18,8 @@ It should ask questions, define the scope, and decide whether this is:
 - a Mini Swarm
 - a Full Swarm
 
+If the idea is a website, web app, dashboard, mobile screen, game UI, form, or visual tool, it should also add a UI lane: plan the first usable screen, responsive layout, accessibility checks, visual direction, and browser QA route before approving the build.
+
 ## 3. The blackboard becomes the shared project brain
 
 The assistant should write down:
@@ -41,6 +43,8 @@ Attempt -> Evaluate -> Revise -> Approve
 
 That helps the assistant catch weak plans, weak research, and weak outputs before pretending the work is done.
 
+For interface work, the full engine can use `ui-ux-designer`, `frontend-builder`, and `/ui-review` so the loop checks responsive layout, accessibility, interaction states, and browser QA evidence instead of only checking whether code exists.
+
 ## 5. Serious runs get a closeout
 
 Before calling a serious run complete, the assistant should leave behind:
@@ -51,7 +55,7 @@ Before calling a serious run complete, the assistant should leave behind:
 - an artifact manifest
 - a memory harvest
 
-## 6. Later, you can run a research refresh
+## 6. Later, you can run `/research` or a research refresh
 
 If the market changed, competitors shipped new features, or AI tooling moved forward, you can ask for a refresh pass.
 
@@ -61,8 +65,9 @@ That pass should answer:
 - What is newly expected by users?
 - What tools or approaches are now better?
 - Should the project scope, roadmap, or stack change?
+- Are there Project OS workflow updates worth suggesting?
 
-The refresh result should be logged in `blackboard/20-research-refresh.md`.
+The refresh result should be logged in `blackboard/20-research-refresh.md`. It can recommend updates, but major scope, roadmap, architecture, privacy, publishing, spending, or workflow changes still need human approval before they become the new plan.
 
 ## A Good Beginner Mental Model
 

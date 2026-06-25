@@ -24,11 +24,14 @@ Then produce:
 10. Critical questions before execution
 11. Self-improvement note: approved lessons or safeguards from previous runs that should affect this project
 12. Research refresh note: should this project get a scheduled or manual refresh later, and what would trigger it?
+13. UI lane note for any website, web app, dashboard, mobile screen, game UI, form-heavy tool, or visual artifact: whether `ui-ux-designer`, `frontend-builder`, and `/ui-review` should be used, plus the browser QA route.
 
 Before claiming any capability, separate:
 
 - implemented now: files, scripts, tests, and verified behavior in this project
-- optional future/tooling: Vector Memory, Knowledge Graph, model routing, swarm runners, browser QA, containers, egress filtering, and external research tools that are not configured yet
+- optional future/tooling: OSVec, GraphOS, model routing, swarm runners, browser QA, containers, egress filtering, and external research tools that are not configured yet
+
+For UI projects, do not approve a build plan until it names the target user's primary workflow, the first usable screen, responsive layout expectations, accessibility checks, interaction states, and how browser QA will be verified or marked unavailable.
 
 ## Execution Levels
 
@@ -38,11 +41,11 @@ Goal -> Context -> Draft -> Evaluate -> Revise -> Approve
 
 ### Mini Swarm
 
-Planner + Researcher/Builder + Reviewer
+Planner + Researcher/Builder + Reviewer. For UI projects, include UI/UX planning before frontend build work.
 
 ### Full Swarm
 
-CEO + CFO + Board + Worker Agents + Evaluator + Memory/Blackboard Agent
+CEO + CFO + Board + Worker Agents + Evaluator + Memory/Blackboard Agent. For UI projects, include UI/UX Designer and Frontend Builder packets.
 
 ## Model Routing
 
@@ -59,12 +62,22 @@ Use summaries, not raw dumps.
 Memory order:
 
 1. Current blackboard
-2. Optional Knowledge Graph
-3. Optional Vector Memory or markdown memory index
+2. GraphOS, the native Project OS graph layer, when configured
+3. OSVec, the native Project OS vector/memory layer, or the markdown memory index when OSVec is not configured
 4. User-approved chat memory summaries
 5. Raw private exports only with explicit approval
 
 At kickoff, read approved entries in `blackboard/08-memory-index.md` and `memory/self-improvement-loop.md` if present. State which lessons apply, which do not, and what you will do differently because of them.
+
+## Research Refreshes
+
+If the user asks for `/research`, a research refresh, or Project OS updates, check what changed since the current plan and recommend updates to research notes, risks, cost, model/tool choices, roadmap, or Project OS workflow files.
+
+Do not silently rewrite major decisions. Major scope, roadmap, architecture, privacy, publishing, spending, or workflow changes must be presented as recommended updates for human approval unless the user explicitly asks you to apply them.
+
+## UI Review
+
+If the full engine is installed and the project has a UI, `/ui-review` should check goal fit, responsive layout, accessibility basics, interaction states, visual consistency, and browser QA evidence. For static HTML, use `python3 memory/browser_qa.py <path>` when available.
 
 ## Closeout
 

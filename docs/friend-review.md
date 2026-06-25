@@ -8,13 +8,14 @@ The goal is not to prove the template is impressive. The goal is to find anythin
 
 1. Can you understand what Project OS does from `README.md` without already knowing Codex or Claude?
 2. Do `AGENTS.md` and `CLAUDE.md` describe the same workflow?
-3. Does the template clearly separate implemented files/scripts from optional future tooling?
-4. Does anything sound like it promises a real vector database, knowledge graph, model router, autonomous swarm runner, or security sandbox that is not actually bundled?
+3. Does the template clearly separate starter files, the opt-in full engine add-on, and external tooling?
+4. Does anything sound like it promises OSVec, GraphOS, a real vector database, a graph engine, model router, autonomous swarm runner, or security sandbox that is not actually bundled, installed, or configured?
 5. Does `./install.sh` create a usable starter project in a blank folder?
-6. Does `./install.sh --check-tools` write an honest capability report, including that model routing is configured in the AI tool rather than auto-detected through graph/vector environment variables?
-7. Does `.gitignore` block private memory, raw imports, local memory, vector indexes, knowledge graph output, secrets, and env files?
+6. Does `./install.sh --check-tools` write an honest capability report, including that model routing is configured in the AI tool rather than auto-detected through GraphOS/OSVec environment variables?
+7. Does `.gitignore` block private memory, raw imports, local memory, OSVec/vector indexes, GraphOS/graph output, secrets, and env files?
 8. Does the chat importer feel safe and appropriately limited?
-9. Are the delivery report and artifact manifest clear enough to tell current work from drafts or experiments?
+9. Are `/research` and research-refresh docs clear that Project OS can suggest updates without silently changing major decisions?
+10. Are the delivery report and artifact manifest clear enough to tell current work from drafts or experiments?
 
 ## Quick Test
 
@@ -29,7 +30,16 @@ git -C "$tmpdir/demo-project" init
 git -C "$tmpdir/demo-project" status --short --ignored
 ```
 
-Expected result: the demo project should contain `AGENTS.md`, `CLAUDE.md`, `.gitignore`, `prompts/`, `scripts/`, `blackboard/`, `runs/`, `outputs/`, `memory/`, `private-memory/`, and `private-imports/`. Private folders should be ignored by Git. The capability preflight should contain an automated optional tool check.
+Expected result: the demo project should contain `AGENTS.md`, `CLAUDE.md`, `.gitignore`, `prompts/`, `scripts/`, `addons/`, `blackboard/`, `runs/`, `outputs/`, `memory/`, `private-memory/`, and `private-imports/`. Private folders should be ignored by Git. The capability preflight should contain an automated optional tool check.
+
+To review the full engine path too:
+
+```bash
+./install.sh "$tmpdir/full-engine-demo" --full-engine --claude-engine --check-tools
+test -f "$tmpdir/full-engine-demo/memory/osvec_adapter.py"
+test -f "$tmpdir/full-engine-demo/brain/brain.py"
+test -f "$tmpdir/full-engine-demo/.claude/commands/new-run.md"
+```
 
 ## Privacy Scan
 

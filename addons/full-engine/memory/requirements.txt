@@ -1,0 +1,7 @@
+# Project OS memory layer
+numpy>=1.24
+# Optional but recommended for fast, compressed local vector search.
+# Without it, osvec_adapter.py falls back to a numpy brute-force index.
+turbovec>=0.8.0
+# Optional: real embeddings (swap into osvec_adapter.py's Embedder).
+# sentence-transformers>=2.2

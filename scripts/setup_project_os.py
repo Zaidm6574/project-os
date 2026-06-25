@@ -63,6 +63,7 @@ def bootstrap(target: Path, force: bool) -> list[str]:
     results.append(merge_gitignore(TEMPLATE_ROOT / ".gitignore", target / ".gitignore", force))
     results.extend(copy_tree_files(TEMPLATE_ROOT / "prompts", target / "prompts", force))
     results.extend(copy_tree_files(TEMPLATE_ROOT / "scripts", target / "scripts", force))
+    results.extend(copy_tree_files(TEMPLATE_ROOT / "addons", target / "addons", force))
     results.extend(copy_tree_files(TEMPLATE_ROOT / "blackboard-template", target / "blackboard", force))
     results.extend(copy_tree_files(TEMPLATE_ROOT / "runs-template", target / "runs", force))
     results.extend(copy_tree_files(TEMPLATE_ROOT / "outputs-template", target / "outputs", force))

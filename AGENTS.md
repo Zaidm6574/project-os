@@ -13,25 +13,28 @@ When the user says `$project-os`, `/project`, `project os`, or asks to start, pl
 7. Separate AI workflow cost from product/app cost and human time.
 8. Run capability preflight before serious work.
 9. Use shared memory safely. Use summaries, not raw private dumps.
-10. Use optional Vector Memory only when configured.
-11. Use optional Knowledge Graph only when configured.
+10. Use OSVec only when configured.
+11. Use GraphOS only when configured.
 12. Use one context packet per file in `blackboard/packets/` for Mini Swarm and Full Swarm work.
 13. Run evaluate -> reject/approve -> revise loops before finalizing important outputs.
 14. Close serious runs with cost actuals, evaluation log, delivery report, artifact manifest, and memory harvest.
 15. Ask for human approval before spending money, publishing, deleting important work, contacting people, submitting forms, or making major commitments.
 16. Use the self-improvement loop at closeout: harvest approved lessons, user preferences, reusable project patterns, and next-kickoff safeguards.
 17. When a project may have gone stale, run a research refresh and log what changed before pushing ahead with the old plan.
+18. For websites, web apps, dashboards, games with UI, mobile screens, forms, and visual tools, add a UI/UX lane before or alongside build work: use `ui-ux-designer`, `frontend-builder`, and `/ui-review` when the full engine is installed; otherwise write equivalent packets manually.
 
 ## Reality Check
 
 Project OS is a workflow template. Do not overclaim capabilities.
 
 - Say `implemented` only for files, scripts, tests, and behaviors that exist and were verified.
-- Say `optional` for Vector Memory, Knowledge Graph, actual different-model execution, browser QA, external research tools, and swarm runners unless those tools are actually configured in the current project.
+- Say `optional` for OSVec, GraphOS, actual different-model execution, browser QA, external research tools, and swarm runners unless those tools are actually configured in the current project.
 - If a platform cannot route sub-agents to different models, record that in `blackboard/11-model-routing.md`.
-- If Knowledge Graph, Vector Memory, browser QA, containers, or network controls were not actually used, record `Not used`, `Unavailable`, or `Not configured`; do not imply they ran.
+- If GraphOS, OSVec, browser QA, containers, or network controls were not actually used, record `Not used`, `Unavailable`, or `Not configured`; do not imply they ran.
+- If `memory/build_graph.py`, `memory/osvec_adapter.py`, or legacy `memory/turbovec_adapter.py` exists, do not say the graph/vector layer is unavailable. Say it is available locally but may need activation: build GraphOS with `python3 memory/build_graph.py --root blackboard` or a run folder, and verify OSVec with `python3 memory/osvec_adapter.py selftest` or the legacy adapter selftest.
 - Markdown rules are not security enforcement. Treat sandboxing, egress filtering, and container isolation as separate capabilities that must be verified before relying on them.
 - Keep current artifacts separate from draft, test, superseded, or broken artifacts.
+- UI quality is a real deliverable. For frontend work, record responsive layout, accessibility, interaction states, visual direction, and browser QA status instead of treating UI polish as optional.
 
 ## Friend Review Mode
 
@@ -73,6 +76,7 @@ Default roles:
 - CEO Agent
 - CFO Agent
 - Board Agents
+- UI/UX Designer and Frontend Builder when the project has a user interface
 - Worker Agents
 - Evaluator Agent
 - Memory and Blackboard Agent
@@ -91,6 +95,8 @@ Use a research refresh when:
 - you suspect the plan is becoming stale
 
 The refresh is a focused update pass, not a full restart.
+
+If the assistant supports slash commands or prompt aliases, `/research refresh` should run this same refresh workflow.
 
 Check:
 
@@ -111,6 +117,21 @@ Log the result in:
 
 If web or market facts may have changed, use current research instead of stale memory.
 
+## UI/UX And Frontend Work
+
+When a run includes a user interface, plan the interface before approving implementation.
+
+Use the UI lane to define:
+
+- primary user workflow and first usable screen
+- information hierarchy, navigation, controls, and expected states
+- responsive layout for mobile and desktop
+- accessibility basics: labels, keyboard path, focus states, contrast, touch targets, and reduced motion when relevant
+- visual direction that fits the domain rather than generic decoration
+- browser QA checks, screenshots, or manual viewport checks needed before approval
+
+If the full engine is installed, use `ui-ux-designer` for the design packet, `frontend-builder` for implementation, and `/ui-review` for the UI quality gate. For web artifacts, run `python3 memory/browser_qa.py <path>` when available and log whether browser QA passed, failed, or was unavailable.
+
 ## Model Routing Plan
 
 Do not blindly put every sub-agent on the strongest model.
@@ -127,12 +148,14 @@ Memory is optional and local-first.
 Use this order:
 
 1. Current project blackboard.
-2. Optional Knowledge Graph.
-3. Optional Vector Memory or `blackboard/08-memory-index.md`.
+2. Optional GraphOS, powered by Graphify when configured.
+3. Optional OSVec, powered by TurboVec when configured, or `blackboard/08-memory-index.md`.
 4. User-approved chat memory summaries.
 5. Raw private exports only when the user explicitly asks.
 
 Never store secrets, passwords, API keys, private credentials, or unnecessary sensitive personal data.
+
+Activation guard: if a capability check says no graph/vector artifact exists but local full-engine scripts are present, run or recommend the local activation commands before falling back to markdown-only memory. Do not confuse missing external Graphify/TurboVec CLIs with missing Project OS full-engine memory.
 
 ## Self-Improvement Loop
 
