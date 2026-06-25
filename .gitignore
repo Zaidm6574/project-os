@@ -1,0 +1,36 @@
+# Private memory and imports
+private-memory/
+private-imports/
+local-memory/
+vector-index/
+knowledge-graph/
+
+# Secrets
+.env
+.env.*
+secret.env
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+secrets
+.secrets
+secrets.*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
+# Build/output scratch
+tmp/
+temp/
+dist/
+build/
