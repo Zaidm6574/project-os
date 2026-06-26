@@ -53,7 +53,7 @@ Implemented now:
 - `install.sh`, a small friend-friendly installer that runs the setup script from a cloned GitHub repo.
 - `--check-tools`, an optional install flag that checks for graph, vector, search, browser, container, and local AI tooling.
 - `--full-engine`, an explicit add-on install path for Project OS run scripts, GraphOS, OSVec, cost actuals, validation, and optional Claude Code commands.
-- Optional UI/UX workflow definitions in the full engine: `ui-ux-designer`, `frontend-builder`, and `/ui-review` for web apps, dashboards, visual tools, and responsive/browser QA checks.
+- Optional workflow definitions in the full engine: `context-scout` for low-cost blackboard read gates, plus `ui-ux-designer`, `frontend-builder`, and `/ui-review` for web apps, dashboards, visual tools, and responsive/browser QA checks.
 - `scripts/setup_project_os.py`, which copies the Project OS files into a target project without overwriting existing files unless `--force` is used.
 - `scripts/check_optional_tools.py`, a local-only capability check that writes recommendations into `blackboard/17-capability-preflight.md`.
 - `scripts/install_full_engine.py`, a local-only opt-in installer for the full engine add-on.
@@ -198,6 +198,8 @@ python3 scripts/install_full_engine.py --target .
 The add-on copies local scripts and optional Claude definitions into the target project. If central brain is requested, it creates a local JSONL exchange folder and a `brain/CENTRAL_BRAIN.md` note with push/pull commands. It does not install Python packages, use the network, publish anything, import raw chats, or overwrite existing files unless `--force` is passed.
 
 For UI projects, the Claude definitions include `ui-ux-designer`, `frontend-builder`, and `/ui-review`. Use them to plan the first usable screen, responsive layout, accessibility basics, interaction states, visual direction, and browser QA evidence.
+
+For larger projects, the Claude definitions also include `context-scout`, a low-cost reader agent. Use it on the smallest available model to summarize `Context Used` before more expensive agents plan, build, or evaluate.
 
 To save an approved memory from a chat:
 

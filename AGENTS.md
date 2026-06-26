@@ -36,6 +36,23 @@ Project OS is a workflow template. Do not overclaim capabilities.
 - Keep current artifacts separate from draft, test, superseded, or broken artifacts.
 - UI quality is a real deliverable. For frontend work, record responsive layout, accessibility, interaction states, visual direction, and browser QA status instead of treating UI polish as optional.
 
+## Blackboard Read Gate
+
+Do not act from memory on serious Project OS work. Before planning, building, reviewing, delivering, or approving, read the current blackboard files that govern the task and report a short `Context Used` summary.
+
+For Mini Swarm and Full Swarm runs, use `context-scout` on the smallest available model when subagents are available. Its job is to read the blackboard cheaply and hand the heavier agents a compact context packet. If the host cannot run subagents or route smaller models, the main agent must do the read gate itself and record that limitation in `blackboard/11-model-routing.md`.
+
+Minimum read set for most work:
+
+- `blackboard/00-project-goal.md`
+- `blackboard/03-decisions.md`
+- `blackboard/04-risks.md`
+- `blackboard/06-open-questions.md`
+- `blackboard/07-approved-plan.md`
+- relevant packets in `blackboard/packets/`
+
+Do not overwrite early decisions or risks. Decision and risk logs are append-only: add a new dated entry and mark older entries `Superseded` instead of deleting or rewriting them.
+
 ## Friend Review Mode
 
 When the user asks for critique, publishing readiness, or friend review, act as an auditor first.

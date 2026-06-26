@@ -42,6 +42,7 @@ class SetupProjectOSTests(unittest.TestCase):
             self.assertTrue((target / "addons" / "full-engine" / "staged" / "commands" / "ui-review.md").exists())
             self.assertTrue((target / "addons" / "full-engine" / "staged" / "agents" / "ui-ux-designer.md").exists())
             self.assertTrue((target / "addons" / "full-engine" / "staged" / "agents" / "frontend-builder.md").exists())
+            self.assertTrue((target / "addons" / "full-engine" / "staged" / "agents" / "context-scout.md").exists())
 
     def test_install_script_check_tools_writes_capability_report(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -88,6 +89,7 @@ class SetupProjectOSTests(unittest.TestCase):
             self.assertTrue((target / ".claude" / "agents" / "project-os-ceo.md").exists())
             self.assertTrue((target / ".claude" / "agents" / "ui-ux-designer.md").exists())
             self.assertTrue((target / ".claude" / "agents" / "frontend-builder.md").exists())
+            self.assertTrue((target / ".claude" / "agents" / "context-scout.md").exists())
 
             preflight = target / "blackboard" / "17-capability-preflight.md"
             text = preflight.read_text(encoding="utf-8")
@@ -141,6 +143,49 @@ class SetupProjectOSTests(unittest.TestCase):
         self.assertIn("/ui-review", combined)
         self.assertIn("responsive layout", combined)
         self.assertIn("browser QA", combined)
+
+    def test_discipline_hardening_guidance_is_available(self):
+        files = [
+            ROOT / "AGENTS.md",
+            ROOT / "CLAUDE.md",
+            ROOT / "prompts" / "project-os-kickoff.md",
+            ROOT / "addons" / "full-engine" / "staged" / "commands" / "kickoff.md",
+            ROOT / "addons" / "full-engine" / "staged" / "commands" / "status.md",
+            ROOT / "addons" / "full-engine" / "staged" / "commands" / "deliver.md",
+            ROOT / "addons" / "full-engine" / "staged" / "commands" / "ui-review.md",
+            ROOT / "addons" / "full-engine" / "staged" / "agents" / "builder.md",
+            ROOT / "addons" / "full-engine" / "staged" / "agents" / "evaluator.md",
+            ROOT / "addons" / "full-engine" / "staged" / "agents" / "project-os-ceo.md",
+        ]
+        combined = "\n".join(path.read_text(encoding="utf-8") for path in files)
+
+        self.assertIn("Blackboard Read Gate", combined)
+        self.assertIn("context-scout", combined)
+        self.assertIn("smallest available model", combined)
+        self.assertIn("Context Used", combined)
+        self.assertIn("Do not act from memory", combined)
+        self.assertIn("append-only", combined)
+        self.assertIn("superseded", combined)
+
+    def test_decision_and_risk_templates_are_append_only(self):
+        decisions = (ROOT / "blackboard-template" / "03-decisions.md").read_text(encoding="utf-8")
+        risks = (ROOT / "blackboard-template" / "04-risks.md").read_text(encoding="utf-8")
+
+        self.assertIn("Append-only", decisions)
+        self.assertIn("Do not delete", decisions)
+        self.assertIn("Superseded", decisions)
+        self.assertIn("Append-only", risks)
+        self.assertIn("Do not delete", risks)
+        self.assertIn("Superseded", risks)
+
+    def test_ui_review_requires_real_qa_evidence_before_approval(self):
+        command = (ROOT / "addons" / "full-engine" / "staged" / "commands" / "ui-review.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("Approved only with real build/browser QA evidence", command)
+        self.assertIn("Draft when browser QA was not run", command)
+        self.assertIn("Rejected when QA finds blocking UI issues", command)
 
     def test_installed_full_engine_can_save_chat_summary_to_brain(self):
         with tempfile.TemporaryDirectory() as tmp:

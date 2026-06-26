@@ -10,6 +10,10 @@ Use this command for websites, web apps, dashboards, mobile screens, browser gam
 
 By default, review and write findings. Only apply fixes when the user's request explicitly asks you to revise or build the UI.
 
+## Blackboard Read Gate
+
+Do not act from memory. Read the goal, approved plan, decisions, risks, latest UI/build/evaluator packets, and the target artifact or app files. Include `Context Used`. For large projects, use `context-scout` on the smallest available model to prepare the compact read summary before the UI reviewer or frontend builder acts.
+
 ## What to do
 
 1. Read the goal, approved plan, risks, latest packets, and the target artifact or app files.
@@ -24,6 +28,12 @@ python3 memory/browser_qa.py <path>
 
 6. For dev-server apps, run the project's build/test command first, then use browser or Playwright QA when available. Check mobile and desktop viewports.
 7. Log missing tools honestly. Do not claim browser QA ran if it did not.
+
+## Verdict Rules
+
+- Approved only with real build/browser QA evidence: command output, screenshot review, browser observation, or a clearly documented manual viewport check.
+- Draft when browser QA was not run, the target app could not be opened, or evidence is missing.
+- Rejected when QA finds blocking UI issues such as overlapping controls, broken navigation, inaccessible primary actions, missing critical states, or broken local assets.
 
 ## Review checklist
 

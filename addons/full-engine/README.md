@@ -14,7 +14,7 @@ It is opt-in. The normal `install.sh` starter path does not install this engine 
 - `memory/osvec_adapter.py` for OSVec local memory, powered by TurboVec when installed and a numpy fallback otherwise.
 - `brain/brain.py` for a local shared-brain JSONL exchange, including `save-chat` for approved chat summaries.
 - `brain/central_brain.py` for optional cross-project central brain sync.
-- Optional `.claude/agents` and `.claude/commands` definitions for Claude Code users, including `ui-ux-designer`, `frontend-builder`, and `/ui-review` for interface projects.
+- Optional `.claude/agents` and `.claude/commands` definitions for Claude Code users, including `context-scout` for low-cost blackboard read gates and `ui-ux-designer`, `frontend-builder`, and `/ui-review` for interface projects.
 - `blackboard/21-agent-roster.md` so goal locking and goal drift checks have a public-template-safe home.
 
 ## Install
@@ -69,6 +69,10 @@ When the Claude Code agents and slash commands are installed, interface projects
 - `/ui-review` reviews a UI artifact or plan and writes a packet with responsive layout, accessibility, and browser QA findings.
 
 This layer is local and optional. It does not download design tools or overwrite a project's existing frontend setup.
+
+## Low-Cost Read Gate
+
+Use `context-scout` before expensive or high-reasoning agents when the host supports subagents. It runs on the smallest available model and returns a compact `Context Used` packet from the blackboard, so heavier agents do not waste context or cost rereading the whole project.
 
 ## Why This Is Separate
 

@@ -7,6 +7,10 @@ description: Close out a run — delivery report, memory/graph wiring, cost actu
 
 Run this at the end of a run to make closure **real**. Closure is not "I think we're done" — it is **memory actually firing** (brain + OSVec + GraphOS) and then a mechanical gate passing. Do not declare a run done until `memory/validate_run.py` prints `VALIDATE: PASS`.
 
+## Blackboard Read Gate
+
+Do not act from memory. Before delivery, read the run goal, approved plan, decisions, risks, artifact manifest, evaluation log, and latest packets. Include `Context Used` in the delivery summary. Use `context-scout` on the smallest available model when the run has enough packets that a cheap scout saves context.
+
 ## What to do (in order)
 
 1. **Fill the delivery report.** Complete `runs/<slug>/13-delivery-report.md`:

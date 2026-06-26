@@ -5,6 +5,10 @@ allowed-tools: Read Grep Glob
 
 Give me a concise status read of the current project from the blackboard. Do not change anything.
 
+## Blackboard Read Gate
+
+Do not act from memory. Read the files below and include a `Context Used` line that names them. If the folder has a lot of packets, use `context-scout` on the smallest available model to summarize the relevant ones.
+
 Read and summarize:
 - `blackboard/00-project-goal.md` — the canonical goal, current tier, cost mode, phase.
 - `blackboard/07-approved-plan.md` — active wave, next actions, pending human checkpoints.

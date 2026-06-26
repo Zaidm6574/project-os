@@ -32,6 +32,14 @@ Reality check:
 - Do not call UI work done without checking responsive layout, accessibility basics, interaction states, and browser QA status.
 - Markdown security rules are guidance, not enforcement. Real sandboxing and network restrictions must be provided by the local toolchain.
 
+Blackboard Read Gate:
+
+- Do not act from memory on serious work. Read the current goal, decisions, risks, open questions, approved plan, and relevant packets first.
+- Report a compact `Context Used` summary before planning, building, reviewing, delivering, or approving.
+- When available, launch `context-scout` on the smallest available model to do this read cheaply before heavier agents act.
+- If small-model routing or subagents are unavailable, do the read gate yourself and record the limitation.
+- Keep decisions and risks append-only: append dated updates and mark old entries `Superseded` instead of deleting or overwriting them.
+
 Execution levels:
 
 - Solo Agent Loop: Goal -> Context -> Draft -> Evaluate -> Revise -> Approve.
