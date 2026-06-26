@@ -158,6 +158,19 @@ class SetupProjectOSTests(unittest.TestCase):
         self.assertNotIn("project-os-template.git", combined)
         self.assertIn("python3 -m unittest discover -s tests -v", workflow)
 
+    def test_ai_reviewer_doc_is_part_of_sharing_bundle(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        friend_review = (ROOT / "docs" / "friend-review.md").read_text(encoding="utf-8")
+        reviewer_doc = (ROOT / "docs" / "for-ai-reviewers.md").read_text(encoding="utf-8")
+
+        self.assertIn("docs/for-ai-reviewers.md", readme)
+        self.assertIn("docs/for-ai-reviewers.md", friend_review)
+        self.assertIn("Starter Vs Full Engine", reviewer_doc)
+        self.assertIn("Implemented Now", reviewer_doc)
+        self.assertIn("Optional Or External", reviewer_doc)
+        self.assertIn("GitHub About Settings", reviewer_doc)
+        self.assertIn("Privacy-first AI project workflow", reviewer_doc)
+
     def test_discipline_hardening_guidance_is_available(self):
         files = [
             ROOT / "AGENTS.md",

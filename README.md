@@ -262,6 +262,7 @@ If you are sharing this with friends for critique, send them:
 - `README.md`
 - `AGENTS.md`
 - `CLAUDE.md`
+- `docs/for-ai-reviewers.md`
 - `docs/friend-review.md`
 - `docs/github-publishing.md`
 - `docs/install-from-github.md`
@@ -273,6 +274,8 @@ If you are sharing this with friends for critique, send them:
 - `addons/full-engine/README.md`
 
 Ask reviewers to check whether the workflow is understandable, honest about what is implemented, safe with private data, and easy to run in a blank test folder.
+
+If an AI reviewer cannot browse GitHub reliably, paste `docs/for-ai-reviewers.md` first. It gives the short architecture summary and the implemented-versus-optional boundary without requiring the whole README.
 
 ## Optional Chat Memory Import
 

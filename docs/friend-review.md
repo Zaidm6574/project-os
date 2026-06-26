@@ -4,6 +4,8 @@ Use this when sharing Project OS with a friend for critique.
 
 The goal is not to prove the template is impressive. The goal is to find anything confusing, unsafe, overclaimed, or annoying before more people use it.
 
+If an AI reviewer cannot browse GitHub, paste `docs/for-ai-reviewers.md` first and use this file as the human checklist.
+
 ## What To Review
 
 1. Can you understand what Project OS does from `README.md` without already knowing Codex or Claude?
