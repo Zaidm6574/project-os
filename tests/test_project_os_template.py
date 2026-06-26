@@ -144,6 +144,20 @@ class SetupProjectOSTests(unittest.TestCase):
         self.assertIn("responsive layout", combined)
         self.assertIn("browser QA", combined)
 
+    def test_public_onboarding_uses_live_repo_name_and_ci(self):
+        files = [
+            ROOT / "README.md",
+            ROOT / "docs" / "install-from-github.md",
+            ROOT / "docs" / "github-publishing.md",
+        ]
+        combined = "\n".join(path.read_text(encoding="utf-8") for path in files)
+        workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
+
+        self.assertIn("github.com/Zaidm6574/project-os.git", combined)
+        self.assertIn("github.com/YOUR-USERNAME/project-os.git", combined)
+        self.assertNotIn("project-os-template.git", combined)
+        self.assertIn("python3 -m unittest discover -s tests -v", workflow)
+
     def test_discipline_hardening_guidance_is_available(self):
         files = [
             ROOT / "AGENTS.md",

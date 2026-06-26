@@ -1,5 +1,7 @@
 # Project OS Public Template
 
+[![Tests](https://github.com/Zaidm6574/project-os/actions/workflows/test.yml/badge.svg)](https://github.com/Zaidm6574/project-os/actions/workflows/test.yml)
+
 Turn a messy idea into a guided AI project with planning, research, review, memory, and closeout already structured.
 
 Project OS is a privacy-first workflow template for people who want their AI tool to act less like a random chatbot and more like a careful project operator.
@@ -219,12 +221,12 @@ python3 brain/central_brain.py pull --path ~/.project-os/central-brain --project
 Requirements: Git, Python 3, and an AI coding tool that reads `AGENTS.md` or `CLAUDE.md`.
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/project-os-template.git
-cd project-os-template
+git clone https://github.com/Zaidm6574/project-os.git
+cd project-os
 ./install.sh ../my-new-project --check-tools
 ```
 
-Replace `YOUR-USERNAME` with the GitHub account that owns the template repo.
+If you are using a fork, replace `Zaidm6574` with the GitHub account that owns the fork.
 
 Then open `../my-new-project` in your AI coding tool and say:
 
@@ -311,7 +313,7 @@ git init
 git add .
 git commit -m "Initial Project OS template"
 git branch -M main
-git remote add origin https://github.com/YOUR-USERNAME/project-os-template.git
+git remote add origin https://github.com/YOUR-USERNAME/project-os.git
 git push -u origin main
 ```
 

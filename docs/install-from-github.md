@@ -7,12 +7,12 @@ Use this guide when someone wants to try Project OS from your public GitHub repo
 This is the simplest friend setup.
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/project-os-template.git
-cd project-os-template
+git clone https://github.com/Zaidm6574/project-os.git
+cd project-os
 ./install.sh ../my-new-project --check-tools
 ```
 
-Replace `YOUR-USERNAME` with the GitHub account that owns the template repo.
+If you are using a fork, replace `Zaidm6574` with the GitHub account that owns the fork.
 
 Then open `../my-new-project` in Codex, Claude, or another AI coding tool and say:
 

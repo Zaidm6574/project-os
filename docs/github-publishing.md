@@ -10,7 +10,7 @@ On GitHub, create a new empty repository.
 
 Recommended names:
 
-- `project-os-template`
+- `project-os`
 - `ai-project-os`
 - `agent-project-os`
 - `ai-workflow-starter`
@@ -28,7 +28,7 @@ rg -n --hidden --no-ignore -S "/Users|[A-Za-z]:\\\\|sk-|sk-proj-|ghp_|github_pat
 git add .
 git commit -m "Initial Project OS template"
 git branch -M main
-git remote add origin https://github.com/YOUR-USERNAME/project-os-template.git
+git remote add origin https://github.com/YOUR-USERNAME/project-os.git
 git push -u origin main
 ```
 
