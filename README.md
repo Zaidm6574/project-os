@@ -53,6 +53,7 @@ Implemented now:
 - Markdown blackboard templates for goals, decisions, risks, cost, model routing, evaluation, delivery, artifacts, memory, research routing, capability preflight, and research refresh.
 - A self-improvement loop template for harvesting approved lessons and next-kickoff checks after each serious run.
 - `install.sh`, a small friend-friendly installer that runs the setup script from a cloned GitHub repo.
+- `--dry-run`, an install flag that prints what would be copied without writing files.
 - `--check-tools`, an optional install flag that checks for graph, vector, search, browser, container, and local AI tooling.
 - `--full-engine`, an explicit add-on install path for Project OS run scripts, GraphOS, OSVec, cost actuals, validation, and optional Claude Code commands.
 - Optional workflow definitions in the full engine: `context-scout` for low-cost blackboard read gates, plus `ui-ux-designer`, `frontend-builder`, and `/ui-review` for web apps, dashboards, visual tools, and responsive/browser QA checks.
@@ -244,6 +245,61 @@ Later, when the project has been running for a while, you can also say:
 
 ```text
 Use the research refresh workflow and tell me what changed.
+```
+
+## 5-Minute Demo
+
+Before copying anything, preview the install:
+
+```bash
+./install.sh ../demo-project --dry-run
+```
+
+The first lines look like this:
+
+```text
+Project OS setup dry run complete.
+- would create /tmp/project-os-demo
+- would write /tmp/project-os-demo/AGENTS.md
+- would write /tmp/project-os-demo/CLAUDE.md
+- would write /tmp/project-os-demo/.gitignore
+- would write /tmp/project-os-demo/prompts/project-os-kickoff.md
+```
+
+Before:
+
+```text
+demo-project/
+  (folder does not exist yet)
+```
+
+Run the real install:
+
+```bash
+./install.sh ../demo-project --check-tools
+```
+
+After:
+
+```text
+demo-project/
+  AGENTS.md
+  CLAUDE.md
+  .gitignore
+  blackboard/
+  memory/
+  outputs/
+  prompts/
+  runs/
+  scripts/
+  private-memory/      # ignored by Git
+  private-imports/     # ignored by Git
+```
+
+Then open `../demo-project` in your AI coding tool and say:
+
+```text
+/project Build a personal habit tracker for ADHD with web-first scope
 ```
 
 ## Claude And Codex Compatibility

@@ -33,6 +33,12 @@ python3 scripts/install_full_engine.py --target /path/to/project --claude
 
 The installer is local-only. It does not use the network, install packages, publish anything, or overwrite existing files unless `--force` is passed.
 
+To preview the add-on files first:
+
+```bash
+python3 scripts/install_full_engine.py --target /path/to/project --dry-run
+```
+
 ## Save Chat To Brain
 
 After the full engine is installed:

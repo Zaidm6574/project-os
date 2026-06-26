@@ -32,6 +32,7 @@ Full engine mode is explicit opt-in with `--full-engine`:
 ## Implemented Now
 
 - Safe starter installation into blank or existing projects.
+- Dry-run installation previews for starter and full-engine files.
 - Optional capability preflight that checks tools without installing anything.
 - Safe chat export scanning with secret redaction and private output defaults.
 - Blackboard Read Gate guidance so agents read project files before acting from memory.

@@ -128,6 +128,48 @@ class SetupProjectOSTests(unittest.TestCase):
             self.assertIn("Project ID: `demo`", marker_text)
             self.assertIn(str(central), marker_text)
 
+    def test_install_script_force_reaches_full_engine_installer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "project"
+            existing = target / "memory" / "new_run.py"
+            existing.parent.mkdir(parents=True)
+            existing.write_text("# keep me until forced\n", encoding="utf-8")
+
+            result = subprocess.run(
+                ["sh", str(INSTALL), str(target), "--force", "--full-engine"],
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotEqual(existing.read_text(encoding="utf-8"), "# keep me until forced\n")
+            self.assertIn("Project OS full engine add-on install complete.", result.stdout)
+
+    def test_install_script_dry_run_does_not_create_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "dry-run-project"
+
+            result = subprocess.run(
+                [
+                    "sh",
+                    str(INSTALL),
+                    str(target),
+                    "--dry-run",
+                    "--full-engine",
+                    "--claude-engine",
+                    "--check-tools",
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(target.exists())
+            self.assertIn("Project OS setup dry run complete.", result.stdout)
+            self.assertIn("would write", result.stdout)
+            self.assertIn("Project OS full engine add-on dry run complete.", result.stdout)
+            self.assertIn("Dry run: would run optional tool check", result.stdout)
+
     def test_ui_workflow_guidance_is_available_for_web_app_runs(self):
         files = [
             ROOT / "AGENTS.md",
@@ -170,6 +212,15 @@ class SetupProjectOSTests(unittest.TestCase):
         self.assertIn("Optional Or External", reviewer_doc)
         self.assertIn("GitHub About Settings", reviewer_doc)
         self.assertIn("Privacy-first AI project workflow", reviewer_doc)
+
+    def test_readme_includes_trust_building_demo_and_dry_run(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("5-Minute Demo", readme)
+        self.assertIn("./install.sh ../demo-project --dry-run", readme)
+        self.assertIn("Project OS setup dry run complete.", readme)
+        self.assertIn("Before", readme)
+        self.assertIn("After", readme)
 
     def test_discipline_hardening_guidance_is_available(self):
         files = [

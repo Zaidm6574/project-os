@@ -14,6 +14,14 @@ cd project-os
 
 If you are using a fork, replace `Zaidm6574` with the GitHub account that owns the fork.
 
+To preview the files first, run:
+
+```bash
+./install.sh ../my-new-project --dry-run
+```
+
+Dry run prints the files and folders that would be created or overwritten. It does not create the target project or run the optional tool check.
+
 Then open `../my-new-project` in Codex, Claude, or another AI coding tool and say:
 
 ```text
@@ -47,6 +55,12 @@ To overwrite Project OS template files on purpose:
 
 ```bash
 ./install.sh /path/to/existing-project --force
+```
+
+To inspect that overwrite before doing it:
+
+```bash
+./install.sh /path/to/existing-project --force --dry-run
 ```
 
 The installer merges `.gitignore` privacy rules instead of replacing the whole file.
@@ -110,6 +124,8 @@ To connect a central brain at the same time:
 ```
 
 This is additive and local-only. It copies `memory/`, `brain/`, and `blackboard/21-agent-roster.md` add-on files into the project, and it does not overwrite existing files unless `--force` is passed.
+
+Use `--dry-run` with `--full-engine` when you want to see those add-on files before copying them.
 
 For UI projects, use `/ui-review` after planning or building to record responsive layout, accessibility, interaction-state, visual-quality, and browser QA findings in a Project OS packet.
 

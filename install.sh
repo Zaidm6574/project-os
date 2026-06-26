@@ -2,10 +2,11 @@
 set -eu
 
 show_usage() {
-  printf '%s\n' "Usage: ./install.sh /path/to/target-project [--force] [--check-tools] [--full-engine] [--claude-engine] [--central-brain PATH] [--project-id ID]"
+  printf '%s\n' "Usage: ./install.sh /path/to/target-project [--force] [--dry-run] [--check-tools] [--full-engine] [--claude-engine] [--central-brain PATH] [--project-id ID]"
   printf '%s\n' ""
   printf '%s\n' "Examples:"
   printf '%s\n' "  ./install.sh ../my-new-project"
+  printf '%s\n' "  ./install.sh ../my-new-project --dry-run"
   printf '%s\n' "  ./install.sh . --force"
   printf '%s\n' "  ./install.sh ../my-new-project --check-tools"
   printf '%s\n' "  ./install.sh ../my-new-project --full-engine --claude-engine"
@@ -20,6 +21,7 @@ fi
 TARGET=$1
 shift
 FORCE=0
+DRY_RUN=0
 CHECK_TOOLS=0
 FULL_ENGINE=0
 CLAUDE_ENGINE=0
@@ -30,6 +32,9 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --force)
       FORCE=1
+      ;;
+    --dry-run)
+      DRY_RUN=1
       ;;
     --check-tools)
       CHECK_TOOLS=1
@@ -87,11 +92,14 @@ if [ ! -f "$SETUP_SCRIPT" ]; then
   exit 1
 fi
 
+set -- --target "$TARGET"
 if [ "$FORCE" = "1" ]; then
-  "$PYTHON" "$SETUP_SCRIPT" --target "$TARGET" --force
-else
-  "$PYTHON" "$SETUP_SCRIPT" --target "$TARGET"
+  set -- "$@" --force
 fi
+if [ "$DRY_RUN" = "1" ]; then
+  set -- "$@" --dry-run
+fi
+"$PYTHON" "$SETUP_SCRIPT" "$@"
 
 if [ "$FULL_ENGINE" = "1" ]; then
   if [ ! -f "$FULL_ENGINE_SCRIPT" ]; then
@@ -99,6 +107,12 @@ if [ "$FULL_ENGINE" = "1" ]; then
     exit 1
   fi
   set -- --target "$TARGET"
+  if [ "$FORCE" = "1" ]; then
+    set -- "$@" --force
+  fi
+  if [ "$DRY_RUN" = "1" ]; then
+    set -- "$@" --dry-run
+  fi
   if [ "$CLAUDE_ENGINE" = "1" ]; then
     set -- "$@" --claude
   fi
@@ -112,11 +126,16 @@ if [ "$FULL_ENGINE" = "1" ]; then
 fi
 
 if [ "$CHECK_TOOLS" = "1" ]; then
-  if [ ! -f "$CHECK_SCRIPT" ]; then
-    printf '%s\n' "Could not find scripts/check_optional_tools.py next to install.sh." >&2
-    exit 1
+  if [ "$DRY_RUN" = "1" ]; then
+    printf '%s\n' "Dry run: would run optional tool check for $TARGET"
+    printf '%s\n' ""
+  else
+    if [ ! -f "$CHECK_SCRIPT" ]; then
+      printf '%s\n' "Could not find scripts/check_optional_tools.py next to install.sh." >&2
+      exit 1
+    fi
+    "$PYTHON" "$CHECK_SCRIPT" --target "$TARGET"
   fi
-  "$PYTHON" "$CHECK_SCRIPT" --target "$TARGET"
 fi
 
 printf '%s\n' ""
