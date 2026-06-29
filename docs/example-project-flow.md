@@ -55,6 +55,8 @@ Before calling a serious run complete, the assistant should leave behind:
 - an artifact manifest
 - a memory harvest
 
+For long AI sessions, closeout should also say whether the run needs a fresh continuation. The goal is to keep the project state in files, not trapped in a giant chat that keeps being rewritten into cache.
+
 ## 6. Later, you can run `/research` or a research refresh
 
 If the market changed, competitors shipped new features, or AI tooling moved forward, you can ask for a refresh pass.

@@ -12,6 +12,7 @@ It gives your assistant:
 - a shared blackboard for decisions, research, risks, and next steps
 - solo, mini-swarm, and full-swarm operating patterns
 - cost and model-routing guidance
+- context/cache hygiene for long AI sessions so cache writes do not quietly dominate cost
 - optional local memory slots
 - evaluation and delivery logs
 - a self-improvement loop so each serious run leaves behind useful lessons
@@ -70,9 +71,10 @@ Implemented now:
 
 Starter mode versus full engine:
 
-- OSVec is the Project OS vector and memory layer. Starter mode tracks OSVec as optional. The full engine add-on activates `memory/osvec_adapter.py`, powered by TurboVec when installed and a local fallback otherwise.
-- GraphOS is the Project OS graph layer. Starter mode tracks GraphOS as optional. The full engine add-on activates `memory/build_graph.py`, with output at `graphify-out/graph.json`.
-- The add-on is explicit. It does not run during a normal starter install unless `--full-engine` is passed or `scripts/install_full_engine.py` is run.
+- Starter installs include lightweight local GraphOS and OSVec helper scripts: `memory/build_graph.py` and `memory/osvec_adapter.py`. They are optional and inactive until a user or assistant runs them.
+- OSVec is the Project OS vector and memory layer. The local adapter uses TurboVec when installed and a local fallback otherwise; it still needs reviewed memories before vector recall is useful.
+- GraphOS is the Project OS graph layer. The local builder can write `graphify-out/graph.json` from blackboard or run files when graph context is useful.
+- The full engine add-on is explicit. It adds broader run scripts, local brain and central-brain sync, validator/score tools, browser QA helper, and optional Claude agents/commands. It does not run during a normal starter install unless `--full-engine` is passed or `scripts/install_full_engine.py` is run.
 - Model routing depends on the AI tool you use. If your tool cannot route sub-agents to different models, record that limitation instead of pretending it happened.
 - UI/UX and browser QA depend on the project and host tool. The full engine provides the UI agents and `/ui-review`; the assistant must still run the available build, responsive layout, accessibility, and browser QA checks before claiming approval.
 - Swarms are workflow patterns. This template does not include its own autonomous swarm runner.
@@ -105,6 +107,20 @@ At closeout, the assistant should fill `blackboard/19-memory-harvest.md` and `me
 - memories that should stay private or be rejected
 
 Those notes can be copied into `blackboard/08-memory-index.md` or OSVec after review. Raw chats, secrets, and sensitive personal details should never be promoted automatically.
+
+## Context Cache Hygiene
+
+Long AI coding sessions can get expensive when the same growing conversation is repeatedly written into provider prompt caches. Project OS treats that as part of AI workflow cost, not invisible overhead.
+
+For serious runs, the assistant should:
+
+- keep durable state in blackboard files, packets, receipts, and artifact manifests
+- use `context-scout` or a compact read gate before expensive agents
+- record cached reads and cached writes in `blackboard/09-cost-estimate.md` when usage data exposes them
+- write a handoff packet at phase boundaries
+- continue from a fresh session when the old chat is mostly historical context
+
+Rule of thumb: if cache writes are more than half of measured AI workflow cost, checkpoint the run and continue from the blackboard instead of carrying the whole chat forward.
 
 ## Research Refresh
 
@@ -163,7 +179,7 @@ export PROJECT_OS_OSVEC_CMD="your-vector-command"
 
 Legacy `PROJECT_OS_GRAPH_CMD` and `PROJECT_OS_VECTOR_CMD` are still recognized as fallbacks.
 
-Important: missing external Graphify/TurboVec commands do not mean Project OS full-engine memory is missing. If `memory/build_graph.py`, `memory/osvec_adapter.py`, or legacy `memory/turbovec_adapter.py` exists, the assistant should report the local memory path as available and run/offer the activation commands:
+Important: missing external Graphify/TurboVec commands do not mean Project OS local memory helpers are missing. If `memory/build_graph.py`, `memory/osvec_adapter.py`, or legacy `memory/turbovec_adapter.py` exists, the assistant should report the local helper path as available and run/offer the activation commands:
 
 ```bash
 python3 memory/build_graph.py --root blackboard

@@ -43,6 +43,8 @@ class SetupProjectOSTests(unittest.TestCase):
             self.assertTrue((target / "addons" / "full-engine" / "staged" / "agents" / "ui-ux-designer.md").exists())
             self.assertTrue((target / "addons" / "full-engine" / "staged" / "agents" / "frontend-builder.md").exists())
             self.assertTrue((target / "addons" / "full-engine" / "staged" / "agents" / "context-scout.md").exists())
+            self.assertTrue((target / "memory" / "build_graph.py").exists())
+            self.assertTrue((target / "memory" / "osvec_adapter.py").exists())
 
     def test_install_script_check_tools_writes_capability_report(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -93,9 +95,9 @@ class SetupProjectOSTests(unittest.TestCase):
 
             preflight = target / "blackboard" / "17-capability-preflight.md"
             text = preflight.read_text(encoding="utf-8")
-            self.assertIn("Full engine GraphOS builder found: memory/build_graph.py", text)
+            self.assertIn("Local GraphOS helper found: memory/build_graph.py", text)
             self.assertIn("graph artifact not built yet", text)
-            self.assertIn("Full engine OSVec adapter found: memory/osvec_adapter.py", text)
+            self.assertIn("Local OSVec helper found: memory/osvec_adapter.py", text)
             self.assertIn("vector store not populated yet", text)
 
     def test_install_script_full_engine_can_initialize_central_brain(self):
@@ -245,6 +247,85 @@ class SetupProjectOSTests(unittest.TestCase):
         self.assertIn("append-only", combined)
         self.assertIn("superseded", combined)
 
+    def test_context_cache_hygiene_guidance_is_available(self):
+        files = [
+            ROOT / "AGENTS.md",
+            ROOT / "CLAUDE.md",
+            ROOT / "README.md",
+            ROOT / "prompts" / "project-os-kickoff.md",
+            ROOT / "blackboard-template" / "09-cost-estimate.md",
+            ROOT / "blackboard-template" / "11-model-routing.md",
+            ROOT / "addons" / "full-engine" / "README.md",
+            ROOT / "addons" / "full-engine" / "staged" / "commands" / "cost-check.md",
+            ROOT / "addons" / "full-engine" / "staged" / "agents" / "project-os-cfo.md",
+            ROOT / "addons" / "full-engine" / "staged" / "agents" / "project-os-ceo.md",
+            ROOT / "addons" / "full-engine" / "staged" / "agents" / "context-scout.md",
+        ]
+        combined = "\n".join(path.read_text(encoding="utf-8") for path in files)
+
+        self.assertIn("Context Cache Hygiene", combined)
+        self.assertIn("cache writes", combined)
+        self.assertIn("cached writes", combined)
+        self.assertIn("fresh-session trigger", combined)
+        self.assertIn("handoff packet", combined)
+        self.assertIn("context-scout", combined)
+        self.assertIn("Cached Write", combined)
+
+    def test_cost_actuals_reports_cache_write_pressure(self):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "addons" / "full-engine" / "memory" / "cost_actuals.py"), "--selftest"],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("cost_actuals selftest: OK", result.stdout)
+
+    def test_codex_session_rollup_guidance_is_available(self):
+        files = [
+            ROOT / "AGENTS.md",
+            ROOT / "CLAUDE.md",
+            ROOT / "blackboard-template" / "09-cost-estimate.md",
+            ROOT / "addons" / "full-engine" / "README.md",
+            ROOT / "addons" / "full-engine" / "staged" / "commands" / "cost-check.md",
+            ROOT / "addons" / "full-engine" / "staged" / "agents" / "project-os-cfo.md",
+        ]
+        combined = "\n".join(path.read_text(encoding="utf-8") for path in files)
+        cost_tool = (ROOT / "addons" / "full-engine" / "memory" / "cost_actuals.py").read_text(encoding="utf-8")
+
+        self.assertIn("--codex-sessions", cost_tool)
+        self.assertIn("last_token_usage", combined)
+        self.assertIn("total_token_usage", combined)
+        self.assertIn("cumulative", combined)
+        self.assertIn("cached_input_tokens", combined)
+        self.assertIn("cache writes", combined)
+        self.assertIn("cache_creation_input_tokens", combined)
+
+    def test_max_effort_auto_continuation_prompt_is_wired(self):
+        files = [
+            ROOT / "prompts" / "project-os-kickoff.md",
+            ROOT / "CLAUDE.md",
+            ROOT / "AGENTS.md",
+            ROOT / "blackboard-template" / "09-cost-estimate.md",
+            ROOT / "blackboard-template" / "11-model-routing.md",
+        ]
+        combined = "\n".join(path.read_text(encoding="utf-8") for path in files)
+
+        # All three options must be offered somewhere in the public docs.
+        self.assertIn("Auto", combined)
+        self.assertIn("Ask first", combined)
+        self.assertIn("Warn only", combined)
+        # The feature name and the safe-degradation path must be present.
+        self.assertIn("auto-continuation", combined.lower())
+        self.assertIn("handoff packet", combined)
+        self.assertIn("paste", combined.lower())
+        # The Claude-facing file must carry the ask too, not just the kickoff prompt.
+        claude_text = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertIn("auto-continuation", claude_text.lower())
+        # The routing template must expose a slot to record the chosen mode.
+        routing_text = (ROOT / "blackboard-template" / "11-model-routing.md").read_text(encoding="utf-8")
+        self.assertIn("Max-effort auto-continuation", routing_text)
+
     def test_decision_and_risk_templates_are_append_only(self):
         decisions = (ROOT / "blackboard-template" / "03-decisions.md").read_text(encoding="utf-8")
         risks = (ROOT / "blackboard-template" / "04-risks.md").read_text(encoding="utf-8")
@@ -364,6 +445,8 @@ class SetupProjectOSTests(unittest.TestCase):
             self.assertTrue((target / "scripts" / "check_optional_tools.py").exists())
             self.assertTrue((target / "scripts" / "install_full_engine.py").exists())
             self.assertTrue((target / "addons" / "full-engine" / "memory" / "new_run.py").exists())
+            self.assertTrue((target / "memory" / "build_graph.py").exists())
+            self.assertTrue((target / "memory" / "osvec_adapter.py").exists())
             self.assertFalse((target / "scripts" / "__pycache__").exists())
             self.assertTrue((target / "memory" / "self-improvement-loop.md").exists())
             self.assertIn("Self-Improvement Loop", (target / "memory" / "self-improvement-loop.md").read_text(encoding="utf-8"))
@@ -496,9 +579,9 @@ class OptionalToolCheckTests(unittest.TestCase):
 
             report = tool_check.build_report(target)
 
-        self.assertIn("Full engine GraphOS builder found: memory/build_graph.py", report)
+        self.assertIn("Local GraphOS helper found: memory/build_graph.py", report)
         self.assertIn("graph artifact not built yet", report)
-        self.assertIn("Full engine OSVec adapter found: memory/osvec_adapter.py", report)
+        self.assertIn("Local OSVec helper found: memory/osvec_adapter.py", report)
         self.assertIn("vector store not populated yet", report)
         self.assertIn("Do not tell the user GraphOS/OSVec are unavailable when these local scripts exist", report)
 

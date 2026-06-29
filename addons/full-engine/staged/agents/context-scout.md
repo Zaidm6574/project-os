@@ -40,4 +40,6 @@ Recommended Next Step:
 Status: Draft / Approved
 ```
 
+Keep the packet compact enough to hand to a heavier agent without replaying the whole project history. Prefer file paths, current decisions, risks, blockers, and artifact IDs over pasted source text.
+
 Do not rewrite blackboard files. Do not make product, cost, safety, or publishing decisions. If context conflicts, flag the conflict and stop.

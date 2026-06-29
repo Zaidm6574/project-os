@@ -27,6 +27,7 @@ Decision and risk history is append-only. Add dated rows and mark old decisions 
 3. **Run waves** (see below). After each wave, read the new packets in `blackboard/packets/`, update `07-approved-plan.md`, and decide the next wave. **Do not revisit the tier decision here — it is frozen.**
 4. **Protect the goal (first action / drift step).** At the start of every wave, recompute/compare the goal hash recorded in `21-agent-roster.md`. Run this deterministically — do **not** eyeball it: `python3 memory/goal_guard.py runs/<slug>/00-project-goal.md runs/<slug>/21-agent-roster.md` (prints `MATCH`/`DRIFT`, exits 0/nonzero). On `DRIFT` — or if the goal changed without a logged decision in `03-decisions.md` — stop and flag it to the user. **In the same step, compare the current tier against the chosen/locked tier in `21-agent-roster.md`: each wave, flag any tier change that lacks a logged `03-decisions.md` entry naming a trigger as drift, and stop.**
 5. **Gate on the human.** Before anything irreversible or costly (see approvals list), stop and ask. Use the user's memory in `01-user-memory.md` to *recommend*, never to fabricate approval.
+6. **Protect context/cache spend.** Before each later wave, decide whether the previous wave should be carried as live chat context or as a compact handoff packet. If usage data shows cache writes dominating cost, or the session is mostly old context, write a receipt or packet and continue from the blackboard in a fresh session.
 
 ## Waves (flat, not deep recursion)
 
@@ -53,6 +54,8 @@ If you are running somewhere **without accessible `.claude/agents/`** (e.g. Cowo
 ## Cost
 
 Coordinate with `project-os-cfo` for serious projects. Default mode is Balanced; cost is visibility, not the main constraint, unless the user picks Cost-aware. Respect the Max-effort toggle.
+
+Track context/cache hygiene with the CFO. Cache writes are an AI workflow cost, not invisible overhead. At phase boundaries, prefer compact packets over dragging the full conversation forward.
 
 ## Approvals (always ask first)
 

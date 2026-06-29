@@ -76,10 +76,10 @@ def local_graphos_status(target: Path | None) -> tuple[str, str] | None:
         return None
     graph = target / "graphify-out" / "graph.json"
     if graph.exists():
-        return "Verified", "Full engine GraphOS builder and graph artifact found: memory/build_graph.py, graphify-out/graph.json."
+        return "Verified", "Local GraphOS helper and graph artifact found: memory/build_graph.py, graphify-out/graph.json."
     return (
         "Verified",
-        "Full engine GraphOS builder found: memory/build_graph.py; graph artifact not built yet. "
+        "Local GraphOS helper found: memory/build_graph.py; graph artifact not built yet. "
         "Activate with `python3 memory/build_graph.py --root blackboard` or `python3 memory/build_graph.py --root runs/<slug>`.",
     )
 
@@ -92,10 +92,10 @@ def local_osvec_status(target: Path | None) -> tuple[str, str] | None:
     if adapter.exists():
         sidecar = target / "memory" / "store" / "project.sidecar.json"
         if sidecar.exists():
-            return "Verified", "Full engine OSVec adapter and vector sidecar found: memory/osvec_adapter.py, memory/store/project.sidecar.json."
+            return "Verified", "Local OSVec helper and vector sidecar found: memory/osvec_adapter.py, memory/store/project.sidecar.json."
         return (
             "Verified",
-            "Full engine OSVec adapter found: memory/osvec_adapter.py; vector store not populated yet. "
+            "Local OSVec helper found: memory/osvec_adapter.py; vector store not populated yet. "
             "Activate with `python3 memory/osvec_adapter.py selftest`, then add approved lessons/preferences.",
         )
     if legacy_adapter.exists():
@@ -183,13 +183,13 @@ def build_report(target: Path | None = None) -> str:
             "### Plain-English Summary",
             "",
             "- Project OS core works without GraphOS or OSVec tools.",
-            "- GraphOS and OSVec become active only when a real tool is installed, connected, or the full-engine local scripts are present.",
+            "- GraphOS and OSVec become active only when a real tool is installed, connected, or the local helper scripts are present and run.",
             "- Do not tell the user GraphOS/OSVec are unavailable when these local scripts exist; say they are available but may need a graph build or vector population step.",
             "- Model routing is configured in the AI tool, not through `PROJECT_OS_GRAPHOS_CMD` or `PROJECT_OS_OSVEC_CMD`.",
             "- If a capability is `Not configured`, the assistant should say that honestly and keep using the markdown blackboard.",
             "- To connect custom tools, set `PROJECT_OS_GRAPHOS_CMD` and/or `PROJECT_OS_OSVEC_CMD` before running this check.",
             "- Legacy `PROJECT_OS_GRAPH_CMD` and `PROJECT_OS_VECTOR_CMD` are still recognized as fallbacks.",
-            "- This script does not install anything; if tools are missing, run `python3 scripts/install_full_engine.py --target .` or connect Graphify/TurboVec yourself.",
+            "- This script does not install anything; if broader engine tools are missing, run `python3 scripts/install_full_engine.py --target .` or connect Graphify/TurboVec yourself.",
             "",
         ]
     )

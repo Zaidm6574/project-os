@@ -103,7 +103,9 @@ Model routing is configured in the AI tool itself. The optional tool check will 
 
 ## Optional Full Engine Add-On
 
-The starter kit works without GraphOS or OSVec active. To activate the local full engine scripts:
+The starter kit works without GraphOS or OSVec active. Starter installs include lightweight local helper scripts at `memory/build_graph.py` and `memory/osvec_adapter.py`; run them only when you want local graph/vector context.
+
+To install the broader full engine scripts:
 
 ```bash
 ./install.sh /path/to/project --full-engine --check-tools

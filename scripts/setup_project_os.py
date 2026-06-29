@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 TEMPLATE_ROOT = Path(__file__).resolve().parents[1]
+FULL_ENGINE_MEMORY = TEMPLATE_ROOT / "addons" / "full-engine" / "memory"
 GITIGNORE_MARKER = "# Project OS private files"
 
 
@@ -79,6 +80,12 @@ def bootstrap(target: Path, force: bool, dry_run: bool = False) -> list[str]:
     results.extend(copy_tree_files(TEMPLATE_ROOT / "runs-template", target / "runs", force, dry_run=dry_run))
     results.extend(copy_tree_files(TEMPLATE_ROOT / "outputs-template", target / "outputs", force, dry_run=dry_run))
     results.extend(copy_tree_files(TEMPLATE_ROOT / "memory-template", target / "memory", force, dry_run=dry_run))
+    # Lightweight graph/vector helpers belong in every Project OS workspace so
+    # agents can build relationship context instead of carrying a giant chat.
+    for helper in ("build_graph.py", "osvec_adapter.py"):
+        src = FULL_ENGINE_MEMORY / helper
+        if src.exists():
+            results.append(copy_file(src, target / "memory" / helper, force, dry_run=dry_run))
 
     private_memory = target / "private-memory"
     private_imports = target / "private-imports"
@@ -116,8 +123,9 @@ def main() -> int:
     print("Next:")
     print("1. Open the target project in Codex, Claude, or your AI coding tool.")
     print("2. Say: /project <your idea>")
-    print("3. Optional: run scripts/import_chat_history.py on a local chat export.")
-    print("4. Before committing, run: git status --short --ignored")
+    print("3. Build graph context when useful: python3 memory/build_graph.py --root blackboard")
+    print("4. Optional: run scripts/import_chat_history.py on a local chat export.")
+    print("5. Before committing, run: git status --short --ignored")
     return 0
 
 

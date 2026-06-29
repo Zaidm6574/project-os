@@ -9,7 +9,7 @@ It is opt-in. The normal `install.sh` starter path does not install this engine 
 - `memory/new_run.py` for isolated `runs/<slug>/` scaffolds.
 - `memory/validate_run.py` for mechanical closeout gates.
 - `memory/score_rubric.py` for deterministic evaluator scoring.
-- `memory/cost_actuals.py` and `memory/cost_rollup.py` for measured cost visibility.
+- `memory/cost_actuals.py` and `memory/cost_rollup.py` for measured cost visibility, including cached reads, cached writes, and cache-write pressure.
 - `memory/build_graph.py` for GraphOS output at `graphify-out/graph.json`.
 - `memory/osvec_adapter.py` for OSVec local memory, powered by TurboVec when installed and a numpy fallback otherwise.
 - `brain/brain.py` for a local shared-brain JSONL exchange, including `save-chat` for approved chat summaries.
@@ -79,6 +79,18 @@ This layer is local and optional. It does not download design tools or overwrite
 ## Low-Cost Read Gate
 
 Use `context-scout` before expensive or high-reasoning agents when the host supports subagents. It runs on the smallest available model and returns a compact `Context Used` packet from the blackboard, so heavier agents do not waste context or cost rereading the whole project.
+
+## Context/Cache Hygiene
+
+For long sessions, treat the blackboard as durable memory and the chat as temporary working space. At phase boundaries, write a receipt or handoff packet and continue from that packet when the active chat has become mostly historical context.
+
+When the host exposes usage logs, run:
+
+```bash
+python3 memory/cost_actuals.py --transcript /path/to/session.jsonl --write
+```
+
+The report separates uncached input, output, cached reads, cached writes, and measured dollars. It also has `--codex-sessions` for local Codex activity rollups from `~/.codex/sessions`; that mode sums `last_token_usage`, warns against summing cumulative `total_token_usage`, and labels `cached_input_tokens` as cached reads rather than cache writes. If cached writes dominate the cost in provider logs, checkpoint the run before doing more work.
 
 ## Why This Is Separate
 

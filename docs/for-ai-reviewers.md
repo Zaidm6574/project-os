@@ -17,6 +17,7 @@ Starter mode is what users get from a normal install:
 - `AGENTS.md` and `CLAUDE.md` workflow instructions
 - numbered `blackboard/` files for goals, plans, decisions, risks, memory, cost, preflight, evaluation, and delivery
 - `install.sh` and setup scripts
+- lightweight local GraphOS/OSVec helper scripts, optional and inactive until run
 - optional tool checks
 - privacy-first `.gitignore` rules
 - docs and prompts for project kickoff, research refresh, friend review, and chat import
@@ -24,8 +25,6 @@ Starter mode is what users get from a normal install:
 Full engine mode is explicit opt-in with `--full-engine`:
 
 - local run helpers such as `new_run.py`, `validate_run.py`, `score_rubric.py`, `goal_guard.py`, `cost_actuals.py`, and `browser_qa.py`
-- GraphOS builder script outputting `graphify-out/graph.json`
-- OSVec adapter using TurboVec when available and a local fallback otherwise
 - local brain and central-brain scripts for approved summary memories
 - optional Claude Code agents and commands, including `context-scout`, `ui-ux-designer`, `frontend-builder`, and `/ui-review`
 
@@ -36,6 +35,7 @@ Full engine mode is explicit opt-in with `--full-engine`:
 - Optional capability preflight that checks tools without installing anything.
 - Safe chat export scanning with secret redaction and private output defaults.
 - Blackboard Read Gate guidance so agents read project files before acting from memory.
+- Context cache hygiene guidance so long sessions use handoff packets and track cached reads/writes instead of carrying a giant chat forever.
 - Append-only decision and risk templates.
 - UI workflow guidance and `/ui-review` approval rules requiring real QA evidence.
 - GitHub Actions unit test workflow.
@@ -69,6 +69,7 @@ Memory should be summary-first and approval-first. Save compact lessons, prefere
 5. Do the tests pass with `python3 -m unittest discover -s tests -v`?
 6. Does `/ui-review` require real evidence before approval?
 7. Is the Blackboard Read Gate clear enough to reduce context-window drift?
+8. Does the context/cache guidance make it clear when to checkpoint a long run and start fresh?
 
 ## GitHub About Settings
 

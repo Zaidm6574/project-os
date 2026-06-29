@@ -12,6 +12,7 @@ Key rules:
 - Use Solo Agent Loop, Mini Swarm, or Full Swarm based on project complexity.
 - Use the CFO Agent for a model-routing plan and cost visibility.
 - Do not blindly keep every sub-agent on the strongest model if the sub-task is simple.
+- Watch context/cache hygiene on long sessions: cache writes, cache reads, active context bloat, handoff packets, and fresh-session boundaries.
 - Actual different-model execution depends on Claude or the AI tool; it is not detected through the GraphOS `PROJECT_OS_GRAPHOS_CMD` or OSVec `PROJECT_OS_OSVEC_CMD`.
 - Use memory summaries only with user approval.
 - Never ingest raw private exports by default.
@@ -40,6 +41,16 @@ Blackboard Read Gate:
 - If small-model routing or subagents are unavailable, do the read gate yourself and record the limitation.
 - Keep decisions and risks append-only: append dated updates and mark old entries `Superseded` instead of deleting or overwriting them.
 
+Context cache hygiene:
+
+- Use blackboard files, packets, receipts, and artifact paths as the durable state instead of carrying a giant chat forever.
+- For long runs, add a context/cache budget to the loop spec: context sources, phase handoff trigger, cache-write watch trigger, and fresh-session trigger.
+- If usage data exposes cache fields, record uncached input, output, cached reads, cached writes, and cost in `blackboard/09-cost-estimate.md`.
+- If you inspect Codex local logs under `~/.codex/sessions`, sum `payload.info.last_token_usage`; do not sum every `payload.info.total_token_usage` row because that field is cumulative. `cached_input_tokens` means cached reads/subset of input, not cache writes, and local Codex logs do not expose cache creation.
+- If cache writes become the dominant cost, checkpoint the run, write a compact handoff packet, and continue from the blackboard in a fresh session.
+- When Max-effort is selected, ask the auto-continuation preference — Auto, Ask first, or Warn only/Disabled — and record it in `blackboard/11-model-routing.md`, `blackboard/09-cost-estimate.md`, and the loop spec. Auto writes a handoff packet and creates/forks a fresh continuation when thread tools exist; if they do not, it degrades to writing the packet and giving you a prompt to paste into a new chat. Default is Ask first.
+- Do not paste raw provider logs or full transcripts into the blackboard. Summarize totals, time window, attribution filter, source, confidence, and privacy notes.
+
 Execution levels:
 
 - Solo Agent Loop: Goal -> Context -> Draft -> Evaluate -> Revise -> Approve.
@@ -55,7 +66,7 @@ Memory order:
 4. User-approved chat memory summaries.
 5. Raw private exports only when the user explicitly asks.
 
-Activation guard: if a capability check says no graph/vector artifact exists but local full-engine scripts are present, run or recommend the local activation commands before falling back to markdown-only memory. Do not confuse missing external Graphify/TurboVec CLIs with missing Project OS full-engine memory.
+Activation guard: if a capability check says no graph/vector artifact exists but local helper scripts are present, run or recommend the local activation commands before falling back to markdown-only memory. Do not confuse missing external Graphify/TurboVec CLIs with missing Project OS local memory helpers.
 
 Self-improvement loop:
 

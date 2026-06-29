@@ -26,11 +26,13 @@ Then produce:
 6. Proposed blackboard updates
 7. Model routing recommendation
 8. Cost estimate split into AI workflow, product/app, and human time
-9. Risks and assumptions
-10. Critical questions before execution
-11. Self-improvement note: approved lessons or safeguards from previous runs that should affect this project
-12. Research refresh note: should this project get a scheduled or manual refresh later, and what would trigger it?
-13. UI lane note for any website, web app, dashboard, mobile screen, game UI, form-heavy tool, or visual artifact: whether `ui-ux-designer`, `frontend-builder`, and `/ui-review` should be used, plus the browser QA route.
+9. Context/cache budget: context sources to carry or drop, handoff packet path, cache-write watch trigger, and fresh-session trigger
+10. If Max-effort is selected, auto-continuation preference: Auto, Ask first, or Warn only/Disabled
+11. Risks and assumptions
+12. Critical questions before execution
+13. Self-improvement note: approved lessons or safeguards from previous runs that should affect this project
+14. Research refresh note: should this project get a scheduled or manual refresh later, and what would trigger it?
+15. UI lane note for any website, web app, dashboard, mobile screen, game UI, form-heavy tool, or visual artifact: whether `ui-ux-designer`, `frontend-builder`, and `/ui-review` should be used, plus the browser QA route.
 
 Before claiming any capability, separate:
 
@@ -60,6 +62,35 @@ Route model power by task.
 - Hard reasoning, architecture, security, final review, strategy: strong/frontier model.
 - Extraction, formatting, file inventory, checklists: smaller/faster/local model when available.
 - If sub-agents inherit the main model by platform default, record that limitation.
+- Use smaller read-gate agents and compact packets before heavier agents. Start fresh continuations at phase boundaries when old chat history is no longer needed.
+
+## Context Cache Hygiene
+
+For long sessions, treat cache writes as a first-class cost. Cheap cache reads are useful, but repeated cache creation from a growing chat can dominate AI workflow spend.
+
+Record in `blackboard/09-cost-estimate.md`:
+
+- uncached input, output, cached reads, cached writes, and cost when available
+- active context sources
+- context sources to drop
+- handoff packet path
+- fresh-session trigger
+- cache-write watch trigger
+
+If cache-write cost becomes more than half of AI workflow cost, or cache-write tokens are roughly 10x larger than useful new work, checkpoint the phase with a receipt or packet and continue from the blackboard in a fresh session.
+
+When Max-effort is selected, ask:
+
+```text
+Max-effort auto-continuation?
+Enable automatic fresh-thread handoff when cache/context gets too large?
+
+1. Auto
+2. Ask first
+3. Warn only/Disabled
+```
+
+Record the answer in the model-routing file, cost file, and loop spec. Default to `Ask first`. If the host cannot create or fork threads, `Auto` writes the packet and tells the user what to paste into a new chat.
 
 ## Memory
 

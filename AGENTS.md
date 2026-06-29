@@ -11,17 +11,18 @@ When the user says `$project-os`, `/project`, `project os`, or asks to start, pl
 5. Maintain `blackboard/` as the human-readable source of truth.
 6. Use the CFO Agent for cost mode, a model-routing plan, and project cost estimates.
 7. Separate AI workflow cost from product/app cost and human time.
-8. Run capability preflight before serious work.
-9. Use shared memory safely. Use summaries, not raw private dumps.
-10. Use OSVec only when configured.
-11. Use GraphOS only when configured.
-12. Use one context packet per file in `blackboard/packets/` for Mini Swarm and Full Swarm work.
-13. Run evaluate -> reject/approve -> revise loops before finalizing important outputs.
-14. Close serious runs with cost actuals, evaluation log, delivery report, artifact manifest, and memory harvest.
-15. Ask for human approval before spending money, publishing, deleting important work, contacting people, submitting forms, or making major commitments.
-16. Use the self-improvement loop at closeout: harvest approved lessons, user preferences, reusable project patterns, and next-kickoff safeguards.
-17. When a project may have gone stale, run a research refresh and log what changed before pushing ahead with the old plan.
-18. For websites, web apps, dashboards, games with UI, mobile screens, forms, and visual tools, add a UI/UX lane before or alongside build work: use `ui-ux-designer`, `frontend-builder`, and `/ui-review` when the full engine is installed; otherwise write equivalent packets manually.
+8. Track context/cache hygiene for long sessions: cache writes, cache reads, active context size, phase handoffs, and fresh-thread triggers.
+9. Run capability preflight before serious work.
+10. Use shared memory safely. Use summaries, not raw private dumps.
+11. Use OSVec only when configured.
+12. Use GraphOS only when configured.
+13. Use one context packet per file in `blackboard/packets/` for Mini Swarm and Full Swarm work.
+14. Run evaluate -> reject/approve -> revise loops before finalizing important outputs.
+15. Close serious runs with cost actuals, evaluation log, delivery report, artifact manifest, and memory harvest.
+16. Ask for human approval before spending money, publishing, deleting important work, contacting people, submitting forms, or making major commitments.
+17. Use the self-improvement loop at closeout: harvest approved lessons, user preferences, reusable project patterns, and next-kickoff safeguards.
+18. When a project may have gone stale, run a research refresh and log what changed before pushing ahead with the old plan.
+19. For websites, web apps, dashboards, games with UI, mobile screens, forms, and visual tools, add a UI/UX lane before or alongside build work: use `ui-ux-designer`, `frontend-builder`, and `/ui-review` when the full engine is installed; otherwise write equivalent packets manually.
 
 ## Reality Check
 
@@ -52,6 +53,23 @@ Minimum read set for most work:
 - relevant packets in `blackboard/packets/`
 
 Do not overwrite early decisions or risks. Decision and risk logs are append-only: add a new dated entry and mark older entries `Superseded` instead of deleting or rewriting them.
+
+## Context Cache Hygiene
+
+Long AI sessions can become expensive because the active conversation, tool outputs, instructions, and code context may be written or rewritten into provider prompt caches. Cheap cache reads are useful, but repeated cache writes in a growing session can dominate the bill.
+
+For serious runs:
+
+- Prefer blackboard files, packets, receipts, and artifact paths over replaying the whole chat.
+- Use a low-cost `context-scout` read gate when available, then pass compact context packets to heavier agents.
+- Add a context/cache budget to loop specs: active phase, context sources, max iterations, phase handoff trigger, cache-write watch trigger, and fresh-thread trigger.
+- When Max-effort is selected, ask the user whether auto-continuation should be `Auto`, `Ask first`, or `Warn only/Disabled`; record the answer before serious execution.
+- At phase boundaries, write a handoff packet or receipt and continue from that packet in a fresh session when the current chat is mostly old context.
+- In `09-cost-estimate.md`, track uncached input, output, cached reads, cached writes, and cost when usage data exposes them.
+- For local Codex logs under `~/.codex/sessions`, use `payload.info.last_token_usage` for rollups, or the final `payload.info.total_token_usage` per session file as a cross-check. Never sum every `total_token_usage` row because it is cumulative. Treat `cached_input_tokens` as cached reads, not cache writes; these logs do not expose `cache_creation_input_tokens`.
+- If cache writes exceed half of AI workflow cost, or cache-write tokens are roughly 10x larger than useful new work, pause at the next safe point, summarize state, and restart from the blackboard.
+- If auto-continuation is `Auto` and the host supports thread creation/forking, create the fresh continuation from the handoff packet without asking again. If thread creation is unavailable, write the packet and give the user the continuation prompt. If the setting is `Ask first`, ask before creating/forking. If it is `Warn only/Disabled`, warn and keep continuation manual.
+- Never paste raw request logs or full transcripts into the blackboard. Record totals, time window, attribution filter, source, confidence, and privacy notes.
 
 ## Friend Review Mode
 
@@ -157,6 +175,7 @@ Do not blindly put every sub-agent on the strongest model.
 - Use smaller/faster/local models for extraction, formatting, file inventory, checklist updates, and simple summaries when the platform allows it.
 - If sub-agents must inherit the parent model because the platform does not expose actual different-model execution, record that limitation in `blackboard/11-model-routing.md`.
 - In Max-effort mode, default toward stronger agents, but still avoid obviously wasteful max-model use on trivial work.
+- Use smaller context windows or fresh continuations for mechanical phases when the prior chat history is no longer needed.
 
 ## Memory
 
@@ -172,7 +191,7 @@ Use this order:
 
 Never store secrets, passwords, API keys, private credentials, or unnecessary sensitive personal data.
 
-Activation guard: if a capability check says no graph/vector artifact exists but local full-engine scripts are present, run or recommend the local activation commands before falling back to markdown-only memory. Do not confuse missing external Graphify/TurboVec CLIs with missing Project OS full-engine memory.
+Activation guard: if a capability check says no graph/vector artifact exists but local helper scripts are present, run or recommend the local activation commands before falling back to markdown-only memory. Do not confuse missing external Graphify/TurboVec CLIs with missing Project OS local memory helpers.
 
 ## Self-Improvement Loop
 
