@@ -212,3 +212,13 @@ Capture:
 - rejected-memory: something intentionally not stored because it is private, unverified, irrelevant, or sensitive
 
 Before the next serious run, read the relevant approved entries and ask: `What should we do differently this time because of previous runs?`
+
+## Cursor Cloud specific instructions
+
+This repository is a Python 3 CLI/template tool ("Project OS"), not a long-running service. There is no server to start, no build step, and no watcher/dev server. Everything runs as one-shot Python/shell commands.
+
+- Runtime: Python 3 standard library only for the core. The only optional dependency is `numpy`, used solely by the OSVec memory layer (`addons/full-engine/memory/osvec_adapter.py`). `turbovec` is optional; when absent the adapter falls back to a numpy brute-force index. The startup update script installs `numpy`; do not rely on `addons/full-engine/memory/requirements.txt` for install because it also lists optional `turbovec`.
+- Tests: `python3 -m unittest discover -s tests -v` (same command CI runs, see `.github/workflows/test.yml`). No network required.
+- Lint: no linter/formatter is configured in this repo (no ruff/flake8/black/mypy config). There is no lint command to run.
+- Running the app: it is an installer that scaffolds a Project OS workspace into a target directory. Do NOT run it against the repo root; use a scratch target, e.g. `./install.sh /tmp/hello-project --full-engine --claude-engine --check-tools`.
+- Quick verification of the full-engine helpers (run from inside a bootstrapped target dir): `python3 memory/osvec_adapter.py selftest`, `python3 memory/score_rubric.py --selftest`, `python3 memory/build_graph.py --root blackboard`, `python3 brain/brain.py save-chat --summary "..." --kind lesson`. `python3 memory/new_run.py <name> --tier solo` intentionally refuses to overwrite an existing run dir (this is expected behavior, not an error).
