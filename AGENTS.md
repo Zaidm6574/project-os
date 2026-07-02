@@ -1,5 +1,7 @@
 # Project OS Instructions
 
+> **Naming:** "Project OS" is a descriptor, not a brand. Internal module names: vector memory **Mneme** (formerly TurboVec/OSVec — `memory/mneme_adapter.py`), knowledge graph **Arachne** (formerly Graphify — output `arachne-out/`, compat symlink `graphify-out`). Historical run logs keep old names. Private working notes live in `blackboard/` (gitignored).
+
 This project uses Project OS.
 
 When the user says `$project-os`, `/project`, `project os`, or asks to start, plan, review, build, or audit a project:
@@ -79,6 +81,26 @@ Default roles:
 
 Prefer flat stages over giant nested swarms unless the project is genuinely large.
 
+## Loop Tooling
+
+These scripts exist and are smoke-tested. Use them; do not reimplement ad hoc.
+
+- **Locking.** Any write to a shared blackboard file or `~/.project-os/central-brain/shared-brain.jsonl` from a swarm or a second session goes through `scripts/bb_lock.py` (`acquire`/`release`, or `append` for JSONL lines, `run` to hold a lock around a command). Locks stale-reap after 60s.
+- **Promptsmith.** UI/creative worker prompts are compiled, not hand-rolled: `scripts/promptsmith.py --task "..."` fetches a brain brief and emits BOTH the worker prompt and the evaluator rubric from the same brief into `blackboard/packets/`. In Claude sessions you may call `mcp__brain__brief` yourself and pass `--brief-file`. DON'T violations are auto-fail. If the brain is unreachable the packets say BRAIN-UNAVAILABLE — never invent taste.
+- **Evolution records.** In evaluate → reject/approve → revise loops, record every scored variant with `scripts/evolution.py record`, and evolve the next variant from the BEST-scoring one (`evolution.py next`), never merely the latest. On rejection, also write a lesson line to `memory/self-improvement-loop.md`.
+- **Plans as data.** Mini/Full Swarm plans are JSON artifacts in `blackboard/plans/` via `scripts/plan_artifact.py` (create → validate → **approve = human gate** → compile to worker packets → complete). `compile` refuses unapproved plans.
+- **Brain scale.** Run `scripts/brain_scale.py` at kickoff of serious runs. On WATCH, schedule the Mneme cutover; on CUTOVER, make Mneme primary retrieval and demote the flat index to fallback.
+- **Taste gate.** Promptsmith + rubric make the Evaluator a taste *pre-gate*; the human gate stays final for aesthetics. Motion/animation is verified by filmstrip, never a single frame.
+- **Shared-brain writes.** Append lessons via `scripts/brain_append.py` (validates JSON, locks, auto-rebuilds the Mneme index). A raw append leaves the index stale.
+- **Checker enforcement.** `plan_artifact.py validate` now REJECTS multi-step plans without >=1 checker/verifier/reviewer step, and checker steps must `depends_on` the work they check. Design plans maker/checker from the start.
+- **Nightly heartbeat.** Schedule `scripts/os_nightly.py` daily via launchd/cron: brain-scale gauge, stale-lock reap, stale Draft packets, stuck plans -> newest-first entries in `blackboard/22-automation-log.md`. Read that file at kickoff instead of re-deriving drift.
+- **Neural retrieval.** `memory/mneme_adapter.py` embeds with nomic-embed-text via local Ollama (auto-falls back to lexical if Ollama is down; refuses mixed-embedder queries). Rebuild: `python3 memory/mneme_adapter.py build`.
+- **Cockpit.** Command-center has a Loops view (`/api/loops-state`): gauge, plan lifecycle, evolution records, live locks. If a loop artifact doesn't show there, it isn't real.
+- **Kickoff sequence.** Start supervised runs with the deterministic sequence: gauge -> recall -> promptsmith -> plan-gate -> evolve. Wrap it in a Claude Code skill (e.g. `/project`) rather than improvising kickoff from prose.
+- **Worktree isolation.** Parallel builder steps that mutate the same repo each get a worktree: `scripts/wt.py create/list/merge/remove` (lives in `~/.project-os/worktrees/`, branch `wt/<name>`; merge/remove refuse dirty or unmerged state without `--force`). Plan steps opt in with `"isolation": "worktree"`. Run `wt.py list` before trusting ANY checkout — the stale-tree trap is real.
+- **Memory harvest.** Run closeouts flow to the brain via `scripts/harvest.py`: `status` (nightly reports unharvested done runs) → `scan <run>` (extracts 19-memory-harvest.md bullets, dedupes vs shared brain, stages JSONL proposals in packets/) → human/agent review → `apply` (brain_append + one reindex + `.harvested` marker). Nothing enters the brain without the apply step.
+- **Inter-session bus (optional).** Claude↔Claude peer messaging via the `inter-session` plugin (join per session with `/inter-session:inter-session`). Codex joins as a real peer via `scripts/codex_bus.py` (`setup`/`serve`/`list`/`send`/`listen`). The bus is ephemeral signaling; `shared-brain.jsonl` stays the durable layer. Token offers no protection against untrusted local code.
+
 ## Research Refresh
 
 Use a research refresh when:
@@ -153,3 +175,7 @@ Capture:
 - rejected-memory: something intentionally not stored because it is private, unverified, irrelevant, or sensitive
 
 Before the next serious run, read the relevant approved entries and ask: `What should we do differently this time because of previous runs?`
+
+## Capability Preflight (Claude/Codex parity)
+
+If Claude-specific features differ from Codex, record the limitation in `blackboard/17-capability-preflight.md` before serious work.

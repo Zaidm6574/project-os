@@ -34,3 +34,22 @@ tmp/
 temp/
 dist/
 build/
+
+# Node / packaged builds
+node_modules/
+command-center/release/
+
+# Working data — the remote is the PUBLIC template; real run/brain data never ships
+blackboard/
+runs/
+outputs/
+graphify-out/
+memory/*.json
+memory/self-improvement-loop.md
+CLAUDE.md.pre-symlink.bak
+
+# Run deliverable parked here; belongs in its own repo
+app/
+arachne-out/
+graphify-out
+*.tsbuildinfo

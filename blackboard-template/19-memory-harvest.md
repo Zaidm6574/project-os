@@ -4,6 +4,12 @@ Use this at closeout. This is the self-improvement checkpoint for Project OS.
 
 Do not store raw chats, secrets, private credentials, or sensitive personal details. Promote only short, reviewed summaries.
 
+**Automation:** `python3 scripts/harvest.py scan <run>` extracts the sections below
+(tables or bullets both work), dedupes against the shared brain, and stages proposals
+for review — nothing is stored until `harvest.py apply`. Rows marked Rejected or
+Private-only are never extracted. `harvest.py status` lists finished runs that
+haven't been harvested yet (the nightly heartbeat reports this too).
+
 ## Run Reflection
 
 ```text

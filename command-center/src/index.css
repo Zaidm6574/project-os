@@ -1,0 +1,157 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-bg: #080b10;
+  --color-panel: #0f1520;
+  --color-panel2: #141c2a;
+  --color-edge: #1f2d3f;
+  --color-ink: #e2eaf4;
+  --color-mut: #8898ae;
+  --color-dim: #55657a;
+  --color-accent: #4da3ff;
+  --color-good: #3dcf82;
+  --color-warn: #f5b545;
+  --color-bad: #f76d6d;
+  --color-codex: #c792ea;
+  --color-claude: #d98a5b;
+  --color-anti: #5bd6c4;
+  --color-pos: #4da3ff;
+}
+
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-ink);
+  font-family: ui-sans-serif, -apple-system, "SF Pro Text", system-ui, sans-serif;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+* { box-sizing: border-box; }
+
+/* Refined scrollbars that respect the active theme */
+::-webkit-scrollbar { width: 7px; height: 7px; }
+::-webkit-scrollbar-thumb {
+  background: var(--color-edge);
+  border-radius: 99px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--color-dim); background-clip: content-box; }
+::-webkit-scrollbar-track { background: transparent; }
+
+.mono { font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace; }
+
+/* Cards */
+.card {
+  background: var(--color-panel);
+  border: 1px solid var(--color-edge);
+  border-radius: 10px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.18), 0 1px 2px rgba(0,0,0,0.12);
+}
+.card-h {
+  background: var(--color-panel2);
+}
+
+/* Hover-interactive cards */
+.card-interactive {
+  background: var(--color-panel);
+  border: 1px solid var(--color-edge);
+  border-radius: 10px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.18);
+  transition: border-color .15s, box-shadow .15s, transform .12s;
+  cursor: pointer;
+}
+.card-interactive:hover {
+  border-color: color-mix(in srgb, var(--color-accent) 40%, var(--color-edge));
+  box-shadow: 0 4px 12px rgba(0,0,0,0.22), 0 1px 3px rgba(0,0,0,0.14);
+  transform: translateY(-1px);
+}
+.card-interactive[data-selected='true'] {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 30%, transparent),
+              0 4px 14px rgba(0,0,0,0.22);
+}
+
+/* Buttons */
+.btn {
+  border: 1px solid var(--color-edge);
+  background: var(--color-panel2);
+  color: var(--color-ink);
+  border-radius: 7px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color .14s, background .14s, box-shadow .14s, color .14s;
+  outline: none;
+}
+.btn:hover {
+  border-color: color-mix(in srgb, var(--color-accent) 60%, var(--color-edge));
+  background: color-mix(in srgb, var(--color-accent) 8%, var(--color-panel2));
+}
+.btn:focus-visible {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 50%, transparent);
+  border-color: var(--color-accent);
+}
+.btn:active { opacity: 0.85; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.btn-go {
+  border-color: color-mix(in srgb, var(--color-good) 55%, var(--color-edge));
+  color: var(--color-good);
+}
+.btn-go:hover {
+  background: color-mix(in srgb, var(--color-good) 14%, var(--color-panel2));
+  border-color: var(--color-good);
+}
+.btn-warn {
+  border-color: color-mix(in srgb, var(--color-warn) 60%, var(--color-edge));
+  color: var(--color-warn);
+}
+.btn-warn:hover {
+  background: color-mix(in srgb, var(--color-warn) 14%, var(--color-panel2));
+  border-color: var(--color-warn);
+}
+
+/* Chips / badges */
+.chip {
+  font-size: 10.5px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--color-edge);
+  color: var(--color-mut);
+  white-space: nowrap;
+  letter-spacing: 0.01em;
+}
+
+/* Keyboard shortcut display */
+.kbd {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  border: 1px solid var(--color-edge);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  padding: 1px 5px;
+  color: var(--color-mut);
+  background: var(--color-panel2);
+}
+
+/* Focus ring helper */
+.focus-ring:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 55%, transparent);
+}
+
+/* Overlay/modal backdrop blur */
+.overlay-backdrop {
+  background: rgba(0, 0, 0, 0.58);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+/* Panel blur for headers */
+.panel-blur {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  background: color-mix(in srgb, var(--color-panel) 90%, transparent);
+}

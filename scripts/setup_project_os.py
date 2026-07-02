@@ -67,6 +67,13 @@ def bootstrap(target: Path, force: bool) -> list[str]:
     results.extend(copy_tree_files(TEMPLATE_ROOT / "runs-template", target / "runs", force))
     results.extend(copy_tree_files(TEMPLATE_ROOT / "outputs-template", target / "outputs", force))
     results.extend(copy_tree_files(TEMPLATE_ROOT / "memory-template", target / "memory", force))
+    # Vector-memory + graph adapters live in the repo's own memory/ (they are code,
+    # not personal data). Without this, forks get a README advertising vector memory
+    # but no adapter — the installer must deliver what the README promises.
+    for adapter in ("mneme_adapter.py", "build_graph.py"):
+        src = TEMPLATE_ROOT / "memory" / adapter
+        if src.is_file():
+            results.append(copy_file(src, target / "memory" / adapter, force))
 
     private_memory = target / "private-memory"
     private_imports = target / "private-imports"

@@ -71,6 +71,10 @@ class SetupProjectOSTests(unittest.TestCase):
             self.assertFalse((target / "scripts" / "__pycache__").exists())
             self.assertTrue((target / "memory" / "self-improvement-loop.md").exists())
             self.assertIn("Self-Improvement Loop", (target / "memory" / "self-improvement-loop.md").read_text(encoding="utf-8"))
+            # The README advertises vector memory + graph adapters; the installer
+            # must deliver them (regression: the strip once dropped this check).
+            self.assertTrue((target / "memory" / "mneme_adapter.py").exists())
+            self.assertTrue((target / "memory" / "build_graph.py").exists())
 
             (target / "private-memory" / "chat-memory.md").write_text("private\n", encoding="utf-8")
             subprocess.run(["git", "init", str(target)], check=True, capture_output=True, text=True)

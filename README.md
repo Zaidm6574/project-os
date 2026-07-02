@@ -61,6 +61,18 @@ Implemented now:
 - `prompts/research-refresh.md` for current-state refresh passes.
 - Unit tests for setup and chat-import safety behavior.
 
+Loop tooling (zero-dependency Python, added 2026-07):
+
+- `scripts/bb_lock.py` — file locks so parallel agents and second sessions cannot corrupt shared blackboard files (stale locks self-clean).
+- `scripts/plan_artifact.py` — plans as approvable JSON with a human gate before any agent runs; multi-step plans are **rejected unless they include a checker step** that depends on the work it checks.
+- `scripts/promptsmith.py` — compiles the worker prompt AND the evaluator rubric from the same memory brief, so the maker and the checker share taste priors.
+- `scripts/evolution.py` — records every scored variant; the next attempt evolves from the best one so far, never merely the latest.
+- `scripts/wt.py` — one git worktree per parallel builder; merge/remove refuse dirty or unmerged state; `wt.py list` shows every checkout before you trust one.
+- `scripts/harvest.py` — extracts closeout lessons from `19-memory-harvest.md` (tables or bullets), dedupes against the shared brain, stages proposals for review, and only stores them on explicit `apply`. Rejected/Private rows are never extracted.
+- `scripts/brain_scale.py` + `scripts/brain_append.py` — a fullness gauge for the flat-index memory ceiling, and a locked append that keeps the vector index in sync.
+- `scripts/os_nightly.py` — a daily heartbeat (launchd/cron) that logs gauge status, stale locks, stuck plans, and unharvested runs into `blackboard/22-automation-log.md`.
+- `memory/mneme_adapter.py` — local vector memory with two embedders behind one interface: neural (any local Ollama embedding model) with automatic fallback to a zero-dependency lexical hash. Mixed-embedder queries are refused rather than returning garbage similarity scores.
+
 Optional future/tooling slots:
 
 - Vector Memory is a slot for a local vector store, not a bundled database.
@@ -82,6 +94,8 @@ There are three normal ways to use Project OS:
   Best for big app ideas, business plans, deep research, serious audits, or multi-part builds.
 
 A fuller walk-through lives in [docs/example-project-flow.md](docs/example-project-flow.md).
+
+Hard-won lessons from real runs (verification, multi-agent hygiene, memory, cost) live in [docs/field-notes.md](docs/field-notes.md) — each one changed a script or rule in this template.
 
 ## Self-Improvement Loop
 
@@ -124,6 +138,31 @@ The refresh pass should update:
 - `blackboard/20-research-refresh.md`
 
 This is a repeatable workflow for check-ins. It is not a hidden autonomous updater unless your toolchain adds automation on top.
+
+## Optional Upgrades: Smarter Memory And A Daily Heartbeat
+
+Two optional pieces make the loop tooling noticeably better. Both are free, local,
+and skippable — everything degrades gracefully without them.
+
+**Smarter memory search (recommended).** Out of the box, `memory/mneme_adapter.py`
+uses a zero-dependency lexical embedder. If [Ollama](https://ollama.com) is installed,
+it automatically upgrades to real semantic search:
+
+```bash
+ollama pull nomic-embed-text        # ~275 MB, one time
+python3 memory/mneme_adapter.py build
+python3 memory/mneme_adapter.py query "have we solved something like this before?"
+```
+
+No Ollama → it silently stays lexical. Index built with one embedder is never
+queried with the other (mismatched similarity scores would be garbage — it refuses
+instead).
+
+**Daily heartbeat (recommended once you have real runs).** `scripts/os_nightly.py`
+checks memory-ceiling pressure, reaps stale locks, and flags stuck plans and
+unharvested runs into `blackboard/22-automation-log.md`. Run it manually anytime, or
+schedule it — that file's header includes a macOS launchd snippet; on Linux, a cron
+line pointing at the script does the same job.
 
 ## Optional Graph And Vector Tool Check
 
