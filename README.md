@@ -185,6 +185,15 @@ No Ollama → it silently stays lexical. Index built with one embedder is never
 queried with the other (mismatched similarity scores would be garbage — it refuses
 instead).
 
+**No Ollama? Your agent can still do smart recall.** Lexical mode matches words,
+not meaning, so `AGENTS.md`/`CLAUDE.md` instruct assistants to compensate:
+
+1. Query with 2–3 different phrasings (word matching misses synonyms).
+2. For important recalls, read the memory files directly
+   (`memory/self-improvement-loop.md`, `blackboard/08-memory-index.md`) and judge
+   relevance with their own reasoning — the assistant itself is a semantic engine;
+   Ollama just makes the same trick cheap enough to run on every query.
+
 **Daily heartbeat (recommended once you have real runs).** `scripts/os_nightly.py`
 checks memory-ceiling pressure, reaps stale locks, and flags stuck plans and
 unharvested runs into `blackboard/22-automation-log.md`. Run it manually anytime, or
