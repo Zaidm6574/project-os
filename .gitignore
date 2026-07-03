@@ -3,16 +3,29 @@ private-memory/
 private-imports/
 local-memory/
 vector-index/
+vector-store/
+memory/store/
+.turbovec/
 knowledge-graph/
+graphify-out/
+brain/shared-brain.jsonl
+central-brain/
+.project-os-central-brain/
+private-screenshots/
+private-exports/
+raw-exports/
 
 # Secrets
 .env
 .env.*
+.envrc
 secret.env
 *.key
 *.pem
 *.p12
 *.pfx
+id_rsa
+id_ed25519
 secrets/
 secrets
 .secrets
@@ -34,22 +47,29 @@ tmp/
 temp/
 dist/
 build/
+*.sqlite
+*.sqlite3
+*.db
+*.log
+*.tvim
 
 # Node / packaged builds
 node_modules/
 command-center/release/
+*.tsbuildinfo
 
 # Working data — the remote is the PUBLIC template; real run/brain data never ships
 blackboard/
 runs/
 outputs/
-graphify-out/
 memory/*.json
 memory/self-improvement-loop.md
 CLAUDE.md.pre-symlink.bak
 
+# Graph output (both current and legacy names)
+arachne-out/
+graphify-out/
+graphify-out
+
 # Run deliverable parked here; belongs in its own repo
 app/
-arachne-out/
-graphify-out
-*.tsbuildinfo

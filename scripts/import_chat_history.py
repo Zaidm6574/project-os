@@ -22,6 +22,7 @@ SECRET_PATTERNS = [
     (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "[REDACTED_GITHUB_TOKEN]"),
     (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED_AWS_KEY]"),
     (re.compile(r"ASIA[0-9A-Z]{16}"), "[REDACTED_AWS_KEY]"),
+    (re.compile(r"AIza[0-9A-Za-z_-]{20,}"), "[REDACTED_GOOGLE_KEY]"),
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S), "[REDACTED_PRIVATE_KEY]"),
     (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "[REDACTED_EMAIL]"),
     (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[REDACTED_SSN_LIKE_VALUE]"),

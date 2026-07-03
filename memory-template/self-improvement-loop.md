@@ -37,7 +37,7 @@ Ask these before ending a serious run:
 2. What did the assistant get wrong, overclaim, forget, or leave stale?
 3. What reusable project pattern showed up?
 4. What safeguard would prevent the biggest issue next time?
-5. What should be promoted to the memory index or optional Vector Memory?
+5. What should be promoted to the memory index or OSVec?
 6. What should stay private, be rejected, or be deleted?
 
 ## Kickoff Questions

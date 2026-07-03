@@ -3,5 +3,4 @@
 | Question | Source Route | Why | Evidence Quality | Confidence |
 |---|---|---|---|---|
 
-Possible routes: local files, official docs, web/current search, social/video intake, Knowledge Graph, Vector Memory, approved chat summaries.
-
+Possible routes: local files, official docs, web/current search, social/video intake, GraphOS, OSVec, approved chat summaries.

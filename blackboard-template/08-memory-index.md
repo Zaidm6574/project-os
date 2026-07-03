@@ -1,6 +1,6 @@
 # Memory Index
 
-Use this as the local markdown memory layer when Vector Memory is not configured.
+Use this as the local markdown memory layer when OSVec is not configured.
 
 ## User Preference Memories
 
@@ -25,7 +25,7 @@ Use this section to record that something was intentionally not stored.
 | Date | Source | Reason Not Stored | Notes |
 |---|---|---|---|
 
-## Vector Memory Status
+## OSVec Status
 
 ```text
 Status: Not configured

@@ -10,7 +10,7 @@ On GitHub, create a new empty repository.
 
 Recommended names:
 
-- `project-os-template`
+- `project-os`
 - `ai-project-os`
 - `agent-project-os`
 - `ai-workflow-starter`
@@ -22,17 +22,19 @@ From this folder:
 ```bash
 git init
 git status --short --ignored
-rg -n --hidden --no-ignore -S "/Users|sk-|private key|\\.env" .
+git log --format=fuller --max-count=5
+git remote -v
+rg -n --hidden --no-ignore -S "/Users|[A-Za-z]:\\\\|sk-|sk-proj-|ghp_|github_pat_|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|BEGIN [A-Z ]*PRIVATE KEY|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}|\\.env|graphify-out|private-memory|private-imports" .
 git add .
 git commit -m "Initial Project OS template"
 git branch -M main
-git remote add origin https://github.com/YOUR-USERNAME/project-os-template.git
+git remote add origin https://github.com/YOUR-USERNAME/project-os.git
 git push -u origin main
 ```
 
 Replace `YOUR-USERNAME` with your GitHub username or organization name. If `git remote add origin` says the remote already exists, run `git remote -v` and confirm it points to the intended empty GitHub repo before pushing.
 
-Expected benign `rg` hits include `.gitignore` entries, documentation that mentions privacy checks, tests with fake keys, and redaction regexes in `scripts/import_chat_history.py`. Stop before `git add .` if the scan shows real local paths, real keys, raw exports, or personal notes.
+Expected benign `rg` hits include `.gitignore` entries, documentation that mentions privacy checks, tests with fake keys, and redaction regexes in `scripts/import_chat_history.py`. Stop before `git add .` if the scan shows real local paths, real keys, raw exports, personal notes, or unwanted Git author/remote metadata.
 
 Also read `docs/friend-review.md` before pushing if other people will use the template. It lists the checks a beginner or skeptical reviewer should run.
 
@@ -87,6 +89,7 @@ Before sharing broadly, add or review:
 - `LICENSE`, so friends know how they may reuse the template.
 - `SECURITY.md`, so people know how to report privacy or security issues.
 - `install.sh`, so a friend can run one local installer after cloning.
-- `scripts/check_optional_tools.py`, so the install path can recommend graph/vector/tool add-ons without claiming they are already active.
+- `scripts/check_optional_tools.py`, so the install path can recommend GraphOS, OSVec, and full-engine add-ons without claiming they are already active.
+- `scripts/install_full_engine.py` and `addons/full-engine/`, so the opt-in engine path is reviewable before publishing.
 - `docs/friend-review.md`, so reviewers know what feedback is useful.
 - A final `git status --short --ignored` check.
