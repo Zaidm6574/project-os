@@ -71,5 +71,6 @@ arachne-out/
 graphify-out/
 graphify-out
 
-# Run deliverable parked here; belongs in its own repo
+# Run deliverable moved to its own repo; local compat symlink stays untracked
+app
 app/

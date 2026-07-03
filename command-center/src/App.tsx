@@ -22,8 +22,15 @@ const TITLES: Record<ViewKey, string> = {
   inbox: 'Inbox', graph: 'Graph', settings: 'Settings',
 }
 
+// Deep-link support: /?view=loops opens that tab directly (also lets headless
+// browsers screenshot any view for verification).
+function initialView(): ViewKey {
+  const v = new URLSearchParams(window.location.search).get('view')
+  return v && v in TITLES ? (v as ViewKey) : 'runs'
+}
+
 export function App() {
-  const [view, setView] = useState<ViewKey>('runs')
+  const [view, setView] = useState<ViewKey>(initialView)
   const [loops, setLoops] = useState<Loop[]>([])
   const [engines, setEngines] = useState<EngineInfo[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
