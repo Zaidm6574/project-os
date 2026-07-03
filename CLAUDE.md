@@ -14,7 +14,7 @@ Key rules:
 - Do not blindly keep every sub-agent on the strongest model if the sub-task is simple.
 - Watch context/cache hygiene on long sessions: cache writes, cache reads, active context bloat, handoff packets, and fresh-session boundaries.
 - Actual different-model execution depends on Claude or the AI tool; it is not detected through the GraphOS `PROJECT_OS_GRAPHOS_CMD` or OSVec `PROJECT_OS_OSVEC_CMD`.
-- Loop tooling (locks, plan artifacts with checker steps, promptsmith, evolution records, worktrees, memory harvest, nightly heartbeat) lives in `scripts/` — see the `Loop Tooling` section of `AGENTS.md` before reimplementing anything ad hoc.
+- Loop tooling (locks, plan artifacts with checker steps, promptsmith, evolution records, worktrees, memory harvest, brain archive tier, nightly heartbeat) lives in `scripts/` — see the `Loop Tooling` section of `AGENTS.md` before reimplementing anything ad hoc.
 - Vector recall without Ollama: `memory/mneme_adapter.py` falls back to word-matching. Query 2–3 phrasings, and for important recalls read `memory/self-improvement-loop.md` and `blackboard/08-memory-index.md` directly and judge relevance yourself.
 - Use memory summaries only with user approval.
 - Never ingest raw private exports by default.

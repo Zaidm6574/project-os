@@ -13,12 +13,20 @@ Counts:
   - blackboard pages       (blackboard/**/*.md)
   - mneme index entries    (memory/mneme_index.json)
   - taste-brain nodes      (PROJECT_OS_TASTE_INVENTORY json, if present)
+  - archive entries + stale `interest` entries (>60d — archive candidates)
+
+Calibration: with a NEURAL index live, agents retrieve top-k semantically and
+never flat-read the file, so the active-entries ceiling relaxes to a soft 400
+(quality/dedup pressure, relieved via scripts/brain_archive.py — archived
+entries stay in the index). The md-pages ceiling stays at 200 regardless:
+vectors don't shrink markdown sprawl.
 
 Status: OK < 60% of ceiling · WATCH 60-85% · CUTOVER > 85%  (worst dimension wins)
 Exit codes: 0 OK · 1 WATCH · 2 CUTOVER
 
 Usage: python3 scripts/brain_scale.py [--json]
 """
+import datetime as _dt
 import os, sys, json, glob
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project-os/
@@ -31,8 +39,10 @@ TASTE_INV = os.environ.get(
     "PROJECT_OS_TASTE_INVENTORY",
     os.path.join(HOME, ".project-os", "brain", "data", "_node_inventory.json"))
 
-SOURCES_CEIL = 100   # Karpathy: ~100 sources
-PAGES_CEIL = 200     # Karpathy: ~hundreds of pages; plan at 200
+SOURCES_CEIL = 100        # Karpathy: ~100 sources
+PAGES_CEIL = 200          # Karpathy: ~hundreds of pages; plan at 200
+ENTRIES_CEIL_NEURAL = 400 # soft ceiling for the ACTIVE brain once neural retrieval is primary
+INTEREST_STALE_DAYS = 60  # interest entries older than this are archive candidates
 
 
 def count_lines(p):
@@ -61,23 +71,45 @@ def status_for(n, ceil):
     return "CUTOVER" if pct > 0.85 else "WATCH" if pct >= 0.60 else "OK"
 
 
+def count_stale_interest(p, days):
+    """interest-type entries older than `days` — archive candidates."""
+    try:
+        n = 0
+        with open(p, encoding="utf-8", errors="replace") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    o = json.loads(ln)
+                except ValueError:
+                    continue
+                if (o.get("type") or o.get("kind")) != "interest":
+                    continue
+                ts = str(o.get("ts") or o.get("date") or "")[:10]
+                try:
+                    then = _dt.datetime.strptime(ts, "%Y-%m-%d")
+                except ValueError:
+                    continue
+                if (_dt.datetime.now() - then).days > days:
+                    n += 1
+        return n
+    except FileNotFoundError:
+        return None
+
+
 def main():
     shared = count_lines(SHARED_BRAIN)
+    archive = count_lines(SHARED_BRAIN.replace(".jsonl", "-archive.jsonl"))
     run_pages = len(glob.glob(os.path.join(ROOT, "runs", "**", "*.md"), recursive=True))
     bb_pages = len(glob.glob(os.path.join(ROOT, "blackboard", "**", "*.md"), recursive=True))
     pages = run_pages + bb_pages
     mneme = count_json_entries(OSVEC)
     taste = count_json_entries(TASTE_INV)
+    stale_interest = count_stale_interest(SHARED_BRAIN, INTEREST_STALE_DAYS)
 
-    dims = [
-        ("shared-brain entries", shared, PAGES_CEIL, status_for(shared, PAGES_CEIL)),
-        ("pages (runs+blackboard md)", pages, PAGES_CEIL, status_for(pages, PAGES_CEIL)),
-    ]
-    rank = {"OK": 0, "WATCH": 1, "CUTOVER": 2, "n/a": 0}
-    worst = max((d[3] for d in dims), key=lambda s: rank[s])
-
-    # Cutover-aware advice: once the index reports a neural embedder, "schedule
-    # the cutover" is stale — the pressure valve becomes pruning/harvest hygiene.
+    # Neural retrieval changes the entries calibration: agents query top-k
+    # instead of flat-reading, so the active-file ceiling relaxes to 400.
     embedder = ""
     try:
         with open(OSVEC, encoding="utf-8") as f:
@@ -85,16 +117,26 @@ def main():
     except (OSError, ValueError):
         pass
     neural = embedder.startswith("neural-")
+    entries_ceil = ENTRIES_CEIL_NEURAL if neural else PAGES_CEIL
+
+    dims = [
+        ("shared-brain entries (active)", shared, entries_ceil, status_for(shared, entries_ceil)),
+        ("pages (runs+blackboard md)", pages, PAGES_CEIL, status_for(pages, PAGES_CEIL)),
+    ]
+    rank = {"OK": 0, "WATCH": 1, "CUTOVER": 2, "n/a": 0}
+    worst = max((d[3] for d in dims), key=lambda s: rank[s])
 
     out = {
         "dimensions": [{"name": n, "count": c, "ceiling": ceil, "status": s}
                        for n, c, ceil, s in dims],
         "context": {"mneme_index_entries": mneme, "taste_brain_nodes": taste,
                     "run_pages": run_pages, "blackboard_pages": bb_pages,
+                    "archive_entries": archive or 0,
+                    "stale_interest_gt%dd" % INTEREST_STALE_DAYS: stale_interest,
                     "embedder": embedder or "none"},
         "overall": worst,
-        "rule": (("CUTOVER: neural retrieval is live — prune/archive aggressively; ceiling pressure is now about md sprawl, not retrieval. "
-                  "WATCH: neural retrieval live (cutover done 2026-07-02); keep harvest/prune hygiene. "
+        "rule": (("CUTOVER: past even the neural soft ceiling — archive with scripts/brain_archive.py (entries stay searchable) and split md sprawl. "
+                  "WATCH: neural retrieval is live; relieve pressure via scripts/brain_archive.py and md cleanup. "
                   "OK: healthy.") if neural else
                  ("CUTOVER: make Mneme (or a neural upgrade behind the same interface) "
                   "the PRIMARY retrieval path and demote the flat index to fallback. "
@@ -104,12 +146,16 @@ def main():
     if "--json" in sys.argv:
         print(json.dumps(out, indent=2))
     else:
-        print(f"brain scale — flat-index ceiling check (Karpathy ~{SOURCES_CEIL} sources / ~{PAGES_CEIL} pages)\n")
+        ceil_note = f"active entries ceiling {entries_ceil} ({'neural' if neural else 'flat'} calibration)"
+        print(f"brain scale — retrieval ceiling check ({ceil_note}; md pages ceiling {PAGES_CEIL})\n")
         for n, c, ceil, s in dims:
             bar = "" if c is None else f"  {c}/{ceil} ({100*c//ceil}%)"
             print(f"  [{s:>7}] {n}{bar}")
         print(f"\n  context: mneme entries={mneme} · taste-brain nodes={taste} "
-              f"· run pages={run_pages} · blackboard pages={bb_pages}")
+              f"· run pages={run_pages} · blackboard pages={bb_pages} "
+              f"· archived={archive or 0} · stale interest(>{INTEREST_STALE_DAYS}d)={stale_interest}")
+        if stale_interest:
+            print(f"  archive candidates: python3 scripts/brain_archive.py candidates")
         print(f"\n  OVERALL: {worst} — {out['rule'].split('. ')[0 if worst=='CUTOVER' else 1 if worst=='WATCH' else 2]}")
     sys.exit(rank[worst])
 

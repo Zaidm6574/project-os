@@ -104,20 +104,35 @@ def read(p):
         return ""
 
 
+def _brain_text(o):
+    """Entries store their content under different keys depending on writer."""
+    for k in ("text", "lesson", "content", "note", "summary"):
+        v = o.get(k)
+        if isinstance(v, str) and v.strip():
+            return v
+    return ""
+
+
 def _gather():
-    """Collect (id, source, text) tuples from lessons + run goals/decisions."""
+    """Collect (id, source, text) tuples from lessons + run goals/decisions.
+
+    The archive file is indexed too: archiving an entry moves it out of the
+    active brain (smaller, sharper flat file) without losing semantic recall.
+    """
     items = []
-    # shared-brain lessons
-    if os.path.isfile(SHARED_BRAIN):
-        for line in read(SHARED_BRAIN).splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                o = json.loads(line)
-            except Exception:
-                continue
-            items.append((o.get("id", f"lesson-{len(items)}"), "lesson", o.get("text", "")))
+    # shared-brain lessons: active file + archive tier
+    for path, source in ((SHARED_BRAIN, "lesson"),
+                         (SHARED_BRAIN.replace(".jsonl", "-archive.jsonl"), "lesson-archived")):
+        if os.path.isfile(path):
+            for line in read(path).splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                items.append((o.get("id", f"lesson-{len(items)}"), source, _brain_text(o)))
     # run goals
     for goal in glob.glob(os.path.join(ROOT, "runs", "*", "00-project-goal.md")):
         slug = os.path.basename(os.path.dirname(goal))
