@@ -21,6 +21,23 @@ app.use((req, res, next) => {
   if (host === '127.0.0.1' || host === 'localhost' || host === '[::1]') return next()
   res.status(403).json({ error: 'forbidden host' })
 })
+// CORS: a companion local UI (loopback :8799) reads us cross-port.
+// Allowlist is exact origins — never a wildcard — so a rebound hostname that
+// slipped the Host check still can't be read by a foreign page. Preflights
+// (OPTIONS) carry the JSON content-type and the x-*-key engine headers.
+const UI_ORIGINS = new Set(['http://127.0.0.1:8799', 'http://localhost:8799'])
+app.use((req, res, next) => {
+  const origin = String(req.headers.origin || '')
+  if (UI_ORIGINS.has(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin)
+    res.setHeader('Vary', 'Origin')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'content-type, x-anthropic-key, x-openai-key, x-gemini-key')
+    res.setHeader('Access-Control-Max-Age', '600')
+  }
+  if (req.method === 'OPTIONS') return res.status(204).end()
+  next()
+})
 app.use(express.json({ limit: '256kb' }))
 
 // ---------- markdown helpers ----------
