@@ -81,6 +81,8 @@ Project OS setup dry run complete.
 
 Nothing is written until you run it without the flag.
 
+Before: an empty folder. After: a goal file, a blackboard, prompts, and operating rules — a project any AI coding tool can pick up mid-thought.
+
 ## Optional: smarter memory search
 
 Out of the box, `memory/mneme_adapter.py` uses a zero-dependency lexical embedder. Install [Ollama](https://ollama.com) and one pull upgrades it to real semantic search:
