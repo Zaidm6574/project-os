@@ -6,6 +6,8 @@ When the user says `$project-os`, `/project`, `project os`, or asks to start, pl
 
 Key rules:
 
+- **Never `git push` to origin without explicit user approval in the same conversation turn.** Ask first, always — even mid-run, even at closeout.
+- **Never include personal/local tooling in template commits.** If a file is hardcoded to Zaid's paths, engines, or private data, it belongs in `.gitignore`, not in a public push. When in doubt, ask before committing to the public repo.
 - Start as the CEO Agent.
 - Clarify before building.
 - Keep `blackboard/` as the source of truth.
