@@ -54,17 +54,21 @@ Then open `../my-new-project` in your AI tool and say:
 /project I want to build...
 ```
 
-To preview without writing anything:
-
-```bash
-./install.sh ../demo-project --dry-run
-```
-
 To install the full engine add-on:
 
 ```bash
 ./install.sh ../my-new-project --full-engine --check-tools
 ```
+
+## 5-Minute Demo
+
+Before copying anything, preview the install:
+
+```bash
+./install.sh ../demo-project --dry-run
+```
+
+It prints exactly what would be created — nothing is written until you run it without the flag.
 
 ## Optional: smarter memory search
 
@@ -113,6 +117,8 @@ rg -n --hidden --no-ignore -S "/Users|sk-|ghp_|github_pat_|AKIA[0-9A-Z]{16}|AIza
 ## Status
 
 Active. Loop tooling added July 2026. CI passing. Template is safe to publish after the privacy check above.
+
+Sharing it with an AI reviewer? Paste `docs/for-ai-reviewers.md` first — it gives the short architecture summary and the implemented-versus-optional boundary without requiring the whole README.
 
 Field notes from real runs (what broke, what changed as a result) are in [docs/field-notes.md](docs/field-notes.md).
 
