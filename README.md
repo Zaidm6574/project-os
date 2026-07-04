@@ -1,290 +1,44 @@
-# Project OS Public Template
+# Project OS
 
 [![Tests](https://github.com/Zaidm6574/project-os/actions/workflows/test.yml/badge.svg)](https://github.com/Zaidm6574/project-os/actions/workflows/test.yml)
 
-Turn a messy idea into a guided AI project with planning, research, review, memory, and closeout already structured.
-
-Project OS is a privacy-first workflow template for people who want their AI tool to act less like a random chatbot and more like a careful project operator.
-
-It gives your assistant:
-
-- a clear goal file
-- a shared blackboard for decisions, research, risks, and next steps
-- solo, mini-swarm, and full-swarm operating patterns
-- cost and model-routing guidance
-- context/cache hygiene for long AI sessions so cache writes do not quietly dominate cost
-- optional local memory slots
-- evaluation and delivery logs
-- a self-improvement loop so each serious run leaves behind useful lessons
-- a research refresh workflow for checking what changed in the market, tool landscape, or user expectations
-
-This public template is designed to be safe to publish after review. It does not intentionally include personal data, private chat logs, local machine paths, API keys, or private-only branding.
-
-## What It Feels Like
-
-Instead of saying:
-
-```text
-build me an app
-```
-
-you open a project and say:
-
-```text
-/project I want to build a habit tracker for people with ADHD
-```
-
-and the assistant is expected to:
-
-1. clarify the idea
-2. choose the right workflow depth
-3. write down assumptions and risks
-4. plan before building
-5. keep a readable project brain
-6. review the result before calling it done
-7. harvest lessons for the next run
-
-The point is not "more agents because agents are cool." The point is better judgment, better structure, and fewer sloppy AI runs.
-
-## What Is Included In This Version
-
-Implemented now:
-
-- `AGENTS.md` and `CLAUDE.md` with the same Project OS workflow for Codex-style tools and Claude.
-- Markdown blackboard templates for goals, decisions, risks, cost, model routing, evaluation, delivery, artifacts, memory, research routing, capability preflight, and research refresh.
-- A self-improvement loop template for harvesting approved lessons and next-kickoff checks after each serious run.
-- `install.sh`, a small friend-friendly installer that runs the setup script from a cloned GitHub repo.
-- `--dry-run`, an install flag that prints what would be copied without writing files.
-- `--check-tools`, an optional install flag that checks for graph, vector, search, browser, container, and local AI tooling.
-- `--full-engine`, an explicit add-on install path for Project OS run scripts, GraphOS, OSVec, cost actuals, validation, and optional Claude Code commands.
-- Optional workflow definitions in the full engine: `context-scout` for low-cost blackboard read gates, plus `ui-ux-designer`, `frontend-builder`, and `/ui-review` for web apps, dashboards, visual tools, and responsive/browser QA checks.
-- `scripts/setup_project_os.py`, which copies the Project OS files into a target project without overwriting existing files unless `--force` is used.
-- `scripts/check_optional_tools.py`, a local-only capability check that writes recommendations into `blackboard/17-capability-preflight.md`.
-- `scripts/install_full_engine.py`, a local-only opt-in installer for the full engine add-on.
-- `scripts/import_chat_history.py`, a local-only chat export scanner that writes a private review report and redacts common secret patterns.
-- `addons/full-engine/`, dormant add-on source that can be activated later without downloading another repo.
-- `.gitignore` rules for private memory, raw imports, local memory, vector indexes, GraphOS output, secrets, and environment files.
-- Beginner docs for GitHub install, chat import, GitHub publishing, friend review, and a sample project flow.
-- `prompts/project-os-kickoff.md` for startup behavior.
-- `prompts/research-refresh.md` for current-state refresh passes.
-- Unit tests for setup and chat-import safety behavior.
-
-Loop tooling (zero-dependency Python, added 2026-07):
-
-- `scripts/bb_lock.py` — file locks so parallel agents and second sessions cannot corrupt shared blackboard files (stale locks self-clean).
-- `scripts/plan_artifact.py` — plans as approvable JSON with a human gate before any agent runs; multi-step plans are **rejected unless they include a checker step** that depends on the work it checks.
-- `scripts/promptsmith.py` — compiles the worker prompt AND the evaluator rubric from the same memory brief, so the maker and the checker share taste priors.
-- `scripts/evolution.py` — records every scored variant; the next attempt evolves from the best one so far, never merely the latest.
-- `scripts/wt.py` — one git worktree per parallel builder; merge/remove refuse dirty or unmerged state; `wt.py list` shows every checkout before you trust one.
-- `scripts/harvest.py` — extracts closeout lessons from `19-memory-harvest.md` (tables or bullets), dedupes against the shared brain, stages proposals for review, and only stores them on explicit `apply`. Rejected/Private rows are never extracted.
-- `scripts/brain_scale.py` + `scripts/brain_append.py` — a fullness gauge for the flat-index memory ceiling, and a locked append that keeps the vector index in sync.
-- `scripts/os_nightly.py` — a daily heartbeat (launchd/cron) that logs gauge status, stale locks, stuck plans, and unharvested runs into `blackboard/22-automation-log.md`.
-- `memory/mneme_adapter.py` — local vector memory with two embedders behind one interface: neural (any local Ollama embedding model) with automatic fallback to a zero-dependency lexical hash. Mixed-embedder queries are refused rather than returning garbage similarity scores.
-
-Starter mode versus full engine:
-
-- Starter installs include lightweight local graph and vector helper scripts: `memory/build_graph.py`, `memory/mneme_adapter.py` (core vector memory, neural via local Ollama with lexical fallback), and `memory/osvec_adapter.py` (full-engine flavor). They are optional and inactive until a user or assistant runs them.
-- OSVec is the Project OS vector and memory layer. The local adapter uses TurboVec when installed and a local fallback otherwise; it still needs reviewed memories before vector recall is useful.
-- GraphOS is the Project OS graph layer. The local builder can write `graphify-out/graph.json` from blackboard or run files when graph context is useful.
-- The full engine add-on is explicit. It adds broader run scripts, local brain and central-brain sync, validator/score tools, browser QA helper, and optional Claude agents/commands. It does not run during a normal starter install unless `--full-engine` is passed or `scripts/install_full_engine.py` is run.
-- Model routing depends on the AI tool you use. If your tool cannot route sub-agents to different models, record that limitation instead of pretending it happened.
-- UI/UX and browser QA depend on the project and host tool. The full engine provides the UI agents and `/ui-review`; the assistant must still run the available build, responsive layout, accessibility, and browser QA checks before claiming approval.
-- Swarms are workflow patterns. This template does not include its own autonomous swarm runner.
-- Security boundaries in markdown are operating rules. Real sandboxing, egress controls, and container isolation require separate tools.
-- Self-improvement is agent-assisted and review-based. This template does not automatically rewrite its own rules or promote memories without human approval.
-
-## Example Project Flow
-
-There are three normal ways to use Project OS:
-
-- `Solo Agent Loop`
-  Best for quick documents, focused planning, short audits, and small app tweaks.
-- `Mini Swarm`
-  Best for serious but contained work where you want planning, research or build, and review separated.
-- `Full Swarm`
-  Best for big app ideas, business plans, deep research, serious audits, or multi-part builds.
-
-A fuller walk-through lives in [docs/example-project-flow.md](docs/example-project-flow.md).
-
-Hard-won lessons from real runs (verification, multi-agent hygiene, memory, cost) live in [docs/field-notes.md](docs/field-notes.md) — each one changed a script or rule in this template.
-
-## Self-Improvement Loop
-
-Project OS improves by remembering small, approved lessons across runs.
-
-At closeout, the assistant should fill `blackboard/19-memory-harvest.md` and `memory/self-improvement-loop.md` with:
-
-- user preferences discovered during the run
-- mistakes or friction points to avoid next time
-- reusable project patterns
-- safeguards for future kickoff checks
-- memories that should stay private or be rejected
-
-Those notes can be copied into `blackboard/08-memory-index.md` or OSVec after review. Raw chats, secrets, and sensitive personal details should never be promoted automatically.
-
-## Context Cache Hygiene
-
-Long AI coding sessions can get expensive when the same growing conversation is repeatedly written into provider prompt caches. Project OS treats that as part of AI workflow cost, not invisible overhead.
-
-For serious runs, the assistant should:
-
-- keep durable state in blackboard files, packets, receipts, and artifact manifests
-- use `context-scout` or a compact read gate before expensive agents
-- record cached reads and cached writes in `blackboard/09-cost-estimate.md` when usage data exposes them
-- write a handoff packet at phase boundaries
-- continue from a fresh session when the old chat is mostly historical context
-
-Rule of thumb: if cache writes are more than half of measured AI workflow cost, checkpoint the run and continue from the blackboard instead of carrying the whole chat forward.
-
-## Research Refresh
-
-This template also supports a simple "stay current" pass for active projects.
-
-Use it when you want the assistant to check:
-
-- what is trending now
-- what competitors started doing
-- what features users now expect
-- which tools or models became newly relevant
-- whether your project plan is now stale
-
-Run it by giving your assistant a prompt like:
-
-```text
-Use prompts/research-refresh.md for this project and update the blackboard.
-```
-
-If your assistant supports slash commands or prompt aliases, `/research refresh` should point to this same workflow.
-
-The refresh pass should update:
-
-- `blackboard/02-research.md`
-- `blackboard/03-decisions.md`
-- `blackboard/04-risks.md`
-- `blackboard/16-research-router.md`
-- `blackboard/20-research-refresh.md`
-
-This is a repeatable workflow for check-ins. It is not a hidden autonomous updater unless your toolchain adds automation on top.
-
-## Optional Upgrades: Smarter Memory And A Daily Heartbeat
-
-Two optional pieces make the loop tooling noticeably better. Both are free, local,
-and skippable — everything degrades gracefully without them.
-
-**Smarter memory search (recommended).** Out of the box, `memory/mneme_adapter.py`
-uses a zero-dependency lexical embedder. If [Ollama](https://ollama.com) is installed,
-it automatically upgrades to real semantic search:
-
-```bash
-ollama pull nomic-embed-text        # ~275 MB, one time
-python3 memory/mneme_adapter.py build
-python3 memory/mneme_adapter.py query "have we solved something like this before?"
-```
-
-No Ollama → it silently stays lexical. Index built with one embedder is never
-queried with the other (mismatched similarity scores would be garbage — it refuses
-instead).
-
-**No Ollama? Your agent can still do smart recall.** Lexical mode matches words,
-not meaning, so `AGENTS.md`/`CLAUDE.md` instruct assistants to compensate:
-
-1. Query with 2–3 different phrasings (word matching misses synonyms).
-2. For important recalls, read the memory files directly
-   (`memory/self-improvement-loop.md`, `blackboard/08-memory-index.md`) and judge
-   relevance with their own reasoning — the assistant itself is a semantic engine;
-   Ollama just makes the same trick cheap enough to run on every query.
-
-**Daily heartbeat (recommended once you have real runs).** `scripts/os_nightly.py`
-checks memory-ceiling pressure, reaps stale locks, and flags stuck plans and
-unharvested runs into `blackboard/22-automation-log.md`. Run it manually anytime, or
-schedule it — that file's header includes a macOS launchd snippet; on Linux, a cron
-line pointing at the script does the same job.
-
-## Optional Graph And Vector Tool Check
-
-Project OS can check whether a user's machine already has optional graph, vector, search, browser, container, or local AI tools available.
-
-Run:
-
-```bash
-./install.sh ../my-new-project --check-tools
-```
-
-or inside an existing project:
-
-```bash
-python3 scripts/check_optional_tools.py --target .
-```
-
-The check writes a plain-English report into `blackboard/17-capability-preflight.md`.
-
-It does not install external tools automatically. Instead, it tells the user what is active, what is missing, and what to connect next. Custom GraphOS/OSVec tools can be exposed with:
-
-```bash
-export PROJECT_OS_GRAPHOS_CMD="your-graph-command"
-export PROJECT_OS_OSVEC_CMD="your-vector-command"
-```
-
-Legacy `PROJECT_OS_GRAPH_CMD` and `PROJECT_OS_VECTOR_CMD` are still recognized as fallbacks.
-
-Important: missing external Graphify/TurboVec commands do not mean Project OS local memory helpers are missing. If `memory/build_graph.py`, `memory/osvec_adapter.py`, or legacy `memory/turbovec_adapter.py` exists, the assistant should report the local helper path as available and run/offer the activation commands:
-
-```bash
-python3 memory/build_graph.py --root blackboard
-python3 memory/mneme_adapter.py build     # core vector memory
-python3 memory/osvec_adapter.py selftest  # full engine only (installed into targets by --full-engine)
-```
-
-Note: `osvec_adapter.py` ships with the full-engine add-on (`addons/full-engine/memory/`); in this repo checkout only `mneme_adapter.py` is present under `memory/`.
-
-Model routing is different: Project OS records the desired routing plan, but whether each sub-agent can run on a different model depends on the AI app. Configure that in Cursor, Claude, Codex, or whichever tool is running the project; it is not detected by the GraphOS/OSVec environment variables.
-
-## Full Engine Add-On
-
-If a project needs the real local engine, install it explicitly:
-
-```bash
-./install.sh ../my-new-project --full-engine --check-tools
-```
-
-For Claude Code agents and slash commands too:
-
-```bash
-./install.sh ../my-new-project --full-engine --claude-engine --check-tools
-```
-
-To also initialize or connect a central brain:
-
-```bash
-./install.sh ../my-new-project --full-engine --central-brain ~/.project-os/central-brain --project-id my-new-project --check-tools
-```
-
-Or from inside an already-created project:
-
-```bash
-python3 scripts/install_full_engine.py --target .
-```
-
-The add-on copies local scripts and optional Claude definitions into the target project. If central brain is requested, it creates a local JSONL exchange folder and a `brain/CENTRAL_BRAIN.md` note with push/pull commands. It does not install Python packages, use the network, publish anything, import raw chats, or overwrite existing files unless `--force` is passed.
-
-For UI projects, the Claude definitions include `ui-ux-designer`, `frontend-builder`, and `/ui-review`. Use them to plan the first usable screen, responsive layout, accessibility basics, interaction states, visual direction, and browser QA evidence.
-
-For larger projects, the Claude definitions also include `context-scout`, a low-cost reader agent. Use it on the smallest available model to summarize `Context Used` before more expensive agents plan, build, or evaluate.
-
-To save an approved memory from a chat:
-
-```bash
-python3 brain/brain.py save-chat --summary "Approved lesson or preference from this chat." --kind lesson --tag chat
-```
-
-Central brain sync is for approved lesson summaries:
-
-```bash
-python3 brain/central_brain.py push --path ~/.project-os/central-brain --project . --project-id my-new-project
-python3 brain/central_brain.py pull --path ~/.project-os/central-brain --project . --project-id my-new-project
-```
-
-## Quick Start
+A template for running projects with AI assistants — with planning, shared state, decision logs, and memory built in from the start.
+
+Instead of a blank folder and a chatbot, you get a working structure: a goal file, a blackboard for decisions and research, operating rules for your AI tool, and a closeout habit that saves lessons for the next run.
+
+Built by someone with ADHD who needed project state to live outside his head, not in a chat thread that disappears.
+
+## What it gives your AI tool
+
+- A clear goal file (`00-project-goal.md`) so the assistant knows what done looks like
+- A shared blackboard for decisions, research, risks, cost, and next steps
+- `AGENTS.md` + `CLAUDE.md` — operating rules for Codex-style tools and Claude Code
+- Solo, mini-swarm, and full-swarm workflow patterns
+- A self-improvement loop: each serious run fills a memory harvest that can be promoted to the shared brain after review
+- Context hygiene guidance for long sessions where prompt-cache cost quietly compounds
+- A research refresh workflow for checking what changed since you last looked
+
+## What is actually implemented
+
+The following are working now:
+
+- `AGENTS.md` and `CLAUDE.md` with the full Project OS workflow
+- Blackboard templates for goals, decisions, risks, cost, model routing, evaluation, delivery, artifacts, memory, research routing, capability preflight, and research refresh
+- `install.sh` — copies Project OS files into a target project folder
+  - `--dry-run` flag: prints what would be copied without writing anything
+  - `--check-tools` flag: checks for optional graph, vector, search, browser, container, and local AI tooling
+  - `--full-engine` flag: installs the full engine add-on (run scripts, GraphOS, OSVec, cost actuals, validation)
+- `scripts/setup_project_os.py` — the installer backing `install.sh`
+- `scripts/check_optional_tools.py` — writes a capability report to `blackboard/17-capability-preflight.md`
+- `scripts/install_full_engine.py` — opt-in full engine installer
+- `scripts/import_chat_history.py` — scans old AI chat exports locally, redacts secrets, writes a private review report (never uploads)
+- Loop tooling (added 2026-07): `bb_lock.py`, `plan_artifact.py`, `promptsmith.py`, `evolution.py`, `wt.py`, `harvest.py`, `brain_scale.py`, `brain_append.py`, `os_nightly.py`
+- Local vector memory: `memory/mneme_adapter.py` — neural search via Ollama if available, lexical fallback otherwise
+- Unit tests for setup and chat-import safety behavior
+
+What is not automatic without additional setup: external vector/graph packages, autonomous swarm runtime, scheduled research, GitHub publishing.
+
+## Quick start
 
 Requirements: Git, Python 3, and an AI coding tool that reads `AGENTS.md` or `CLAUDE.md`.
 
@@ -294,62 +48,44 @@ cd project-os
 ./install.sh ../my-new-project --check-tools
 ```
 
-If you are using a fork, replace `Zaidm6574` with the GitHub account that owns the fork.
+Then open `../my-new-project` in your AI tool and say:
 
-Then open `../my-new-project` in your AI coding tool and say:
-
-```text
+```
 /project I want to build...
 ```
 
-or:
-
-```text
-$project-os I want to build...
-```
-
-Later, when the project has been running for a while, you can also say:
-
-```text
-Use the research refresh workflow and tell me what changed.
-```
-
-## 5-Minute Demo
-
-Before copying anything, preview the install:
+To preview without writing anything:
 
 ```bash
 ./install.sh ../demo-project --dry-run
 ```
 
-The first lines look like this:
-
-```text
-Project OS setup dry run complete.
-- would create /tmp/project-os-demo
-- would write /tmp/project-os-demo/AGENTS.md
-- would write /tmp/project-os-demo/CLAUDE.md
-- would write /tmp/project-os-demo/.gitignore
-- would write /tmp/project-os-demo/prompts/project-os-kickoff.md
-```
-
-Before:
-
-```text
-demo-project/
-  (folder does not exist yet)
-```
-
-Run the real install:
+To install the full engine add-on:
 
 ```bash
-./install.sh ../demo-project --check-tools
+./install.sh ../my-new-project --full-engine --check-tools
 ```
 
-After:
+## Optional: smarter memory search
 
-```text
-demo-project/
+Out of the box, `memory/mneme_adapter.py` uses a zero-dependency lexical embedder. Install [Ollama](https://ollama.com) and one pull upgrades it to real semantic search:
+
+```bash
+ollama pull nomic-embed-text
+python3 memory/mneme_adapter.py build
+python3 memory/mneme_adapter.py query "have we solved something like this before?"
+```
+
+No Ollama means it stays lexical. Indexes built with one embedder are never queried with the other.
+
+## Optional: daily heartbeat
+
+`scripts/os_nightly.py` checks memory pressure, cleans stale locks, and flags stuck plans into `blackboard/22-automation-log.md`. Run it manually or schedule it — the file header includes a macOS launchd snippet.
+
+## Project structure after install
+
+```
+my-new-project/
   AGENTS.md
   CLAUDE.md
   .gitignore
@@ -363,131 +99,21 @@ demo-project/
   private-imports/     # ignored by Git
 ```
 
-Then open `../demo-project` in your AI coding tool and say:
+## Privacy rules
 
-```text
-/project Build a personal habit tracker for ADHD with web-first scope
-```
+Never commit: raw chat exports, API keys, private notes, vector indexes, local memory databases, screenshots with personal data, browser/session data. The `.gitignore` blocks the common private folders by default.
 
-## Claude And Codex Compatibility
-
-This template includes both:
-
-- `AGENTS.md` for Codex-style agents
-- `CLAUDE.md` for Claude Code / Claude projects
-
-`AGENTS.md` contains the full public Project OS workflow. `CLAUDE.md` points Claude users to that same workflow and repeats the most important Claude-facing rules, so both files should travel together.
-
-## Friend Review
-
-If you are sharing this with friends for critique, send them:
-
-- `README.md`
-- `AGENTS.md`
-- `CLAUDE.md`
-- `docs/for-ai-reviewers.md`
-- `docs/friend-review.md`
-- `docs/github-publishing.md`
-- `docs/install-from-github.md`
-- `docs/example-project-flow.md`
-- `install.sh`
-- `scripts/setup_project_os.py`
-- `scripts/install_full_engine.py`
-- `scripts/import_chat_history.py`
-- `addons/full-engine/README.md`
-
-Ask reviewers to check whether the workflow is understandable, honest about what is implemented, safe with private data, and easy to run in a blank test folder.
-
-If an AI reviewer cannot browse GitHub reliably, paste `docs/for-ai-reviewers.md` first. It gives the short architecture summary and the implemented-versus-optional boundary without requiring the whole README.
-
-## Optional Chat Memory Import
-
-You can optionally scan old AI chats into a private local review report:
-
-```bash
-python3 scripts/import_chat_history.py --input /path/to/export --output private-memory/chat-memory.md
-```
-
-The importer is local-first and conservative:
-
-- it does not upload chats
-- it does not commit raw chat files
-- it redacts common secret patterns
-- by default, it writes counts and review prompts instead of full source lines
-- short redacted excerpts require the explicit `--include-excerpts` flag
-
-Private memory folders are ignored by Git in this template and in projects created by the setup script. Still review `git status --short --ignored` before committing.
-
-## GitHub Setup
-
-1. Create a new empty GitHub repo.
-2. Run a local privacy check:
+Run a quick check before pushing:
 
 ```bash
 git status --short --ignored
-git log --format=fuller --max-count=5
-git remote -v
-rg -n --hidden --no-ignore -S "/Users|[A-Za-z]:\\\\|sk-|sk-proj-|ghp_|github_pat_|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|BEGIN [A-Z ]*PRIVATE KEY|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}|\\.env|graphify-out|private-memory|private-imports" .
+rg -n --hidden --no-ignore -S "/Users|sk-|ghp_|github_pat_|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|BEGIN [A-Z ]*PRIVATE KEY" .
 ```
 
-Expected benign hits include `.gitignore` entries, documentation that mentions privacy checks, tests with fake keys, and redaction regexes in `scripts/import_chat_history.py`. Investigate any real local paths, real keys, raw exports, personal notes, or unwanted Git author/remote metadata before `git add .`.
+## Status
 
-3. From this folder, run:
+Active. Loop tooling added July 2026. CI passing. Template is safe to publish after the privacy check above.
 
-```bash
-git init
-git add .
-git commit -m "Initial Project OS template"
-git branch -M main
-git remote add origin https://github.com/YOUR-USERNAME/project-os.git
-git push -u origin main
-```
+Field notes from real runs (what broke, what changed as a result) are in [docs/field-notes.md](docs/field-notes.md).
 
-4. In GitHub, go to repo settings and enable **Template repository** if you want friends to click **Use this template**.
-
-## What This Repo Is Good At
-
-- giving an AI project structure from day one
-- making work easier to review later
-- helping non-technical users follow what the assistant is doing
-- separating "implemented now" from "maybe later"
-- creating a repeatable closeout habit instead of ending with scattered files
-
-## What This Repo Does Not Magically Do For You
-
-This repository gives you the workflow, prompts, scripts, blackboard structure, and an opt-in full engine add-on.
-
-It does not automatically provide without explicit add-on/tool setup:
-
-- external TurboVec, Graphify, embedding, or graph database packages
-- a true autonomous swarm runtime
-- guaranteed model routing across sub-agents
-- scheduled research automation
-- GitHub publishing automation
-
-It also does not magically make a UI good without review. For frontend work, run the available build/test/browser checks and record responsive layout, accessibility, and browser QA status.
-
-Those depend on the AI tool and local setup you use around the template.
-
-## Privacy Rules
-
-Never commit:
-
-- raw chat exports
-- API keys
-- private notes
-- vector indexes
-- local memory databases
-- screenshots with personal data
-- browser/session data
-
-The `.gitignore` file blocks the common private folders by default.
-
-## Suggested First Demo
-
-If you want to test this quickly, make a blank folder and try one of these:
-
-- `/project Build a personal habit tracker for ADHD with web-first scope`
-- `/project Help me research and plan a local service business idea`
-- `/project Audit this small app and give me a delivery report`
-- `Use the research refresh workflow and tell me what changed in this market`
+A full example flow is in [docs/example-project-flow.md](docs/example-project-flow.md).
