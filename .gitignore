@@ -55,7 +55,7 @@ build/
 
 # Node / packaged builds
 node_modules/
-command-center/release/
+command-center/
 *.tsbuildinfo
 
 # Working data — the remote is the PUBLIC template; real run/brain data never ships
