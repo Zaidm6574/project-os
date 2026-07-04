@@ -9,7 +9,7 @@ Runs once a day and does three cheap, local, zero-dependency checks:
 Results are prepended to blackboard/22-automation-log.md (newest first, capped at
 30 entries) so any session — human or agent — sees drift without being asked to look.
 
-Exit code mirrors brain_scale severity: 0 OK, 1 WATCH, 2 CUTOVER.
+Exit code mirrors brain_scale severity: 0 OK, 1 WATCH, 2 CUTOVER, 3 n/a (brain missing).
 Manual run:  python3 scripts/os_nightly.py
 """
 import os, sys, json, glob, time, datetime, subprocess

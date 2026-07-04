@@ -22,7 +22,7 @@ entries stay in the index). The md-pages ceiling stays at 200 regardless:
 vectors don't shrink markdown sprawl.
 
 Status: OK < 60% of ceiling · WATCH 60-85% · CUTOVER > 85%  (worst dimension wins)
-Exit codes: 0 OK · 1 WATCH · 2 CUTOVER
+Exit codes: 0 OK · 1 WATCH · 2 CUTOVER · 3 n/a (shared brain missing)
 
 Usage: python3 scripts/brain_scale.py [--json]
 """

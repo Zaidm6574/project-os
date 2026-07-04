@@ -240,6 +240,25 @@ class TestPlanArtifactRecompileGate(BrainEnvMixin):
                    env_extra=self.env)
         self.assertNotEqual(r.returncode, 0)
 
+    def test_approved_plan_compiles_and_flips_to_running(self):
+        # Success path: exercises the full-path save-back that a previous bug
+        # sent to the wrong directory (status write went to PLANS/<id>.json,
+        # not the loaded path). Must exit 0, write packets, and flip status.
+        pf = self._plan("approved")
+        r = run_py(SCRIPTS / "plan_artifact.py", "compile", str(pf),
+                   env_extra=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(pf.read_text())["status"], "running")
+        packets = pf.parent.parent / "packets"
+        self.assertTrue(any(packets.glob("p1-*.md")))
+
+    def test_force_recompile_backs_up_prior_state(self):
+        pf = self._plan("done")
+        r = run_py(SCRIPTS / "plan_artifact.py", "compile", str(pf), "--force",
+                   env_extra=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(pf.with_name(pf.name + ".pre-force").exists())
+
 
 class TestBrainScaleMissingInput(BrainEnvMixin):
     def test_missing_brain_is_not_healthy(self):

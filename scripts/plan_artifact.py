@@ -42,9 +42,12 @@ def load(pid):
         return json.load(f)
 
 
-def save(plan):
-    os.makedirs(PLANS, exist_ok=True)
-    with open(plan_path(plan["id"]), "w", encoding="utf-8") as f:
+def save(plan, pid=None):
+    # Write back to the SAME location the plan was loaded from (pid may be a
+    # full path); fall back to the id-derived path under PLANS.
+    dest = plan_path(pid) if pid else plan_path(plan["id"])
+    os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
+    with open(dest, "w", encoding="utf-8") as f:
         json.dump(plan, f, indent=2)
 
 
@@ -59,7 +62,7 @@ def locked_update(pid, mutate):
     try:
         plan = load(pid)
         mutate(plan)
-        save(plan)
+        save(plan, pid)
         return plan
     finally:
         bb_lock.release(p, agent="plan", force=True)
@@ -210,10 +213,23 @@ def main():
                       "'running' and regenerate packets. Use --force if you mean it.",
                       file=sys.stderr)
             sys.exit(1)
-        os.makedirs(PACKETS, exist_ok=True)
+        # --force recompile of a non-approved plan: back up prior state first.
+        if plan["status"] != "approved" and "--force" in args:
+            import shutil as _sh
+            _bak = plan_path(pid) + ".pre-force"
+            try:
+                _sh.copy2(plan_path(pid), _bak)
+                print(f"backed up prior plan state to {os.path.basename(_bak)}")
+            except OSError:
+                pass
+        # Write packets NEXT TO the plan (…/blackboard/packets), so compiling a
+        # plan given by full path lands beside it instead of the repo default.
+        packets_dir = (os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(pid))), "packets")
+                       if pid.endswith(".json") else PACKETS)
+        os.makedirs(packets_dir, exist_ok=True)
         made = []
         for i, s in enumerate(topo_order(plan), 1):
-            fp = os.path.join(PACKETS, f"{plan['id']}-{s['id']}.md")
+            fp = os.path.join(packets_dir, f"{plan['id']}-{s['id']}.md")
             with open(fp, "w", encoding="utf-8") as f:
                 f.write(f"""Packet ID: {plan['id']}-{s['id']}
 Agent: {s['role']}{f" (model hint: {s['model_hint']})" if s.get('model_hint') else ""}
@@ -229,7 +245,7 @@ Plan: {plan['id']} · step {i}/{len(plan['steps'])} · expected outputs: {", ".j
 {f"Isolation: WORKTREE — before touching code run: python3 scripts/wt.py create {plan['id']}-{s['id']}  (work + commit there; merge via wt.py merge)" + chr(10) if s.get('isolation') == 'worktree' else ""}On completion run: python3 scripts/plan_artifact.py complete {plan['id']} --step {s['id']}
 """)
             made.append(fp)
-        locked_update(plan["id"], lambda p: p.__setitem__("status", "running"))
+        locked_update(pid, lambda p: p.__setitem__("status", "running"))
         print(f"compiled {len(made)} worker packets (topological order):")
         for m in made:
             print(" ", m)

@@ -53,7 +53,8 @@ def main():
               file=sys.stderr)
         sys.exit(2)
 
-    os.makedirs(os.path.dirname(SHARED_BRAIN), exist_ok=True)
+    _bp = os.path.dirname(os.path.abspath(SHARED_BRAIN))
+    os.makedirs(_bp, exist_ok=True)
     if not bb_lock.acquire(SHARED_BRAIN, agent=agent, wait=10):
         print("FAILED: could not lock shared-brain.jsonl", file=sys.stderr)
         sys.exit(1)
