@@ -68,7 +68,18 @@ Before copying anything, preview the install:
 ./install.sh ../demo-project --dry-run
 ```
 
-It prints exactly what would be created — nothing is written until you run it without the flag.
+The first lines look like this:
+
+```text
+Project OS setup dry run complete.
+- would create /tmp/project-os-demo
+- would write /tmp/project-os-demo/AGENTS.md
+- would write /tmp/project-os-demo/CLAUDE.md
+- would write /tmp/project-os-demo/.gitignore
+- would write /tmp/project-os-demo/prompts/project-os-kickoff.md
+```
+
+Nothing is written until you run it without the flag.
 
 ## Optional: smarter memory search
 
