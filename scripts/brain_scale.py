@@ -31,7 +31,9 @@ import os, sys, json, glob
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project-os/
 HOME = os.path.expanduser("~")
-SHARED_BRAIN = os.path.join(HOME, ".project-os", "central-brain", "shared-brain.jsonl")
+SHARED_BRAIN = os.environ.get(
+    "PROJECT_OS_SHARED_BRAIN",
+    os.path.join(HOME, ".project-os", "central-brain", "shared-brain.jsonl"))
 OSVEC = os.path.join(ROOT, "memory", "mneme_index.json")
 # Optional taste-brain inventory (personal-brain integration). Point the env var
 # at your own node inventory JSON, or leave unset — the dimension reports n/a.
@@ -123,7 +125,9 @@ def main():
         ("shared-brain entries (active)", shared, entries_ceil, status_for(shared, entries_ceil)),
         ("pages (runs+blackboard md)", pages, PAGES_CEIL, status_for(pages, PAGES_CEIL)),
     ]
-    rank = {"OK": 0, "WATCH": 1, "CUTOVER": 2, "n/a": 0}
+    # n/a (missing input) ranks WORST and exits distinctly (3): a missing
+    # shared brain must never read as "healthy" to callers or the nightly log.
+    rank = {"OK": 0, "WATCH": 1, "CUTOVER": 2, "n/a": 3}
     worst = max((d[3] for d in dims), key=lambda s: rank[s])
 
     out = {
@@ -156,7 +160,11 @@ def main():
               f"· archived={archive or 0} · stale interest(>{INTEREST_STALE_DAYS}d)={stale_interest}")
         if stale_interest:
             print(f"  archive candidates: python3 scripts/brain_archive.py candidates")
-        print(f"\n  OVERALL: {worst} — {out['rule'].split('. ')[0 if worst=='CUTOVER' else 1 if worst=='WATCH' else 2]}")
+        if worst == "n/a":
+            print("\n  OVERALL: n/a — shared brain not found; initialize it "
+                  "(scripts/brain_append.py creates the file) before trusting this gauge")
+        else:
+            print(f"\n  OVERALL: {worst} — {out['rule'].split('. ')[0 if worst=='CUTOVER' else 1 if worst=='WATCH' else 2]}")
     sys.exit(rank[worst])
 
 

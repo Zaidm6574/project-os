@@ -6,8 +6,9 @@ emits arachne-out/graph.json: nodes for the OS, each run, and its decisions / ri
 open-questions, with edges connecting them. Pure stdlib — no external graph tooling.
 
 Usage:
-  python3 memory/build_graph.py            # build graph.json
-  python3 memory/build_graph.py --stats    # build + print node/edge counts
+  python3 memory/build_graph.py                    # scan blackboard/ + all runs/
+  python3 memory/build_graph.py --root blackboard  # scan one dir (or a run folder)
+  python3 memory/build_graph.py --stats            # build + print node/edge counts
 """
 import os, re, json, glob, sys
 from datetime import datetime, timezone
@@ -55,7 +56,13 @@ def add_cards(nodes, edges, run_id, md, kind, color, id_keys, title_keys):
         edges.append({"source": run_id, "target": nid, "type": f"has-{kind}"})
 
 
-def discover_run_dirs():
+def discover_run_dirs(root_arg=None):
+    if root_arg:
+        d = root_arg if os.path.isabs(root_arg) else os.path.join(os.getcwd(), root_arg)
+        d = os.path.abspath(d)
+        if not os.path.isfile(os.path.join(d, "00-project-goal.md")):
+            sys.exit(f"[arachne] --root {root_arg}: no 00-project-goal.md found there")
+        return [(os.path.basename(d.rstrip(os.sep)), d)]
     dirs = []
     runs = os.path.join(ROOT, "runs")
     if os.path.isdir(runs):
@@ -69,10 +76,10 @@ def discover_run_dirs():
     return dirs
 
 
-def build():
+def build(root_arg=None):
     nodes = [{"id": "project-os", "type": "os", "label": "Project OS", "color": "#4da3ff"}]
     edges = []
-    for run_id, d in discover_run_dirs():
+    for run_id, d in discover_run_dirs(root_arg):
         goal_md = read(os.path.join(d, "00-project-goal.md"))
         title = first_heading(goal_md) or run_id
         nodes.append({"id": run_id, "type": "run", "label": title[:120], "color": "#3dcf82"})
@@ -96,7 +103,13 @@ def build():
 
 
 if __name__ == "__main__":
-    g = build()
+    root_arg = None
+    if "--root" in sys.argv:
+        i = sys.argv.index("--root")
+        if i + 1 >= len(sys.argv):
+            sys.exit("[arachne] --root needs a directory argument")
+        root_arg = sys.argv[i + 1]
+    g = build(root_arg)
     print(f"[arachne] wrote {OUT}")
     if "--stats" in sys.argv:
         print(f"[arachne] {len(g['nodes'])} nodes, {len(g['edges'])} edges")

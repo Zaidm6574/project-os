@@ -40,8 +40,9 @@ def run_gauge():
     r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "brain_scale.py")],
                        capture_output=True, text=True, timeout=120)
     out = (r.stdout or "").strip()
-    # brain_scale prints a STATUS line; fall back to the last line
-    status = next((l for l in out.splitlines() if "STATUS" in l.upper()), out.splitlines()[-1] if out else "no output")
+    # brain_scale prints an "OVERALL:" line; fall back to the last line
+    status = next((l for l in out.splitlines() if "OVERALL" in l.upper() or "STATUS" in l.upper()),
+                  out.splitlines()[-1] if out else "no output")
     return status.strip(), r.returncode
 
 

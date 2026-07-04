@@ -201,9 +201,14 @@ def main():
 
     if cmd == "compile":
         plan = load(pid)
-        if plan["status"] == "planned" and "--force" not in args:
-            print("plan is not approved (planOnly). Run `approve` first, or --force.",
-                  file=sys.stderr)
+        if plan["status"] != "approved" and "--force" not in args:
+            if plan["status"] == "planned":
+                print("plan is not approved (planOnly). Run `approve` first, or --force.",
+                      file=sys.stderr)
+            else:
+                print(f"plan status is '{plan['status']}' — recompiling would reset it to "
+                      "'running' and regenerate packets. Use --force if you mean it.",
+                      file=sys.stderr)
             sys.exit(1)
         os.makedirs(PACKETS, exist_ok=True)
         made = []

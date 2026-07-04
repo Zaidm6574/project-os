@@ -19,8 +19,10 @@ import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project-os/
 HOME = os.path.expanduser("~")
-INDEX = os.path.join(ROOT, "memory", "mneme_index.json")
-SHARED_BRAIN = os.path.join(HOME, ".project-os", "central-brain", "shared-brain.jsonl")
+INDEX = os.environ.get("MNEME_INDEX", os.path.join(ROOT, "memory", "mneme_index.json"))
+SHARED_BRAIN = os.environ.get(
+    "PROJECT_OS_SHARED_BRAIN",
+    os.path.join(HOME, ".project-os", "central-brain", "shared-brain.jsonl"))
 DIM = 256
 OLLAMA_URL = os.environ.get("MNEME_OLLAMA_URL") or os.environ.get("OSVEC_OLLAMA_URL", "http://127.0.0.1:11434")
 NEURAL_MODEL = os.environ.get("MNEME_NEURAL_MODEL") or os.environ.get("OSVEC_NEURAL_MODEL", "nomic-embed-text")

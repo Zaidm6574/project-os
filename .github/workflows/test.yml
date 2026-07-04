@@ -5,6 +5,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Tests only need to read the repo — never hand fork PRs a write-scoped token.
+permissions:
+  contents: read
+
 jobs:
   unit-tests:
     runs-on: ubuntu-latest

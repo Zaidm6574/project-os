@@ -21,7 +21,9 @@ import os, re, sys, json, glob, datetime, subprocess
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project-os/
 HOME = os.path.expanduser("~")
-SHARED_BRAIN = os.path.join(HOME, ".project-os", "central-brain", "shared-brain.jsonl")
+SHARED_BRAIN = os.environ.get(
+    "PROJECT_OS_SHARED_BRAIN",
+    os.path.join(HOME, ".project-os", "central-brain", "shared-brain.jsonl"))
 RUNS = os.path.join(ROOT, "runs")
 PACKETS = os.path.join(ROOT, "blackboard", "packets")
 MARKER = ".harvested"
@@ -65,7 +67,10 @@ def is_dupe(text, norms):
     n = norm(text)
     if len(n) < 20:
         return True  # too short to be a lesson; treat as noise
-    return any(n in b or b in n for b in norms)
+    # Dupe = the new lesson is contained in an existing entry (or equal).
+    # Deliberately NOT bidirectional: a short old entry contained inside a
+    # longer new lesson must not silently drop the richer new one.
+    return any(n in b for b in norms)
 
 
 def bullets_by_section(md):

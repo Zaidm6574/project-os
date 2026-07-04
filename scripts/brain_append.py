@@ -20,7 +20,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project-os
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 import bb_lock
 
-SHARED_BRAIN = os.path.expanduser("~/.project-os/central-brain/shared-brain.jsonl")
+SHARED_BRAIN = os.environ.get(
+    "PROJECT_OS_SHARED_BRAIN",
+    os.path.expanduser("~/.project-os/central-brain/shared-brain.jsonl"))
 MNEME = os.path.join(ROOT, "memory", "mneme_adapter.py")
 
 
@@ -51,6 +53,7 @@ def main():
               file=sys.stderr)
         sys.exit(2)
 
+    os.makedirs(os.path.dirname(SHARED_BRAIN), exist_ok=True)
     if not bb_lock.acquire(SHARED_BRAIN, agent=agent, wait=10):
         print("FAILED: could not lock shared-brain.jsonl", file=sys.stderr)
         sys.exit(1)

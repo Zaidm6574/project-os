@@ -176,6 +176,8 @@ def main():
             print("FAILED: could not acquire lock for append", file=sys.stderr)
             sys.exit(1)
         try:
+            parent = os.path.dirname(os.path.abspath(target))
+            os.makedirs(parent, exist_ok=True)
             with open(target, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
                 f.flush()

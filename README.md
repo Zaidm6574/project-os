@@ -231,8 +231,11 @@ Important: missing external Graphify/TurboVec commands do not mean Project OS lo
 
 ```bash
 python3 memory/build_graph.py --root blackboard
-python3 memory/osvec_adapter.py selftest
+python3 memory/mneme_adapter.py build     # core vector memory
+python3 memory/osvec_adapter.py selftest  # full engine only (installed into targets by --full-engine)
 ```
+
+Note: `osvec_adapter.py` ships with the full-engine add-on (`addons/full-engine/memory/`); in this repo checkout only `mneme_adapter.py` is present under `memory/`.
 
 Model routing is different: Project OS records the desired routing plan, but whether each sub-agent can run on a different model depends on the AI app. Configure that in Cursor, Claude, Codex, or whichever tool is running the project; it is not detected by the GraphOS/OSVec environment variables.
 
