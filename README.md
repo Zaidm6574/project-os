@@ -2,18 +2,50 @@
 
 [![Tests](https://github.com/Zaidm6574/project-os/actions/workflows/test.yml/badge.svg)](https://github.com/Zaidm6574/project-os/actions/workflows/test.yml)
 
-The system I use to ship real software with AI assistants — most recently a live booking application for a working auto-detailing business. It gives an AI-assisted project persistent goals, decisions, verification gates, and memory, instead of leaving everything inside one disappearing chat.
+The system I use to ship real software with AI assistants — most recently a live booking application for a working auto-detailing business. The "agents" here are prompt roles executed by Claude/Codex sessions, not autonomous background processes; the engineering is in the locking, validation, and verification tooling underneath them. It gives an AI-assisted project persistent goals, decisions, verification gates, and memory, instead of leaving everything inside one disappearing chat.
+
+![Fresh clone, full test suite green, a sham plan rejected, a real plan accepted — 20 seconds, no dependencies](docs/proof.gif)
+
+Don't take the README's word for any of this:
+
+```bash
+git clone https://github.com/Zaidm6574/project-os.git && cd project-os
+python3 -m unittest discover -s tests    # over 120 tests, ~10 seconds, zero dependencies
+```
 
 Built by someone with ADHD who needed project state to live outside his head. The first version of that detailing site looked finished but couldn't take a booking — it failed silently, for real people. Project OS is what I built so that never happens again: plans are rejected unless they declare how the result will be checked, concurrent agents can't silently erase each other's work (fencing-token file locks), and chat-derived memory never syncs without explicit approval (privacy fail-closed).
 
 Over 120 tests cover installation, concurrency, privacy boundaries, plan verification, and memory tooling. An adversarial model-judge review found real flaws (a sync gate that silently dropped every lesson, a validator/compiler mismatch); each became a regression test before the fix landed.
+
+## Check these claims yourself
+
+Every load-bearing claim in this README has a command a stranger can run on a fresh clone:
+
+| Claim | Check it |
+|---|---|
+| The full suite passes with zero dependencies | `python3 -m unittest discover -s tests` |
+| Two agents can't silently overwrite each other's work — locks are token-fenced and survive process suspension | `python3 -m unittest tests.test_bb_lock_hardening -v` |
+| A plan that fakes its verification step is rejected, with the reason | the two commands below |
+| Chat-derived memory never syncs to the shared brain without explicit approval | `python3 -m unittest tests.test_brain_privacy -v` |
+| The installer fails closed below Python 3.10 and names the interpreter it found | `PATH=/usr/bin:/bin sh install.sh /tmp/demo --dry-run` (on a machine whose only `python3` is older than 3.10, e.g. stock macOS: exits 1, prints `found python3 = 3.9.6 (/usr/bin/python3); ...`) |
+
+The plan gate, live:
+
+```bash
+printf '[{"id":"w1","role":"builder","task":"build"},
+ {"id":"c1","role":"reviewer","task":"check","depends_on":["w1"],
+  "verification":{"method":"-","expected":"-"}}]' > /tmp/sham.json
+python3 scripts/plan_artifact.py create --goal "demo" --steps-file /tmp/sham.json
+# INVALID:
+# - checker verification must be a JSON object with nonempty, non-placeholder method and expected strings
+```
 
 ## What it gives your AI tool
 
 - A clear goal file (`00-project-goal.md`) so the assistant knows what done looks like
 - A shared blackboard for decisions, research, risks, cost, and next steps
 - `AGENTS.md` + `CLAUDE.md` — operating rules for Codex-style tools and Claude Code
-- Solo, mini-swarm, and full-swarm workflow patterns (structured prompt roles for one AI tool — not autonomous background processes)
+- Three workflow tiers — a solo loop, and the multi-role "mini swarm" / "full swarm" patterns from `AGENTS.md` (structured prompt roles for one AI tool, per the first paragraph — not autonomous background processes)
 - A self-improvement loop: each serious run fills a memory harvest that can be promoted to the shared brain after review
 - Context hygiene guidance for long sessions where prompt-cache cost quietly compounds
 - A research refresh workflow for checking what changed since you last looked

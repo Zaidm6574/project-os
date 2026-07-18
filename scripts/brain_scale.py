@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """brain_scale — instrument the shared brain against the flat-index ceiling.
 
-Karpathy's LLM-wiki finding (verified, July 2026 radar run): a flat index works
+Karpathy's LLM-wiki observation: a flat index works
 to ~100 sources / ~200 pages, after which hybrid retrieval (BM25 + embeddings +
 graph) must take over as PRIMARY retrieval. This counts what we actually have and
 says how close we are, so the Mneme (formerly TurboVec/OSVec) cutover happens before retrieval

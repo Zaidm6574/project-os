@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """plan_artifact — wave plans as inspectable, replayable data (not prose).
 
-Implements the planOnly / createPlanArtifact / runFromPlan primitives (verified
-2-1 from open-multi-agent, July 2026 radar run): a plan is a JSON artifact in
+Implements the planOnly / createPlanArtifact / runFromPlan primitives (behavior
+pinned by tests/test_loop_tooling.py and tests/test_audit_fixes.py): a plan is a JSON artifact in
 blackboard/plans/ that a human can inspect and approve BEFORE any agent runs, and
 that can be compiled into per-step worker packets deterministically afterwards.
 

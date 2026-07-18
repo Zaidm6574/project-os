@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """evolution — evolution records for the evaluate/approve loop.
 
-Implements the Worker + Evaluator + Evolution pattern (arXiv 2604.21003, verified
-2-1 in the July 2026 radar run): every harness/artifact variant gets recorded with
+Implements the Worker + Evaluator + Evolution pattern (arXiv 2604.21003): every
+harness/artifact variant gets recorded with
 its evaluator score, and the next variant ALWAYS evolves from the best-scoring one
 — not the latest one. The Evolution agent reads the complete history before
 proposing a mutation to prompts, tools, or orchestration.

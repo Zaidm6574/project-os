@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """bb_lock — multi-writer file locking for Project OS blackboards + the shared brain.
 
-Pattern lifted from claude-obsidian's wiki-lock.sh (verified in-code 3-0, July 2026
-radar run): atomic O_CREAT|O_EXCL lockfiles keyed by SHA1(realpath), stale locks
+Pattern lifted from claude-obsidian's wiki-lock.sh (behavior pinned by
+tests/test_bb_lock_hardening.py): atomic O_CREAT|O_EXCL lockfiles keyed by
+SHA1(realpath), stale locks
 auto-reaped after 60s. Zero-dependency, same-user cross-process — safe for
 concurrent agent waves and Claude/Codex both appending to shared-brain.jsonl.
 
