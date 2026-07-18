@@ -1,4 +1,6 @@
+import functools
 import importlib.util
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,6 +16,38 @@ TOOL_CHECK = ROOT / "scripts" / "check_optional_tools.py"
 IMPORTER = ROOT / "scripts" / "import_chat_history.py"
 FULL_ENGINE = ROOT / "scripts" / "install_full_engine.py"
 CENTRAL_BRAIN = ROOT / "addons" / "full-engine" / "brain" / "central_brain.py"
+VALIDATE_RUN = ROOT / "addons" / "full-engine" / "memory" / "validate_run.py"
+
+
+# Mirrors the interpreter probe in install.sh — same candidates, same order,
+# same >=3.10 version gate. Cached so the skip decorators probe PATH once.
+_PYTHON_CANDIDATES = ("python3", "python", "python3.13", "python3.12",
+                      "python3.11", "python3.10", "python3.14")
+
+
+@functools.lru_cache(maxsize=None)
+def _find_python310():
+    """Return the path of the first PATH candidate that is Python >=3.10, else None."""
+    for candidate in _PYTHON_CANDIDATES:
+        path = shutil.which(candidate)
+        if not path:
+            continue
+        try:
+            probe = subprocess.run(
+                [path, "-c",
+                 "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)"],
+                capture_output=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if probe.returncode == 0:
+            return path
+    return None
+
+
+def _path_has_python310():
+    return _find_python310() is not None
 
 
 def load_module(path: Path, name: str):
@@ -25,6 +59,32 @@ def load_module(path: Path, name: str):
 
 
 class SetupProjectOSTests(unittest.TestCase):
+    def test_copy_helpers_exclude_generated_runtime_state(self):
+        setup = load_module(SETUP, "setup_project_os_runtime_filter")
+        full_engine = load_module(FULL_ENGINE, "install_full_engine_runtime_filter")
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source = base / "source"
+            (source / "memory" / "store").mkdir(parents=True)
+            (source / "second-brain" / "out").mkdir(parents=True)
+            (source / "memory" / "helper.py").write_text("# helper\n", encoding="utf-8")
+            (source / "memory" / "store" / "project.sidecar.json").write_text("{}\n", encoding="utf-8")
+            (source / "memory" / "store" / "project.tvim").write_bytes(b"runtime")
+            (source / "second-brain" / "out" / "graph.json").write_text("{}\n", encoding="utf-8")
+
+            starter_target = base / "starter"
+            engine_target = base / "engine"
+            setup.copy_tree_files(source, starter_target, force=False)
+            full_engine.copy_tree(source, engine_target, force=False)
+
+            self.assertTrue((starter_target / "memory" / "helper.py").exists())
+            self.assertTrue((engine_target / "memory" / "helper.py").exists())
+            self.assertFalse((starter_target / "memory" / "store").exists())
+            self.assertFalse((engine_target / "memory" / "store").exists())
+            self.assertFalse((starter_target / "second-brain" / "out").exists())
+            self.assertFalse((engine_target / "second-brain" / "out").exists())
+
+    @unittest.skipUnless(_path_has_python310(), "installer requires Python >=3.10 on PATH")
     def test_install_script_bootstraps_project(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "project"
@@ -43,9 +103,11 @@ class SetupProjectOSTests(unittest.TestCase):
             self.assertTrue((target / "addons" / "full-engine" / "staged" / "agents" / "ui-ux-designer.md").exists())
             self.assertTrue((target / "addons" / "full-engine" / "staged" / "agents" / "frontend-builder.md").exists())
             self.assertTrue((target / "addons" / "full-engine" / "staged" / "agents" / "context-scout.md").exists())
+            self.assertFalse((target / "addons" / "second-brain").exists())
             self.assertTrue((target / "memory" / "build_graph.py").exists())
             self.assertTrue((target / "memory" / "osvec_adapter.py").exists())
 
+    @unittest.skipUnless(_path_has_python310(), "installer requires Python >=3.10 on PATH")
     def test_install_script_check_tools_writes_capability_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "project"
@@ -68,6 +130,7 @@ class SetupProjectOSTests(unittest.TestCase):
             self.assertIn("Legacy `PROJECT_OS_GRAPH_CMD`", text)
             self.assertIn("scripts/install_full_engine.py", text)
 
+    @unittest.skipUnless(_path_has_python310(), "installer requires Python >=3.10 on PATH")
     def test_install_script_full_engine_activates_local_tools_and_claude_commands(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "project"
@@ -100,6 +163,7 @@ class SetupProjectOSTests(unittest.TestCase):
             self.assertIn("Local OSVec helper found: memory/osvec_adapter.py", text)
             self.assertIn("vector store not populated yet", text)
 
+    @unittest.skipUnless(_path_has_python310(), "installer requires Python >=3.10 on PATH")
     def test_install_script_full_engine_can_initialize_central_brain(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "project"
@@ -130,6 +194,7 @@ class SetupProjectOSTests(unittest.TestCase):
             self.assertIn("Project ID: `demo`", marker_text)
             self.assertIn(str(central), marker_text)
 
+    @unittest.skipUnless(_path_has_python310(), "installer requires Python >=3.10 on PATH")
     def test_install_script_force_reaches_full_engine_installer(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "project"
@@ -147,6 +212,7 @@ class SetupProjectOSTests(unittest.TestCase):
             self.assertNotEqual(existing.read_text(encoding="utf-8"), "# keep me until forced\n")
             self.assertIn("Project OS full engine add-on install complete.", result.stdout)
 
+    @unittest.skipUnless(_path_has_python310(), "installer requires Python >=3.10 on PATH")
     def test_install_script_dry_run_does_not_create_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "dry-run-project"
@@ -201,6 +267,50 @@ class SetupProjectOSTests(unittest.TestCase):
         self.assertIn("github.com/YOUR-USERNAME/project-os.git", combined)
         self.assertNotIn("project-os-template.git", combined)
         self.assertIn("python3 -m unittest discover -s tests -v", workflow)
+
+    def test_python_310_minimum_is_documented_checked_and_tested_in_ci(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        publishing = (ROOT / "docs" / "github-publishing.md").read_text(encoding="utf-8")
+        installer = INSTALL.read_text(encoding="utf-8")
+        workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
+
+        self.assertIn("Python 3.10+", readme)
+        self.assertIn("Python 3.10+", publishing)
+        self.assertIn("sys.version_info", installer)
+        self.assertIn("Python 3.10 or newer", installer)
+        self.assertIn('"3.10"', workflow)
+        self.assertIn('"3.x"', workflow)
+        self.assertIn("matrix.python-version", workflow)
+
+    def test_direct_python_clis_reject_blank_targets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for script in (SETUP, FULL_ENGINE):
+                result = subprocess.run(
+                    [sys.executable, str(script), "--target", "", "--dry-run"],
+                    cwd=tmp,
+                    capture_output=True,
+                    text=True,
+                )
+
+                self.assertNotEqual(result.returncode, 0, script.name)
+                self.assertIn("target must be a non-empty path", result.stderr)
+
+    def test_claude_friend_review_matches_public_privacy_contract(self):
+        claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+
+        self.assertIn("Friend Review Mode", claude)
+        self.assertIn("local paths", claude)
+        self.assertIn("personal names", claude)
+        self.assertIn("raw chats", claude)
+        self.assertIn("secrets", claude)
+        self.assertIn("blank test install", claude)
+        self.assertIn("delivery reports", claude)
+
+    def test_friend_review_tool_check_uses_an_explicit_target(self):
+        friend_review = (ROOT / "docs" / "friend-review.md").read_text(encoding="utf-8")
+
+        self.assertNotIn("`./install.sh --check-tools`", friend_review)
+        self.assertIn("`./install.sh ../demo-project --check-tools`", friend_review)
 
     def test_ai_reviewer_doc_is_part_of_sharing_bundle(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -346,6 +456,7 @@ class SetupProjectOSTests(unittest.TestCase):
         self.assertIn("Draft when browser QA was not run", command)
         self.assertIn("Rejected when QA finds blocking UI issues", command)
 
+    @unittest.skipUnless(_path_has_python310(), "installer requires Python >=3.10 on PATH")
     def test_installed_full_engine_can_save_chat_summary_to_brain(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "project"
@@ -393,6 +504,7 @@ class SetupProjectOSTests(unittest.TestCase):
             self.assertIn("chat", record["tags"])
             self.assertIn("privacy", record["tags"])
 
+    @unittest.skipUnless(_path_has_python310(), "installer requires Python >=3.10 on PATH")
     def test_installed_full_engine_refuses_secret_like_chat_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "project"
@@ -555,6 +667,35 @@ class ImportChatHistoryTests(unittest.TestCase):
 
 
 class OptionalToolCheckTests(unittest.TestCase):
+    def test_closure_validator_requires_a_nonempty_real_memory_artifact(self):
+        validator = load_module(VALIDATE_RUN, "validate_run_real_artifact")
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            run = project / "runs" / "demo"
+            run.mkdir(parents=True)
+            (run / "13-delivery-report.md").write_text(
+                "Graph rebuilt at graphify-out/graph.json; memory exported to brain/shared-brain.jsonl.\n",
+                encoding="utf-8",
+            )
+            brain = project / "brain" / "shared-brain.jsonl"
+            brain.parent.mkdir(parents=True)
+            brain.write_text("", encoding="utf-8")
+
+            self.assertFalse(validator._has_graph_or_memory(str(run)))
+
+            brain.write_text('{"id":"lesson-1","type":"lesson","text":"Verified lesson"}\n', encoding="utf-8")
+            self.assertTrue(validator._has_graph_or_memory(str(run)))
+
+    def test_full_engine_installer_rejects_unbootstrapped_target(self):
+        full_engine = load_module(FULL_ENGINE, "install_full_engine_requires_starter")
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "blank-project"
+
+            with self.assertRaisesRegex(FileNotFoundError, "starter Project OS workspace"):
+                full_engine.install_full_engine(target)
+
+            self.assertFalse(target.exists())
+
     def test_tool_check_can_write_report_without_project_bootstrap(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = subprocess.run(
@@ -606,6 +747,9 @@ class OptionalToolCheckTests(unittest.TestCase):
         full_engine = load_module(FULL_ENGINE, "install_full_engine")
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
+            (target / "blackboard").mkdir()
+            (target / "AGENTS.md").write_text("# Project OS\n", encoding="utf-8")
+            (target / "blackboard" / "00-project-goal.md").write_text("# Goal\n", encoding="utf-8")
             existing = target / "memory" / "new_run.py"
             existing.parent.mkdir(parents=True)
             existing.write_text("# keep me\n", encoding="utf-8")
@@ -638,12 +782,12 @@ class OptionalToolCheckTests(unittest.TestCase):
             (source_project / "brain").mkdir(parents=True)
             (receiving_project / "brain").mkdir(parents=True)
             (source_project / "brain" / "shared-brain.jsonl").write_text(
-                '{"id":"lesson-001","type":"lesson","text":"Use explicit opt-in before syncing central brain.","tags":["memory"]}\n',
+                '{"id":"lesson-001","type":"lesson","text":"Use explicit opt-in before syncing central brain.","tags":["memory"],"approved":true,"summary_only":true,"raw_chat":false}\n',
                 encoding="utf-8",
             )
 
-            self.assertEqual(central_brain.push(central, source_project, "alpha"), 1)
-            self.assertEqual(central_brain.pull(central, receiving_project, "beta"), 1)
+            self.assertEqual(central_brain.push(central, source_project, "alpha"), (1, 0))
+            self.assertEqual(central_brain.pull(central, receiving_project, "beta"), (1, 0))
             pulled = central_brain.read_jsonl(receiving_project / "brain" / "shared-brain.jsonl")
             self.assertEqual(len(pulled), 1)
             self.assertTrue(pulled[0]["central_import"])
@@ -651,10 +795,134 @@ class OptionalToolCheckTests(unittest.TestCase):
             self.assertEqual(pulled[0]["origin_project_id"], "alpha")
             self.assertNotIn("project_path", pulled[0])
 
-            self.assertEqual(central_brain.push(central, receiving_project, "beta"), 0)
+            self.assertEqual(central_brain.push(central, receiving_project, "beta"), (0, 0))
             count, projects = central_brain.status(central)
             self.assertEqual(count, 1)
             self.assertEqual(projects, ["alpha"])
+
+    def test_central_brain_sync_rejects_raw_and_unapproved_chat_records(self):
+        central_brain = load_module(CENTRAL_BRAIN, "central_brain_summary_boundary")
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            central = base / "central"
+            source_project = base / "source"
+            receiving_project = base / "receiving"
+            (source_project / "brain").mkdir(parents=True)
+            (receiving_project / "brain").mkdir(parents=True)
+            records = [
+                {
+                    "id": "approved-summary",
+                    "type": "lesson",
+                    "source": "chat-summary",
+                    "text": "Approved compact summary.",
+                    "approved": True,
+                    "summary_only": True,
+                    "raw_chat": False,
+                    "tags": ["chat-summary"],
+                },
+                {
+                    "id": "raw-chat",
+                    "type": "lesson",
+                    "source": "chat-raw",
+                    "text": "Raw personal conversation content.",
+                    "approved": True,
+                    "summary_only": False,
+                    "raw_chat": True,
+                    "tags": ["raw-chat"],
+                },
+                {
+                    "id": "unapproved-summary",
+                    "type": "lesson",
+                    "source": "chat-summary",
+                    "text": "Summary that was not approved.",
+                    "approved": False,
+                    "summary_only": True,
+                    "raw_chat": False,
+                    "tags": ["chat-summary"],
+                },
+            ]
+            (source_project / "brain" / "shared-brain.jsonl").write_text(
+                "".join(__import__("json").dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(central_brain.push(central, source_project, "alpha"), (1, 2))
+            self.assertEqual(central_brain.pull(central, receiving_project, "beta"), (1, 0))
+            pulled = central_brain.read_jsonl(receiving_project / "brain" / "shared-brain.jsonl")
+            self.assertEqual([record["origin_id"] for record in pulled], ["approved-summary"])
+
+    def test_central_brain_sync_fails_closed_for_malformed_or_unapproved_records(self):
+        central_brain = load_module(CENTRAL_BRAIN, "central_brain_fail_closed")
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            central = base / "central"
+            source_project = base / "source"
+            (source_project / "brain").mkdir(parents=True)
+            records = [
+                {
+                    "id": "approved-summary",
+                    "type": "lesson",
+                    "source": "chat-summary",
+                    "text": "Approved compact summary.",
+                    "approved": True,
+                    "summary_only": True,
+                    "raw_chat": False,
+                    "tags": ["chat-summary"],
+                },
+                {
+                    "id": "missing-approval",
+                    "type": "lesson",
+                    "text": "This must not leave the project.",
+                    "summary_only": True,
+                    "raw_chat": False,
+                    "tags": [],
+                },
+                {
+                    "id": "private-summary",
+                    "type": "lesson",
+                    "source": "private-notes",
+                    "text": "Private material must stay local.",
+                    "approved": True,
+                    "summary_only": True,
+                    "raw_chat": False,
+                    "tags": ["private"],
+                },
+                {
+                    "id": "bad-tags",
+                    "type": "lesson",
+                    "text": "Tags must have the expected shape.",
+                    "approved": True,
+                    "summary_only": True,
+                    "raw_chat": False,
+                    "tags": "chat-summary",
+                },
+                {
+                    "id": "bad-privacy-boolean",
+                    "type": "lesson",
+                    "text": "Privacy fields must be booleans.",
+                    "approved": "true",
+                    "summary_only": True,
+                    "raw_chat": False,
+                    "tags": [],
+                },
+                {
+                    "id": "bad-raw-boolean",
+                    "type": "lesson",
+                    "text": "Raw-chat status must be a boolean.",
+                    "approved": True,
+                    "summary_only": True,
+                    "raw_chat": "false",
+                    "tags": [],
+                },
+            ]
+            (source_project / "brain" / "shared-brain.jsonl").write_text(
+                "".join(__import__("json").dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(central_brain.push(central, source_project, "alpha"), (1, 5))
+            synced = central_brain.read_jsonl(central / "shared-brain.jsonl")
+            self.assertEqual([record["origin_id"] for record in synced], ["approved-summary"])
 
     def test_tool_check_prefers_graphos_and_osvec_env_vars(self):
         tool_check = load_module(TOOL_CHECK, "check_optional_tools")

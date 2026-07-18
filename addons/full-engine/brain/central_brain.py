@@ -2,8 +2,9 @@
 """Optional central brain sync for Project OS.
 
 Each Project OS project keeps its own local `brain/shared-brain.jsonl`. This
-tool creates or connects a central JSONL exchange so approved lessons can move
-between projects without importing raw chats or private dumps.
+tool creates or connects a central JSONL exchange so lessons can move between
+projects without importing raw chats or private dumps. Plain lesson records
+sync as-is; chat-derived records sync only as explicitly approved summaries.
 
 Usage:
   python3 brain/central_brain.py init --path ~/.project-os/central-brain
@@ -115,24 +116,65 @@ def project_brain_path(project: Path) -> Path:
     return project.expanduser().resolve() / PROJECT_BRAIN
 
 
-def lessons_for_central(project: Path, pid: str) -> list[dict]:
+def syncable_summary(record: dict) -> bool:
+    """Fail closed for chat-derived records; keep plain lessons flowing.
+
+    Records that use the chat approval vocabulary (any of approved /
+    summary_only / raw_chat present) or carry a chat source/tag must be an
+    explicitly approved summary. Plain lesson records from the export /
+    brain_append pipeline never carry those fields and stay syncable —
+    requiring the fields on every record silently zeroed the whole sync
+    flow (hostile-judge finding F1, 2026-07-17). Private markers always
+    exclude a record."""
+    source_value = record.get("source", "")
+    tags_value = record.get("tags", [])
+    if not isinstance(source_value, str):
+        return False
+    if not isinstance(tags_value, list) or not all(isinstance(tag, str) for tag in tags_value):
+        return False
+    source = source_value.casefold()
+    tags = {tag.casefold() for tag in tags_value}
+    private_tags = {"raw-chat", "private", "sensitive", "local-only", "do-not-sync"}
+    if source in {"chat-raw", "raw-chat"} or source.startswith("private") or (tags & private_tags):
+        return False
+    chat_derived = (
+        any(field in record for field in ("approved", "summary_only", "raw_chat"))
+        or source == "chat-summary"
+        or "chat-summary" in tags
+    )
+    if chat_derived:
+        return (
+            record.get("approved") is True
+            and record.get("summary_only") is True
+            and record.get("raw_chat") is False
+        )
+    return True
+
+
+def lessons_for_central(project: Path, pid: str) -> tuple[list[dict], int]:
+    """Returns (syncable lessons, count skipped by the privacy/type gate)."""
     src = project_brain_path(project)
     lessons: list[dict] = []
+    skipped = 0
     for record in read_jsonl(src):
         if record.get("central_import") or record.get("central_id") or record.get("source") == "central-brain":
             continue
+        if not syncable_summary(record):
+            skipped += 1
+            continue
         if record.get("type") != "lesson" and record.get("memory_type") != "lesson":
+            skipped += 1
             continue
         text = str(record.get("text", "")).strip()
         if not text or looks_like_secret(text):
+            skipped += 1
             continue
         origin_id = str(record.get("id") or record.get("memory_id") or "")
         tags = list(record.get("tags") or [])
         project_tag = f"project:{pid}"
         if project_tag not in tags:
             tags.append(project_tag)
-        lessons.append(
-            {
+        central_record = {
                 "id": central_id(pid, origin_id, text),
                 "origin_id": origin_id,
                 "project_id": pid,
@@ -143,36 +185,45 @@ def lessons_for_central(project: Path, pid: str) -> list[dict]:
                 "text": text,
                 "tags": tags,
             }
-        )
-    return lessons
+        for field in ("approved", "summary_only", "raw_chat"):
+            if field in record:
+                central_record[field] = record[field]
+        lessons.append(central_record)
+    return lessons, skipped
 
 
-def push(path: Path, project: Path, explicit_project_id: str | None = None) -> int:
+def push(path: Path, project: Path, explicit_project_id: str | None = None) -> tuple[int, int]:
     brain_file = init_central(path)
     pid = project_id(project, explicit_project_id)
-    return append_new(brain_file, lessons_for_central(project, pid))
+    lessons, skipped = lessons_for_central(project, pid)
+    return append_new(brain_file, lessons), skipped
 
 
-def pull(path: Path, project: Path, explicit_project_id: str | None = None) -> int:
+def pull(path: Path, project: Path, explicit_project_id: str | None = None) -> tuple[int, int]:
     brain_file = init_central(path)
     pid = project_id(project, explicit_project_id)
     dest = project_brain_path(project)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.touch(exist_ok=True)
     safe_records = []
+    skipped = 0
     for record in read_jsonl(brain_file):
         if record.get("project_id") == pid:
             continue
+        if not syncable_summary(record):
+            skipped += 1
+            continue
         if record.get("type") != "lesson":
+            skipped += 1
             continue
         text = str(record.get("text", "")).strip()
         if not text or looks_like_secret(text):
+            skipped += 1
             continue
         tags = list(record.get("tags") or [])
         if "central-brain" not in tags:
             tags.append("central-brain")
-        safe_records.append(
-            {
+        local_record = {
                 "id": record.get("id"),
                 "central_id": record.get("id"),
                 "origin_id": record.get("origin_id") or record.get("id"),
@@ -184,8 +235,11 @@ def pull(path: Path, project: Path, explicit_project_id: str | None = None) -> i
                 "tags": tags,
                 "central_import": True,
             }
-        )
-    return append_new(dest, safe_records)
+        for field in ("approved", "summary_only", "raw_chat"):
+            if field in record:
+                local_record[field] = record[field]
+        safe_records.append(local_record)
+    return append_new(dest, safe_records), skipped
 
 
 def status(path: Path) -> tuple[int, list[str]]:
@@ -212,23 +266,26 @@ def selftest() -> int:
                     "type": "lesson",
                     "text": "Prefer explicit full-engine opt-in before central memory sync.",
                     "tags": ["install"],
+                    "approved": True,
+                    "summary_only": True,
+                    "raw_chat": False,
                 }
             )
             + "\n",
             encoding="utf-8",
         )
 
-        assert push(central, project_a, "alpha") == 1
-        assert push(central, project_a, "alpha") == 0
+        assert push(central, project_a, "alpha") == (1, 0)
+        assert push(central, project_a, "alpha") == (0, 0)
         count, projects = status(central)
         assert count == 1, count
         assert projects == ["alpha"], projects
-        assert pull(central, project_b, "beta") == 1
-        assert pull(central, project_b, "beta") == 0
+        assert pull(central, project_b, "beta") == (1, 0)
+        assert pull(central, project_b, "beta") == (0, 0)
         pulled = read_jsonl(project_b / PROJECT_BRAIN)
         assert pulled and pulled[0]["text"].startswith("Prefer explicit")
         assert pulled[0]["central_import"] is True
-        assert push(central, project_b, "beta") == 0
+        assert push(central, project_b, "beta") == (0, 0)
     print("central_brain selftest: OK")
     return 0
 
@@ -253,17 +310,21 @@ def main() -> int:
         print(f"central brain initialized: {brain_file}")
         return 0
     if args.cmd == "push":
-        added = push(Path(args.path), Path(args.project), args.project_id)
-        print(f"central brain push: {added} lesson(s) added")
+        added, skipped = push(Path(args.path), Path(args.project), args.project_id)
+        note = f" ({skipped} record(s) skipped by privacy/type gate)" if skipped else ""
+        print(f"central brain push: {added} lesson(s) added{note}")
         return 0
     if args.cmd == "pull":
-        added = pull(Path(args.path), Path(args.project), args.project_id)
-        print(f"central brain pull: {added} lesson(s) added to project")
+        added, skipped = pull(Path(args.path), Path(args.project), args.project_id)
+        note = f" ({skipped} record(s) skipped by privacy/type gate)" if skipped else ""
+        print(f"central brain pull: {added} lesson(s) added to project{note}")
         return 0
     if args.cmd == "sync":
-        pushed = push(Path(args.path), Path(args.project), args.project_id)
-        pulled = pull(Path(args.path), Path(args.project), args.project_id)
-        print(f"central brain sync: {pushed} pushed, {pulled} pulled")
+        pushed, push_skipped = push(Path(args.path), Path(args.project), args.project_id)
+        pulled, pull_skipped = pull(Path(args.path), Path(args.project), args.project_id)
+        skipped = push_skipped + pull_skipped
+        note = f" ({skipped} record(s) skipped by privacy/type gate)" if skipped else ""
+        print(f"central brain sync: {pushed} pushed, {pulled} pulled{note}")
         return 0
     if args.cmd == "status":
         count, projects = status(Path(args.path))

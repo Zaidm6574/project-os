@@ -12,9 +12,8 @@ Invariants:
   4. At least one packet exists under <run_dir>/packets/, OR an explicit
      'no-packets: solo run' note is present.
   5. An artifact manifest is present.
-  6. A graph/memory artifact exists (real graphify-out/graph.json, shared-brain,
-     or OSVec store at the project root) OR a run file points at one — proof
-     the memory/graph layer actually fired at close.
+  6. A non-empty, machine-readable graph/memory artifact exists at the project
+     root — proof the memory/graph layer actually fired at close.
 
 Usage:
   python3 memory/validate_run.py <run_dir>
@@ -23,6 +22,7 @@ Usage:
 Standard library only. No network access.
 """
 import argparse
+import json
 import os
 import sys
 
@@ -111,14 +111,31 @@ def _has_manifest(run_dir):
     return False
 
 
-# Lowercased pointers that prove the memory/graph layer actually fired at close.
-GRAPH_MEM_MARKERS = (
-    "graphify-out/graph.json", "shared-brain", "osvec", "turbovec", ".tvim", "memory/store",
-)
+def _nonempty_string(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _valid_jsonl_record(record):
+    return (
+        isinstance(record, dict)
+        and all(_nonempty_string(record.get(field)) for field in ("id", "type", "text"))
+    )
+
+
+def _valid_osvec_record(record):
+    return (
+        isinstance(record, dict)
+        and all(
+            _nonempty_string(record.get(field))
+            for field in ("memory_id", "text", "memory_type")
+        )
+        and isinstance(record.get("u64_id"), int)
+        and not isinstance(record.get("u64_id"), bool)
+    )
 
 
 def _has_graph_or_memory(run_dir):
-    """A graph/memory artifact must exist (real file) or be pointed to by a run file.
+    """A graph/memory artifact must contain real machine-readable evidence.
 
     Closure runs `build_graph.py` (GraphOS), `osvec_adapter.py`, and
     `brain/brain.py export`; this check refuses to call a run 'done' unless the
@@ -126,22 +143,58 @@ def _has_graph_or_memory(run_dir):
     """
     # (a) a real artifact on disk at the project level (runs/<slug>/ -> project root)
     proj = os.path.dirname(os.path.dirname(os.path.abspath(run_dir)))
-    candidates = [
-        os.path.join(proj, "graphify-out", "graph.json"),
-        os.path.join(proj, "brain", "shared-brain.jsonl"),
-    ]
+    graph_path = os.path.join(proj, "graphify-out", "graph.json")
+    brain_path = os.path.join(proj, "brain", "shared-brain.jsonl")
+    if os.path.isfile(graph_path):
+        try:
+            with open(graph_path, "r", encoding="utf-8") as fh:
+                graph = json.load(fh)
+            nodes = graph.get("nodes") if isinstance(graph, dict) else None
+            if (
+                isinstance(nodes, list)
+                and nodes
+                and all(
+                    isinstance(node, dict) and _nonempty_string(node.get("id"))
+                    for node in nodes
+                )
+            ):
+                return True
+        except (OSError, ValueError):
+            pass
+    if os.path.isfile(brain_path):
+        try:
+            saw_record = False
+            with open(brain_path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    record = json.loads(line)
+                    if not _valid_jsonl_record(record):
+                        break
+                    saw_record = True
+                else:
+                    if saw_record:
+                        return True
+        except (OSError, ValueError):
+            pass
+
+    # OSVec's JSON sidecar is the durable source of record metadata. The
+    # adapter can rebuild its .tvim or .tvim.npz index from this data, so the
+    # binary index alone is not sufficient evidence of populated memory.
     store = os.path.join(proj, "memory", "store")
     if os.path.isdir(store):
-        candidates += [os.path.join(store, n) for n in os.listdir(store)]
-    for c in candidates:
-        if os.path.exists(c):
-            return True
-    # (b) a run file points at a graph/memory artifact (e.g. the delivery report)
-    if os.path.isdir(run_dir):
-        for name in os.listdir(run_dir):
-            if name.endswith(".md"):
-                t = (_read(os.path.join(run_dir, name)) or "").lower()
-                if any(m in t for m in GRAPH_MEM_MARKERS):
+        for name in os.listdir(store):
+            if not name.endswith(".sidecar.json"):
+                continue
+            try:
+                with open(os.path.join(store, name), "r", encoding="utf-8") as fh:
+                    sidecar = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            records = sidecar.get("records") if isinstance(sidecar, dict) else None
+            if not isinstance(records, dict):
+                continue
+            if records and all(_valid_osvec_record(record) for record in records.values()):
                     return True
     return False
 
@@ -169,7 +222,7 @@ def _write(path, text):
         fh.write(text)
 
 
-def _good_run(d):
+def _good_run(d, with_memory=True):
     os.makedirs(os.path.join(d, "packets"))
     _write(os.path.join(d, "packets", "3-builder-001.md"), "Packet\n")
     _write(os.path.join(d, "00-project-goal.md"),
@@ -183,6 +236,14 @@ def _good_run(d):
            "## Artifact Manifest\n| path | what | where |\n\n"
            "Lessons exported to brain/shared-brain.jsonl; "
            "GraphOS rebuilt at graphify-out/graph.json.\n")
+    if with_memory:
+        project = os.path.dirname(os.path.dirname(os.path.abspath(d)))
+        brain = os.path.join(project, "brain")
+        os.makedirs(brain, exist_ok=True)
+        _write(
+            os.path.join(brain, "shared-brain.jsonl"),
+            '{"id":"selftest-lesson","type":"lesson","text":"Verified selftest lesson"}\n',
+        )
 
 
 def selftest():
@@ -190,11 +251,11 @@ def selftest():
 
     base = tempfile.mkdtemp()
     try:
-        good = os.path.join(base, "good")
+        good = os.path.join(base, "good-project", "runs", "good")
         _good_run(good)
         assert validate(good) is True, "good run should PASS"
 
-        bad = os.path.join(base, "bad")
+        bad = os.path.join(base, "bad-project", "runs", "bad")
         _good_run(bad)
         # break the DoD invariant
         _write(os.path.join(bad, "00-project-goal.md"),
@@ -203,8 +264,8 @@ def selftest():
         assert validate(bad) is False, "bad run should FAIL"
 
         # Otherwise-good run with NO graph/memory artifact and no pointer -> FAIL.
-        nomem = os.path.join(base, "nomem")
-        _good_run(nomem)
+        nomem = os.path.join(base, "nomem-project", "runs", "nomem")
+        _good_run(nomem, with_memory=False)
         _write(os.path.join(nomem, "13-delivery-report.md"),
                "## Artifact Manifest\n| path | what | where |\n")
         assert validate(nomem) is False, "run without graph/memory artifact should FAIL"

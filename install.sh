@@ -72,12 +72,30 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
-if command -v python3 >/dev/null 2>&1; then
-  PYTHON=python3
-elif command -v python >/dev/null 2>&1; then
-  PYTHON=python
-else
-  printf '%s\n' "Project OS installer needs Python 3, but python3 was not found." >&2
+PYTHON=""
+FOUND_OLD=""
+# Try versioned binaries too: on stock macOS `python3` is 3.9 while a newer
+# interpreter is often installed under a versioned name (external review
+# finding, 2026-07-17 — probing only python3/python failed on default PATH).
+for candidate in python3 python python3.13 python3.12 python3.11 python3.10 python3.14; do
+  command -v "$candidate" >/dev/null 2>&1 || continue
+  if "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+    PYTHON=$candidate
+    break
+  fi
+  # remember the first too-old interpreter so the failure names what it found
+  if [ "$FOUND_OLD" = "" ]; then
+    found_version=$("$candidate" -c 'import platform; print(platform.python_version())' 2>/dev/null) || found_version="unknown version"
+    FOUND_OLD="$candidate = ${found_version:-unknown version} ($(command -v "$candidate"))"
+  fi
+done
+
+if [ "$PYTHON" = "" ]; then
+  if [ "$FOUND_OLD" != "" ]; then
+    printf '%s\n' "found $FOUND_OLD; Project OS installer needs Python 3.10 or newer." >&2
+  else
+    printf '%s\n' "Project OS installer needs Python 3.10 or newer, but no compatible Python command was found." >&2
+  fi
   exit 1
 fi
 
@@ -111,7 +129,7 @@ if [ "$FULL_ENGINE" = "1" ]; then
     set -- "$@" --force
   fi
   if [ "$DRY_RUN" = "1" ]; then
-    set -- "$@" --dry-run
+    set -- "$@" --dry-run --starter-planned
   fi
   if [ "$CLAUDE_ENGINE" = "1" ]; then
     set -- "$@" --claude

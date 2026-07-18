@@ -70,3 +70,10 @@ staleness.
 - **Markdown rules are not security enforcement.** Operating agreements in
   markdown govern cooperative agents; they do nothing against untrusted code.
   Same for local-machine bearer tokens readable by any same-user process.
+- **Keep a modern floor and degrade honestly below it.** The Python 3.10 floor
+  stays: a current floor plus an installer and tests that fail closed with a
+  clear message on older systems is the same philosophy as the rest of this
+  template. Stock-mac 3.9.6 users get a probe error naming which Python was
+  found instead of a mystery crash mid-install, and tests skip with a stated
+  reason instead of failing. Deciding "why 3.10?" once in writing beats
+  re-litigating it every build day. (2026-07)

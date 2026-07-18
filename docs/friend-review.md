@@ -13,7 +13,7 @@ If an AI reviewer cannot browse GitHub, paste `docs/for-ai-reviewers.md` first a
 3. Does the template clearly separate starter files, the opt-in full engine add-on, and external tooling?
 4. Does anything sound like it promises OSVec, GraphOS, a real vector database, a graph engine, model router, autonomous swarm runner, or security sandbox that is not actually bundled, installed, or configured?
 5. Does `./install.sh` create a usable starter project in a blank folder?
-6. Does `./install.sh --check-tools` write an honest capability report, including that model routing is configured in the AI tool rather than auto-detected through GraphOS/OSVec environment variables?
+6. Does `./install.sh ../demo-project --check-tools` write an honest capability report, including that model routing is configured in the AI tool rather than auto-detected through GraphOS/OSVec environment variables?
 7. Does `.gitignore` block private memory, raw imports, local memory, OSVec/vector indexes, GraphOS/graph output, secrets, and env files?
 8. Does the chat importer feel safe and appropriately limited?
 9. Are `/research` and research-refresh docs clear that Project OS can suggest updates without silently changing major decisions?

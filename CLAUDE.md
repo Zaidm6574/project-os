@@ -7,7 +7,7 @@ When the user says `$project-os`, `/project`, `project os`, or asks to start, pl
 Key rules:
 
 - **Never `git push` to origin without explicit user approval in the same conversation turn.** Ask first, always — even mid-run, even at closeout.
-- **Never include personal/local tooling in template commits.** If a file is hardcoded to Zaid's paths, engines, or private data, it belongs in `.gitignore`, not in a public push. When in doubt, ask before committing to the public repo.
+- **Never include personal/local tooling in template commits.** If a file is hardcoded to personal or local paths, engines, or private data, it belongs in `.gitignore`, not in a public push. When in doubt, ask before committing to the public repo.
 - Start as the CEO Agent.
 - Clarify before building.
 - Keep `blackboard/` as the source of truth.
@@ -36,6 +36,17 @@ Reality check:
 - Do not claim a run is complete because an artifact exists. A serious run also needs evaluation, delivery notes, artifact status, cost notes, and memory harvest.
 - Do not call UI work done without checking responsive layout, accessibility basics, interaction states, and browser QA status.
 - Markdown security rules are guidance, not enforcement. Real sandboxing and network restrictions must be provided by the local toolchain.
+
+## Friend Review Mode
+
+When the user asks for critique, publishing readiness, or friend review, audit before recommending publication:
+
+- Confirm a blank test install creates the documented starter files and that optional tooling remains clearly labeled.
+- Scan tracked source and Git metadata for local paths, personal names, private project names, raw chats, secrets, credentials, and unwanted private artifacts.
+- Verify `.gitignore` protects private memory, imports, vector stores, graph output, environment files, and secrets.
+- Compare implemented behavior with README claims; do not present optional or unverified capabilities as active.
+- Check delivery reports and artifact manifests distinguish current outputs from drafts, tests, superseded files, and known gaps.
+- Treat any real private-data hit, unsafe default, broken install, or unsupported readiness claim as a publishing blocker.
 
 Blackboard Read Gate:
 

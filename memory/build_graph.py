@@ -2,7 +2,7 @@
 """Graphify — build a Project OS knowledge graph from the blackboard/runs.
 
 Scans runs/<slug>/ (and the root blackboard/) for the numbered markdown files and
-emits arachne-out/graph.json: nodes for the OS, each run, and its decisions / risks /
+emits graphify-out/graph.json: nodes for the OS, each run, and its decisions / risks /
 open-questions, with edges connecting them. Pure stdlib — no external graph tooling.
 
 Usage:
@@ -14,7 +14,7 @@ import os, re, json, glob, sys
 from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project-os/
-OUT_DIR = os.path.join(ROOT, "arachne-out")
+OUT_DIR = os.path.join(ROOT, "graphify-out")
 OUT = os.path.join(OUT_DIR, "graph.json")
 
 

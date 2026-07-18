@@ -25,7 +25,7 @@ Starter mode is what users get from a normal install:
 Full engine mode is explicit opt-in with `--full-engine`:
 
 - local run helpers such as `new_run.py`, `validate_run.py`, `score_rubric.py`, `goal_guard.py`, `cost_actuals.py`, and `browser_qa.py`
-- local brain and central-brain scripts for approved summary memories
+- local brain and central-brain scripts for privacy-gated lesson memories (chat-derived records sync only as approved summaries)
 - optional Claude Code agents and commands, including `context-scout`, `ui-ux-designer`, `frontend-builder`, and `/ui-review`
 
 ## Implemented Now

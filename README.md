@@ -2,18 +2,18 @@
 
 [![Tests](https://github.com/Zaidm6574/project-os/actions/workflows/test.yml/badge.svg)](https://github.com/Zaidm6574/project-os/actions/workflows/test.yml)
 
-A template for running projects with AI assistants — with planning, shared state, decision logs, and memory built in from the start.
+The system I use to ship real software with AI assistants — most recently a live booking application for a working auto-detailing business. It gives an AI-assisted project persistent goals, decisions, verification gates, and memory, instead of leaving everything inside one disappearing chat.
 
-Instead of a blank folder and a chatbot, you get a working structure: a goal file, a blackboard for decisions and research, operating rules for your AI tool, and a closeout habit that saves lessons for the next run.
+Built by someone with ADHD who needed project state to live outside his head. The first version of that detailing site looked finished but couldn't take a booking — it failed silently, for real people. Project OS is what I built so that never happens again: plans are rejected unless they declare how the result will be checked, concurrent agents can't silently erase each other's work (fencing-token file locks), and chat-derived memory never syncs without explicit approval (privacy fail-closed).
 
-Built by someone with ADHD who needed project state to live outside his head, not in a chat thread that disappears.
+Over 120 tests cover installation, concurrency, privacy boundaries, plan verification, and memory tooling. An adversarial model-judge review found real flaws (a sync gate that silently dropped every lesson, a validator/compiler mismatch); each became a regression test before the fix landed.
 
 ## What it gives your AI tool
 
 - A clear goal file (`00-project-goal.md`) so the assistant knows what done looks like
 - A shared blackboard for decisions, research, risks, cost, and next steps
 - `AGENTS.md` + `CLAUDE.md` — operating rules for Codex-style tools and Claude Code
-- Solo, mini-swarm, and full-swarm workflow patterns
+- Solo, mini-swarm, and full-swarm workflow patterns (structured prompt roles for one AI tool — not autonomous background processes)
 - A self-improvement loop: each serious run fills a memory harvest that can be promoted to the shared brain after review
 - Context hygiene guidance for long sessions where prompt-cache cost quietly compounds
 - A research refresh workflow for checking what changed since you last looked
@@ -22,7 +22,7 @@ Built by someone with ADHD who needed project state to live outside his head, no
 
 The following are working now:
 
-- `AGENTS.md` and `CLAUDE.md` with the full Project OS workflow
+- `AGENTS.md` and `CLAUDE.md` with the same core Project OS workflow
 - Blackboard templates for goals, decisions, risks, cost, model routing, evaluation, delivery, artifacts, memory, research routing, capability preflight, and research refresh
 - `install.sh` — copies Project OS files into a target project folder
   - `--dry-run` flag: prints what would be copied without writing anything
@@ -32,7 +32,7 @@ The following are working now:
 - `scripts/check_optional_tools.py` — writes a capability report to `blackboard/17-capability-preflight.md`
 - `scripts/install_full_engine.py` — opt-in full engine installer
 - `scripts/import_chat_history.py` — scans old AI chat exports locally, redacts secrets, writes a private review report (never uploads)
-- Loop tooling (added 2026-07): `bb_lock.py`, `plan_artifact.py`, `promptsmith.py`, `evolution.py`, `wt.py`, `harvest.py`, `brain_scale.py`, `brain_append.py`, `os_nightly.py`
+- Loop tooling (added 2026-07): `bb_lock.py`, `plan_artifact.py`, `promptsmith.py`, `evolution.py`, `wt.py`, `harvest.py`, `brain_scale.py`, `brain_append.py`, `os_nightly.py` — `promptsmith` runs end-to-end without any personal setup via `--brief-file examples/sample-brief.md`
 - Local vector memory: `memory/mneme_adapter.py` — neural search via Ollama if available, lexical fallback otherwise
 - Unit tests for setup and chat-import safety behavior
 
@@ -40,7 +40,9 @@ What is not automatic without additional setup: external vector/graph packages, 
 
 ## Quick start
 
-Requirements: Git, Python 3, and an AI coding tool that reads `AGENTS.md` or `CLAUDE.md`.
+Requirements: Git, Python 3.10+, and an AI coding tool that reads `AGENTS.md` or `CLAUDE.md`.
+
+The installer finds Python by probing `python3`, `python`, and the versioned names `python3.13` down to `python3.10` on your PATH — so a stock macOS `python3` (3.9) is fine as long as a newer interpreter is installed under any of those names. If none qualifies, `install.sh` stops and tells you which Python it found instead.
 
 ```bash
 git clone https://github.com/Zaidm6574/project-os.git

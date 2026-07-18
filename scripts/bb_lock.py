@@ -8,7 +8,7 @@ concurrent agent waves and Claude/Codex both appending to shared-brain.jsonl.
 
 Usage:
   python3 scripts/bb_lock.py acquire <path> [--agent ID] [--wait SECS]
-  python3 scripts/bb_lock.py release <path> [--agent ID] [--force]
+  python3 scripts/bb_lock.py release <path> [--token TOKEN] [--agent ID] [--force]
   python3 scripts/bb_lock.py append  <path> --line '<text>' [--agent ID]
   python3 scripts/bb_lock.py run     <path> [--agent ID] -- <cmd> [args...]
   python3 scripts/bb_lock.py status  [<path>]
@@ -18,11 +18,13 @@ Env: BB_LOCK_DIR (default ~/.project-os/locks), BB_LOCK_STALE (default 60 second
 
 Exit codes: 0 ok · 1 could not acquire / not held · 2 usage error
 """
-import os, sys, json, time, hashlib, subprocess
+import os, sys, json, time, hashlib, subprocess, fcntl, math, uuid
+from contextlib import contextmanager
 
 LOCK_DIR = os.environ.get("BB_LOCK_DIR", os.path.expanduser("~/.project-os/locks"))
 STALE_AFTER_SEC = float(os.environ.get("BB_LOCK_STALE", "60"))
 POLL_SEC = 0.25
+_HELD_TOKENS = {}
 
 
 def _key(target):
@@ -31,6 +33,18 @@ def _key(target):
 
 def lock_path(target):
     return os.path.join(LOCK_DIR, _key(target) + ".lock")
+
+
+@contextmanager
+def _guard(lp):
+    """Serialize all transitions for one stable lock pathname."""
+    os.makedirs(LOCK_DIR, exist_ok=True)
+    with open(lp + ".guard", "a+", encoding="utf-8") as guard:
+        fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(guard.fileno(), fcntl.LOCK_UN)
 
 
 def read_lock(lp):
@@ -48,11 +62,7 @@ def is_stale(lp):
         return False
 
 
-def reap_one(lp):
-    """Remove a lockfile only if stale. Re-stats immediately before unlink so a
-    lock released-and-reacquired by a fresh holder between the staleness check
-    and the unlink isn't reaped (narrows the TOCTOU window; with a 60s TTL and
-    0.25s polls the residual window is microseconds). Returns True if removed."""
+def _reap_locked(lp):
     try:
         st = os.stat(lp)
     except FileNotFoundError:
@@ -60,57 +70,150 @@ def reap_one(lp):
     if (time.time() - st.st_mtime) <= STALE_AFTER_SEC:
         return False
     try:
-        if os.stat(lp).st_mtime != st.st_mtime:
-            return False  # replaced by a fresh holder mid-check
         os.unlink(lp)
         return True
     except FileNotFoundError:
         return True
+
+
+def reap_one(lp):
+    """Remove a stale lock while holding its stable serialization guard."""
+    with _guard(lp):
+        return _reap_locked(lp)
 
 
 def acquire(target, agent="unknown", wait=10.0):
-    """Atomically acquire the lock for target. Returns True on success."""
+    """Atomically acquire the lock for target. Returns its fencing token."""
     os.makedirs(LOCK_DIR, exist_ok=True)
     lp = lock_path(target)
-    deadline = time.time() + wait
+    deadline = time.monotonic() + wait
     while True:
-        reap_one(lp)
-        try:
-            fd = os.open(lp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            with os.fdopen(fd, "w") as f:
-                json.dump({"path": os.path.realpath(target), "agent": agent,
-                           "pid": os.getpid(), "ts": time.time()}, f)
-            return True
-        except FileExistsError:
-            if time.time() >= deadline:
-                return False
-            time.sleep(POLL_SEC)
+        with _guard(lp):
+            _reap_locked(lp)
+            try:
+                fd = os.open(lp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                token = uuid.uuid4().hex
+                with os.fdopen(fd, "w") as f:
+                    json.dump({"path": os.path.realpath(target), "agent": agent,
+                               "pid": os.getpid(), "ts": time.time(),
+                               "token": token}, f)
+                _HELD_TOKENS[lp] = token
+                return token
+            except FileExistsError:
+                pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(POLL_SEC, remaining))
 
 
-def release(target, agent=None, force=False):
-    """Release the lock. Owner-checked unless --force. Returns True if released."""
+def renew(target, token=None):
+    """Renew a held lease only when its fencing token still owns the lock."""
     lp = lock_path(target)
-    info = read_lock(lp)
-    if info is None:
+    expected = token or _HELD_TOKENS.get(lp)
+    if expected is None:
         return False
-    if not force and agent is not None and info.get("agent") not in (agent, "unknown"):
-        print(f"held by {info.get('agent')} (pid {info.get('pid')}); use --force to override",
-              file=sys.stderr)
-        return False
-    try:
-        os.unlink(lp)
-        return True
-    except FileNotFoundError:
-        return False
+    with _guard(lp):
+        info = read_lock(lp)
+        if info is None or info.get("token") != expected:
+            return False
+        try:
+            os.utime(lp, None)
+            return True
+        except FileNotFoundError:
+            return False
+
+
+def release(target, agent=None, force=False, token=None):
+    """Release the lock only when its fencing token still owns the lease."""
+    lp = lock_path(target)
+    expected = token or _HELD_TOKENS.get(lp)
+    with _guard(lp):
+        info = read_lock(lp)
+        if info is None:
+            _HELD_TOKENS.pop(lp, None)
+            return False
+        current = info.get("token")
+        # The token is the ONLY proof of ownership: agent labels are reusable
+        # strings and must never bypass the fence, and --force must not
+        # either — a wedged lock exits via stale reaping, not override
+        # (independent review finding, 2026-07-17).
+        if current is not None and expected != current:
+            print(f"held by {info.get('agent')} (pid {info.get('pid')}); ownership token required",
+                  file=sys.stderr)
+            return False
+        if current is None and not force and agent is not None \
+                and info.get("agent") not in (agent, "unknown"):
+            print(f"held by {info.get('agent')} (pid {info.get('pid')}); use --force to override",
+                  file=sys.stderr)
+            return False
+        try:
+            os.unlink(lp)
+        except FileNotFoundError:
+            return False
+    if _HELD_TOKENS.get(lp) == expected:
+        _HELD_TOKENS.pop(lp, None)
+    return True
+
+
+def _flag_limit(args):
+    return args.index("--") if "--" in args else len(args)
+
+
+# only these exact tokens may be rejected as "missing value" — arbitrary
+# values starting with '--' (e.g. --line '--- separator ---') are legitimate
+# (audit finding F3, 2026-07-17)
+KNOWN_FLAGS = frozenset({"--agent", "--token", "--force", "--wait", "--line"})
 
 
 def _flag(args, name, default=None):
-    if name in args:
-        i = args.index(name)
-        v = args[i + 1]
-        del args[i:i + 2]
-        return v
-    return default
+    limit = _flag_limit(args)
+    try:
+        i = args.index(name, 0, limit)
+    except ValueError:
+        return default
+    if i + 1 >= limit or args[i + 1] in KNOWN_FLAGS:
+        raise ValueError(f"{name} requires a value")
+    v = args[i + 1]
+    del args[i:i + 2]
+    return v
+
+
+def _switch(args, name):
+    limit = _flag_limit(args)
+    try:
+        i = args.index(name, 0, limit)
+    except ValueError:
+        return False
+    del args[i]
+    return True
+
+
+def _usage_error(message):
+    print(f"usage error: {message}", file=sys.stderr)
+    return 2
+
+
+def _run_with_renewal(command, target, token):
+    proc = subprocess.Popen(command)
+    interval = max(0.01, min(STALE_AFTER_SEC / 3.0, 10.0))
+    while True:
+        try:
+            return proc.wait(timeout=interval)
+        except subprocess.TimeoutExpired:
+            if not renew(target, token):
+                # Lease lost (reaped + re-acquired while we were stalled).
+                # Continuing would run alongside the new owner, so stop the
+                # child instead (independent review finding, 2026-07-17).
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                print("FAILED: lock lease lost while command was running; "
+                      "command terminated", file=sys.stderr)
+                return 1
 
 
 def main():
@@ -148,10 +251,16 @@ def main():
             print("no locks held" if not target else "not locked")
         sys.exit(0)
 
-    agent = _flag(rest, "--agent", "unknown")
-    force = "--force" in rest and (rest.remove("--force") or True)
-    wait = float(_flag(rest, "--wait", "10"))
-    line = _flag(rest, "--line")
+    try:
+        agent = _flag(rest, "--agent", "unknown")
+        token = _flag(rest, "--token")
+        force = _switch(rest, "--force")
+        wait = float(_flag(rest, "--wait", "10"))
+        line = _flag(rest, "--line")
+        if not math.isfinite(wait) or wait < 0:
+            raise ValueError("--wait must be a non-negative finite number")
+    except ValueError as exc:
+        sys.exit(_usage_error(str(exc)))
 
     if not rest:
         print("missing <path>", file=sys.stderr)
@@ -159,20 +268,23 @@ def main():
     target = rest[0]
 
     if cmd == "acquire":
-        ok = acquire(target, agent, wait)
-        if not ok:
+        acquired_token = acquire(target, agent, wait)
+        if not acquired_token:
             info = read_lock(lock_path(target)) or {}
             print(f"FAILED: locked by {info.get('agent','?')} (pid {info.get('pid','?')})",
                   file=sys.stderr)
-        sys.exit(0 if ok else 1)
+        else:
+            print(acquired_token)
+        sys.exit(0 if acquired_token else 1)
 
     if cmd == "release":
-        sys.exit(0 if release(target, agent, force) else 1)
+        sys.exit(0 if release(target, agent, force, token) else 1)
 
     if cmd == "append":
         if line is None:
             line = sys.stdin.read().rstrip("\n")
-        if not acquire(target, agent, wait):
+        acquired_token = acquire(target, agent, wait)
+        if not acquired_token:
             print("FAILED: could not acquire lock for append", file=sys.stderr)
             sys.exit(1)
         try:
@@ -183,7 +295,7 @@ def main():
                 f.flush()
                 os.fsync(f.fileno())
         finally:
-            release(target, agent, force=True)
+            release(target, agent, force=True, token=acquired_token)
         sys.exit(0)
 
     if cmd == "run":
@@ -191,13 +303,16 @@ def main():
             print("run requires: run <path> -- <cmd> [args...]", file=sys.stderr)
             sys.exit(2)
         sub = rest[rest.index("--") + 1:]
-        if not acquire(target, agent, wait):
+        if not sub:
+            sys.exit(_usage_error("run requires a command after --"))
+        acquired_token = acquire(target, agent, wait)
+        if not acquired_token:
             print("FAILED: could not acquire lock", file=sys.stderr)
             sys.exit(1)
         try:
-            rc = subprocess.call(sub)
+            rc = _run_with_renewal(sub, target, acquired_token)
         finally:
-            release(target, agent, force=True)
+            release(target, agent, force=True, token=acquired_token)
         sys.exit(rc)
 
     print(f"unknown command: {cmd}", file=sys.stderr)

@@ -5,12 +5,31 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import shlex
 import shutil
+import sys
 from pathlib import Path
 
 
 TEMPLATE_ROOT = Path(__file__).resolve().parents[1]
 ADDON_ROOT = TEMPLATE_ROOT / "addons" / "full-engine"
+GENERATED_DIRS = {"__pycache__", "store", "out", "graphify-out", ".turbovec"}
+GENERATED_SUFFIXES = (".pyc", ".tvim", ".sidecar.json", ".manifest.json")
+
+
+def nonempty_path(value: str) -> Path:
+    if not value.strip():
+        raise argparse.ArgumentTypeError("target must be a non-empty path")
+    return Path(value)
+
+
+def is_distributable(src: Path, src_dir: Path) -> bool:
+    rel = src.relative_to(src_dir)
+    return (
+        src.name != "shared-brain.jsonl"
+        and not any(part in GENERATED_DIRS for part in rel.parts)
+        and not src.name.endswith(GENERATED_SUFFIXES)
+    )
 
 
 def copy_file(src: Path, dst: Path, force: bool, dry_run: bool = False) -> str:
@@ -28,9 +47,7 @@ def copy_tree(src_dir: Path, dst_dir: Path, force: bool, dry_run: bool = False) 
     results: list[str] = []
     if not src_dir.exists():
         return results
-    for src in sorted(p for p in src_dir.rglob("*") if p.is_file()):
-        if "__pycache__" in src.parts or src.suffix == ".pyc":
-            continue
+    for src in sorted(p for p in src_dir.rglob("*") if p.is_file() and is_distributable(p, src_dir)):
         rel = src.relative_to(src_dir)
         results.append(copy_file(src, dst_dir / rel, force, dry_run=dry_run))
     return results
@@ -53,11 +70,19 @@ def install_full_engine(
     central_brain: Path | None = None,
     project_id: str | None = None,
     dry_run: bool = False,
+    starter_planned: bool = False,
 ) -> list[str]:
     target = target.expanduser().resolve()
 
     if not ADDON_ROOT.exists():
         raise FileNotFoundError(f"missing add-on folder: {ADDON_ROOT}")
+    if not (dry_run and starter_planned):
+        starter_markers = (target / "AGENTS.md", target / "blackboard" / "00-project-goal.md")
+        if not all(marker.is_file() for marker in starter_markers):
+            raise FileNotFoundError(
+                "full-engine install needs a starter Project OS workspace; "
+                "run install.sh <target> --full-engine or bootstrap the target first"
+            )
 
     results: list[str] = []
     if dry_run and not target.exists():
@@ -108,17 +133,20 @@ def install_full_engine(
         brain_file = central.init_central(central_path)
         if project_id:
             marker = target / "brain" / "CENTRAL_BRAIN.md"
+            quoted_central_path = shlex.quote(str(central_path))
+            quoted_project_id = shlex.quote(project_id)
             marker.write_text(
                 "# Central Brain Connection\n\n"
                 f"Central brain path: `{central_path}`\n"
                 f"Project ID: `{project_id}`\n\n"
-                "Push approved lessons:\n\n"
+                "Push lessons (chat-derived records sync only as approved summaries;\n"
+                "raw or private-tagged records never leave the project):\n\n"
                 "```bash\n"
-                f"python3 brain/central_brain.py push --path {central_path} --project . --project-id {project_id}\n"
+                f"python3 brain/central_brain.py push --path {quoted_central_path} --project . --project-id {quoted_project_id}\n"
                 "```\n\n"
-                "Pull approved lessons:\n\n"
+                "Pull lessons (same privacy gate applies on the way in):\n\n"
                 "```bash\n"
-                f"python3 brain/central_brain.py pull --path {central_path} --project . --project-id {project_id}\n"
+                f"python3 brain/central_brain.py pull --path {quoted_central_path} --project . --project-id {quoted_project_id}\n"
                 "```\n",
                 encoding="utf-8",
             )
@@ -130,9 +158,15 @@ def install_full_engine(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Install the optional Project OS full engine add-on.")
-    parser.add_argument("--target", default=".", help="Project folder to update. Default: current folder.")
+    parser.add_argument(
+        "--target",
+        type=nonempty_path,
+        default=Path("."),
+        help="Existing starter Project OS folder to update. Default: current folder.",
+    )
     parser.add_argument("--force", action="store_true", help="Overwrite add-on files that already exist.")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be copied without writing files.")
+    parser.add_argument("--starter-planned", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--claude", action="store_true", help="Also install Claude Code agents and slash commands.")
     parser.add_argument(
         "--central-brain",
@@ -142,14 +176,19 @@ def main() -> int:
     parser.add_argument("--project-id", default=None, help="Stable id to use when pushing this project to central brain.")
     args = parser.parse_args()
 
-    results = install_full_engine(
-        Path(args.target),
-        force=args.force,
-        claude=args.claude,
-        central_brain=Path(args.central_brain) if args.central_brain else None,
-        project_id=args.project_id,
-        dry_run=args.dry_run,
-    )
+    try:
+        results = install_full_engine(
+            args.target,
+            force=args.force,
+            claude=args.claude,
+            central_brain=Path(args.central_brain) if args.central_brain else None,
+            project_id=args.project_id,
+            dry_run=args.dry_run,
+            starter_planned=args.starter_planned,
+        )
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     if args.dry_run:
         print("Project OS full engine add-on dry run complete.")
     else:

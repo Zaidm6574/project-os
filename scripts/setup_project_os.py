@@ -11,6 +11,23 @@ from pathlib import Path
 TEMPLATE_ROOT = Path(__file__).resolve().parents[1]
 FULL_ENGINE_MEMORY = TEMPLATE_ROOT / "addons" / "full-engine" / "memory"
 GITIGNORE_MARKER = "# Project OS private files"
+GENERATED_DIRS = {"__pycache__", "store", "out", "graphify-out", ".turbovec"}
+GENERATED_SUFFIXES = (".pyc", ".tvim", ".sidecar.json", ".manifest.json")
+
+
+def nonempty_path(value: str) -> Path:
+    if not value.strip():
+        raise argparse.ArgumentTypeError("target must be a non-empty path")
+    return Path(value)
+
+
+def is_distributable(src: Path, src_dir: Path) -> bool:
+    rel = src.relative_to(src_dir)
+    return (
+        src.name != "shared-brain.jsonl"
+        and not any(part in GENERATED_DIRS for part in rel.parts)
+        and not src.name.endswith(GENERATED_SUFFIXES)
+    )
 
 
 def copy_file(src: Path, dst: Path, force: bool, dry_run: bool = False) -> str:
@@ -33,9 +50,7 @@ def copy_file(src: Path, dst: Path, force: bool, dry_run: bool = False) -> str:
 
 def copy_tree_files(src_dir: Path, dst_dir: Path, force: bool, dry_run: bool = False) -> list[str]:
     results: list[str] = []
-    for src in sorted(p for p in src_dir.rglob("*") if p.is_file()):
-        if "__pycache__" in src.parts or src.suffix == ".pyc":
-            continue
+    for src in sorted(p for p in src_dir.rglob("*") if p.is_file() and is_distributable(p, src_dir)):
         rel = src.relative_to(src_dir)
         results.append(copy_file(src, dst_dir / rel, force, dry_run=dry_run))
     return results
@@ -82,7 +97,14 @@ def bootstrap(target: Path, force: bool, dry_run: bool = False) -> list[str]:
     results.append(merge_gitignore(TEMPLATE_ROOT / ".gitignore", target / ".gitignore", force, dry_run=dry_run))
     results.extend(copy_tree_files(TEMPLATE_ROOT / "prompts", target / "prompts", force, dry_run=dry_run))
     results.extend(copy_tree_files(TEMPLATE_ROOT / "scripts", target / "scripts", force, dry_run=dry_run))
-    results.extend(copy_tree_files(TEMPLATE_ROOT / "addons", target / "addons", force, dry_run=dry_run))
+    results.extend(
+        copy_tree_files(
+            TEMPLATE_ROOT / "addons" / "full-engine",
+            target / "addons" / "full-engine",
+            force,
+            dry_run=dry_run,
+        )
+    )
     results.extend(copy_tree_files(TEMPLATE_ROOT / "blackboard-template", target / "blackboard", force, dry_run=dry_run))
     results.extend(copy_tree_files(TEMPLATE_ROOT / "runs-template", target / "runs", force, dry_run=dry_run))
     results.extend(copy_tree_files(TEMPLATE_ROOT / "outputs-template", target / "outputs", force, dry_run=dry_run))
@@ -115,7 +137,12 @@ def bootstrap(target: Path, force: bool, dry_run: bool = False) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Bootstrap Project OS into a target project.")
-    parser.add_argument("--target", default=".", help="Project folder to initialize. Default: current folder.")
+    parser.add_argument(
+        "--target",
+        type=nonempty_path,
+        default=Path("."),
+        help="Project folder to initialize. Default: current folder.",
+    )
     parser.add_argument(
         "--force",
         action="store_true",
@@ -124,7 +151,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Show what would be copied without writing files.")
     args = parser.parse_args()
 
-    results = bootstrap(Path(args.target), args.force, dry_run=args.dry_run)
+    results = bootstrap(args.target, args.force, dry_run=args.dry_run)
     if args.dry_run:
         print("Project OS setup dry run complete.")
     else:

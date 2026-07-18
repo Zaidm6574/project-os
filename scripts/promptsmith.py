@@ -16,6 +16,10 @@ Usage:
   python3 scripts/promptsmith.py --task "build the hero section" [--query "landing page hero"]
          [--packet-id ID] [--out-dir blackboard/packets] [--brief-file path] [--no-index]
 
+Try it without any brain configured (uses the bundled sample brief):
+  python3 scripts/promptsmith.py --task "build the hero section" \
+      --brief-file examples/sample-brief.md --out-dir /tmp/promptsmith-demo
+
 Rejections feed back: the rubric instructs the Evaluator to write a lesson line to
 memory/self-improvement-loop.md and record the variant via scripts/evolution.py.
 """

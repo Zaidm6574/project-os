@@ -3,6 +3,8 @@ first-run-critical paths that previously had zero coverage (evolution best-of,
 wt.py data-loss guards, brain_archive apply, fresh-install brain append,
 harvest dedupe, plan_artifact recompile gate, brain_scale missing-input gauge).
 """
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -127,8 +129,11 @@ class TestWorktreeGuards(unittest.TestCase):
         (w / "done.txt").write_text("done\n")
         git(w, "add", ".")
         git(w, "commit", "-qm", "done")
-        self.assertEqual(wt.cmd_merge(str(self.repo), "ok"), 0)
-        self.assertEqual(wt.cmd_remove(str(self.repo), "ok", force=False), 0)
+        # capture cmd_* stdout so the merge transcript doesn't leak into the
+        # test runner's output (audit finding, 2026-07-17)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(wt.cmd_merge(str(self.repo), "ok"), 0)
+            self.assertEqual(wt.cmd_remove(str(self.repo), "ok", force=False), 0)
         self.assertFalse(w.exists())
         self.assertTrue((self.repo / "done.txt").exists())
 
@@ -258,6 +263,108 @@ class TestPlanArtifactRecompileGate(BrainEnvMixin):
                    env_extra=self.env)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(pf.with_name(pf.name + ".pre-force").exists())
+
+
+class TestPlanArtifactCompileNormalization(BrainEnvMixin):
+    """validate() treats depends_on/outputs as optional, but the packet writer
+    used to index them directly — a KeyError AFTER creating a zero-byte packet
+    file (audit finding F2, 2026-07-17)."""
+
+    def _write_plan(self, steps, status="approved"):
+        plans = Path(self.tmp.name) / "blackboard" / "plans"
+        plans.mkdir(parents=True, exist_ok=True)
+        plan = {"schema": "plan/v1", "id": "p2", "status": status, "goal": "g",
+                "steps": steps}
+        pf = plans / "p2.json"
+        pf.write_text(json.dumps(plan))
+        return pf
+
+    def _bare_steps(self):
+        # neither step declares depends_on/outputs except where the checker
+        # contract requires depends_on — validate() accepts this shape
+        return [
+            {"id": "s1", "role": "builder", "task": "build it"},
+            {"id": "s2", "role": "checker", "task": "check it",
+             "depends_on": ["s1"],
+             "verification": {"method": "run tests", "expected": "all pass"}},
+        ]
+
+    def test_steps_without_optional_keys_pass_validate_and_compile(self):
+        pf = self._write_plan(self._bare_steps())
+        v = run_py(SCRIPTS / "plan_artifact.py", "validate", str(pf),
+                   env_extra=self.env)
+        self.assertEqual(v.returncode, 0, v.stdout + v.stderr)
+        r = run_py(SCRIPTS / "plan_artifact.py", "compile", str(pf),
+                   env_extra=self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        packets = pf.parent.parent / "packets"
+        made = sorted(packets.glob("p2-*.md"))
+        self.assertEqual(len(made), 2, r.stdout + r.stderr)
+        for p in made:
+            self.assertGreater(p.stat().st_size, 0,
+                               f"{p.name} is a zero-byte packet")
+        s1_body = (packets / "p2-s1.md").read_text()
+        self.assertIn("no dependencies", s1_body)
+        self.assertIn("(unspecified)", s1_body)
+
+    def test_placeholder_verification_values_are_rejected(self):
+        # "-" satisfied the old nonempty check while naming no actual check —
+        # the gate is a forcing function for declaring verification, so
+        # placeholder tokens must fail validate (external review, 2026-07-17)
+        for method, expected in (("-", "-"), ("tbd", "run tests"),
+                                 ("run tests", "n/a")):
+            steps = self._bare_steps()
+            steps[1]["verification"] = {"method": method, "expected": expected}
+            pf = self._write_plan(steps)
+            v = run_py(SCRIPTS / "plan_artifact.py", "validate", str(pf),
+                       env_extra=self.env)
+            self.assertNotEqual(
+                v.returncode, 0,
+                f"placeholder verification {method!r}/{expected!r} passed validate")
+            self.assertIn("non-placeholder", v.stdout + v.stderr)
+
+    def test_failed_packet_write_leaves_no_zero_byte_packet(self):
+        pf = self._write_plan(self._bare_steps())
+        packets = pf.parent.parent / "packets"
+        packets.mkdir(parents=True, exist_ok=True)
+        os.chmod(packets, 0o555)  # writes into the dir will fail
+        try:
+            r = run_py(SCRIPTS / "plan_artifact.py", "compile", str(pf),
+                       env_extra=self.env)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertIn("cannot compile", r.stderr)
+            leftovers = [p for p in packets.iterdir()]
+            self.assertEqual(leftovers, [],
+                             "failed compile left partial packet files behind")
+        finally:
+            os.chmod(packets, 0o755)
+
+
+class TestPlanArtifactFlagValues(BrainEnvMixin):
+    """flag() used to treat ANY value starting with '--' as a missing value,
+    rejecting legitimate values like '--- separator ---' that plain git
+    accepted (audit finding F3, 2026-07-17)."""
+
+    def test_goal_starting_with_dashes_is_accepted(self):
+        steps_file = Path(self.tmp.name) / "steps.json"
+        steps_file.write_text(json.dumps(
+            [{"id": "s1", "role": "builder", "task": "t"}]))
+        pf = Path(self.tmp.name) / "blackboard" / "plans" / "p3.json"
+        r = run_py(SCRIPTS / "plan_artifact.py", "create",
+                   "--goal", "--- separator goal ---",
+                   "--steps-file", str(steps_file),
+                   "--id", str(pf), env_extra=self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(json.loads(pf.read_text())["goal"],
+                         "--- separator goal ---")
+
+    def test_known_flag_as_value_is_still_a_usage_error(self):
+        r = run_py(SCRIPTS / "plan_artifact.py", "create",
+                   "--goal", "--steps-file", env_extra=self.env)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("missing value", r.stderr)
 
 
 class TestBrainScaleMissingInput(BrainEnvMixin):

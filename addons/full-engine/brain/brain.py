@@ -51,8 +51,9 @@ SECRET_PATTERNS = [
 
 def _safe_path(path: str) -> str:
     """Resolve a path and refuse anything outside the project copy."""
-    full = os.path.abspath(path)
-    if os.path.commonpath([full, ROOT]) != ROOT:
+    root = os.path.realpath(os.path.abspath(ROOT))
+    full = os.path.realpath(os.path.abspath(path))
+    if os.path.commonpath([full, root]) != root:
         sys.exit(f"refuse: path '{path}' is outside the project ({ROOT})")
     return full
 
@@ -182,7 +183,9 @@ def cmd_export(args):
 
 
 def cmd_import(args):
-    lessons = _read_jsonl(BRAIN_FILE)
+    # same containment gate as export/save-chat: refuse a brain file that
+    # resolves outside the project (independent review finding, 2026-07-17)
+    lessons = _read_jsonl(_safe_path(BRAIN_FILE))
     if args.into:
         full = _safe_path(args.into)
         with open(full, "w") as f:
@@ -213,7 +216,7 @@ def cmd_save_chat(args):
         "tags": tags,
         "summary_only": args.mode == "summary",
         "raw_chat": args.mode == "raw",
-        "approved": True,
+        "approved": args.mode == "summary",
     }
 
     have = _existing_ids(BRAIN_FILE)

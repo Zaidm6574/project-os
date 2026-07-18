@@ -20,9 +20,10 @@ model_hint?, isolation?, depends_on[], outputs[], done}]}`
 Rules:
 
 - `compile` refuses unapproved plans (that is the point of planOnly).
-- **Maker/checker is enforced, not advisory:** any multi-step plan must include at
-  least one step whose role is a checker/verifier/reviewer/evaluator, and that step
-  must `depends_on` the work it checks. `validate` rejects plans without one.
+- **Maker/checker is enforced, not advisory:** `validate` rejects any multi-step plan
+  unless every non-checker work step is covered by some checker's `depends_on`, and at
+  least one work-dependent checker carries `verification` with non-placeholder
+  `method`/`expected`. Any explicit `checks: [step ids]` must match its `depends_on`.
 - Steps that mutate a shared repo in parallel set `"isolation": "worktree"` — the
   compiled packet instructs the worker to build in its own git worktree
   (`scripts/wt.py`) and merge back, instead of racing other workers in one checkout.

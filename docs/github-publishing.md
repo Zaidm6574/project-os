@@ -2,7 +2,7 @@
 
 Use this after reviewing the template for private information.
 
-Before publishing, make sure Git, Python 3, and ripgrep (`rg`) are installed; you can sign in to GitHub; and you know the GitHub username or organization that will own the repo.
+Before publishing, make sure Git, Python 3.10+, and ripgrep (`rg`) are installed; you can sign in to GitHub; and you know the GitHub username or organization that will own the repo.
 
 ## 1. Create The Repo
 
