@@ -29,7 +29,7 @@ non-placeholder method/expected ("-", "n/a", "todo", "tbd", ... are rejected).
 NOTE: validation re-runs at approve and compile (even with --force), so plans
 approved before 2026-07-17 must be re-validated — they may no longer compile.
 """
-import os, sys, json, re, datetime
+import os, sys, json, re, datetime, hashlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project-os/
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
@@ -121,6 +121,127 @@ def _real_verification_value(value):
     return v not in VERIFICATION_PLACEHOLDERS and not PLACEHOLDER_PATTERN.match(v)
 
 
+# ---------------------------------------------------------------------------
+# Hardening (private, 2026-07-22): instruction provenance, goal anchoring,
+# checker branch contracts, and injection screening of untrusted content.
+# plan/v1 keeps legacy behavior; plan/v2 makes all four mandatory. Declared
+# `branches` are checked on EVERY schema so a v1 plan can't smuggle an
+# execution-continuing failure branch.
+# ---------------------------------------------------------------------------
+HARDENED_SCHEMA = "plan/v2"
+TRUST_LEVELS = ("authoritative", "trusted", "untrusted")
+# on_fail must stop the loop: halt outright, escalate to the human gate, or
+# roll back. A step id or "continue" here means a FAILED check keeps
+# executing, which defeats the checker entirely.
+FAIL_CLOSED_BRANCHES = ("halt", "escalate-human", "rollback")
+# Prompt-injection tells in retrieved/project text. Screened on
+# NON-authoritative instruction content only — the user's own words are
+# authoritative by definition and are never screened.
+INJECTION_PATTERNS = (
+    ("override-prior-instructions",
+     re.compile(r"(ignore|disregard|forget)\s+(all\s+|any\s+)?(the\s+)?"
+                r"(previous|prior|earlier|above)?\s*"
+                r"(instructions|rules|prompts|directives)", re.I)),
+    ("persona-switch", re.compile(r"you\s+are\s+now\b", re.I)),
+    ("system-prompt-reference", re.compile(r"system\s+prompt", re.I)),
+    ("instruction-replacement", re.compile(r"new\s+instructions?\s*:", re.I)),
+    ("fabricated-approval",
+     re.compile(r"pretend\s+(that\s+)?the\s+(human|user)\s+(has\s+)?"
+                r"(already\s+)?approved", re.I)),
+    ("approval-bypass",
+     re.compile(r"(without|skip(ping)?|bypass(ing)?)\s+(human\s+)?"
+                r"(approval|review|the\s+gate)", re.I)),
+)
+
+
+def _sha256(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def compute_goal_anchor(plan):
+    """Digest anchor binding the goal + every AUTHORITATIVE instruction to
+    this plan id. Recomputed at validate/approve/compile; any later mutation
+    of the goal or the user's authoritative instructions breaks the match.
+    (Hash-chain integrity, not keyed signing — tamper-evident within the
+    artifact, matching the repo's provenance conventions.)"""
+    authoritative = sorted(
+        (rec.get("ref", ""), rec.get("digest", ""))
+        for rec in plan.get("instructions", [])
+        if isinstance(rec, dict) and rec.get("trust") == "authoritative")
+    payload = json.dumps({
+        "v": "goal-anchor/1",
+        "id": plan.get("id", ""),
+        "created": plan.get("created", ""),
+        "goal": plan.get("goal", ""),
+        "authoritative": authoritative,
+    }, sort_keys=True, separators=(",", ":"))
+    return _sha256(payload)
+
+
+def _validate_instructions(plan, probs):
+    """Validate provenance records; returns the set of known refs."""
+    records = plan.get("instructions", [])
+    if not isinstance(records, list):
+        probs.append("instructions must be a JSON array of provenance records")
+        return set()
+    refs = set()
+    for index, rec in enumerate(records, 1):
+        if not isinstance(rec, dict):
+            probs.append(f"instruction {index} must be a JSON object")
+            continue
+        ref = rec.get("ref")
+        label = ref if isinstance(ref, str) and ref else f"#{index}"
+        for field in ("ref", "source", "trust", "digest", "content"):
+            if not isinstance(rec.get(field), str) or not rec[field].strip():
+                probs.append(f"instruction {label}: missing {field}")
+        if not isinstance(ref, str) or not ref.strip():
+            continue
+        if ref in refs:
+            probs.append(f"instruction {label}: duplicate ref")
+        refs.add(ref)
+        trust = rec.get("trust")
+        if isinstance(trust, str) and trust not in TRUST_LEVELS:
+            probs.append(f"instruction {label}: unknown trust level {trust!r} "
+                         f"(must be one of {', '.join(TRUST_LEVELS)})")
+        content = rec.get("content")
+        digest = rec.get("digest")
+        if isinstance(content, str) and isinstance(digest, str) and digest.strip():
+            if _sha256(content) != digest:
+                probs.append(f"instruction {label}: digest mismatch — content "
+                             "does not match its provenance digest (tampered?)")
+        if trust == "authoritative" and rec.get("source") != "user":
+            probs.append(f"instruction {label}: only user-sourced instructions "
+                         f"may be authoritative (source is {rec.get('source')!r})")
+        if trust in ("trusted", "untrusted") and isinstance(content, str):
+            for name, pattern in INJECTION_PATTERNS:
+                if pattern.search(content):
+                    probs.append(f"instruction {label}: injection pattern "
+                                 f"detected in {trust} content ({name})")
+                    break
+    return refs
+
+
+def _validate_branches(step, sid, known_ids, probs, required):
+    branches = step.get("branches")
+    if branches is None:
+        if required:
+            probs.append(f"step {sid}: checker requires explicit branches "
+                         "with on_pass and fail-closed on_fail (plan/v2)")
+        return
+    if not isinstance(branches, dict):
+        probs.append(f"step {sid}: branches must be a JSON object")
+        return
+    on_fail = branches.get("on_fail")
+    if on_fail not in FAIL_CLOSED_BRANCHES:
+        probs.append(f"step {sid}: on_fail must be fail-closed "
+                     f"({'|'.join(FAIL_CLOSED_BRANCHES)}), got {on_fail!r} — "
+                     "a failure branch must not continue execution")
+    on_pass = branches.get("on_pass")
+    if not (on_pass == "continue" or on_pass in known_ids):
+        probs.append(f"step {sid}: on_pass must be 'continue' or a known "
+                     f"step id, got {on_pass!r}")
+
+
 def validate(plan):
     """Returns a list of problems (empty = valid)."""
     if not isinstance(plan, dict):
@@ -133,6 +254,24 @@ def validate(plan):
         return probs
     if plan["status"] not in STATUSES:
         probs.append(f"bad status: {plan['status']}")
+    hardened = plan.get("schema") == HARDENED_SCHEMA
+    instruction_refs = set()
+    if hardened or "instructions" in plan:
+        instruction_refs = _validate_instructions(plan, probs)
+    if hardened:
+        records = plan.get("instructions")
+        if not isinstance(records, list) or not records:
+            probs.append("plan/v2 requires an instructions provenance list")
+        elif not any(isinstance(r, dict) and r.get("trust") == "authoritative"
+                     for r in records):
+            probs.append("plan/v2 requires at least one authoritative "
+                         "user-sourced instruction")
+        anchor = plan.get("goal_anchor")
+        if not isinstance(anchor, str) or not anchor.strip():
+            probs.append("plan/v2 requires goal_anchor")
+        elif anchor != compute_goal_anchor(plan):
+            probs.append("goal_anchor mismatch — the goal or an authoritative "
+                         "instruction was mutated after the plan was created/approved")
     steps = plan["steps"]
     if not isinstance(steps, list):
         probs.append("steps must be a JSON array")
@@ -170,6 +309,18 @@ def validate(plan):
         if not isinstance(outputs, list) or any(not isinstance(v, str) for v in outputs):
             probs.append(f"step {sid if isinstance(sid, str) and sid else index}: "
                          "outputs must be a JSON array of strings")
+        step_instructions = s.get("instructions")
+        if step_instructions is not None:
+            label = sid if isinstance(sid, str) and sid else index
+            if not isinstance(step_instructions, list) or any(
+                    not isinstance(r, str) for r in step_instructions):
+                probs.append(f"step {label}: instructions must be a JSON array "
+                             "of provenance refs")
+            else:
+                for ref in step_instructions:
+                    if ref not in instruction_refs:
+                        probs.append(f"step {label}: unknown instruction "
+                                     f"reference {ref} (no provenance record)")
 
     if len(ids) != len(set(ids)):
         probs.append("duplicate step ids")
@@ -183,6 +334,16 @@ def validate(plan):
             if dep not in ids:
                 probs.append(f"step {s.get('id', '?')}: unknown dependency {dep}")
                 graph_ok = False
+    # Branch contract: any checker DECLARING branches must be fail-closed on
+    # every schema; plan/v2 checkers must declare them (hardening 2026-07-22).
+    all_ids = set(ids)
+    for s in valid_steps:
+        if isinstance(s.get("role"), str) and CHECKER_ROLES.search(s["role"]):
+            _validate_branches(s, s.get("id", "?"), all_ids, probs,
+                               required=hardened)
+        elif s.get("branches") is not None:
+            _validate_branches(s, s.get("id", "?"), all_ids, probs,
+                               required=False)
     # maker/checker enforcement: multi-step plans need >=1 checker step that
     # depends on the work it checks (protocol was policy-only before 2026-07-02)
     if len(steps) > 1:
@@ -276,7 +437,8 @@ def main():
     # only these exact tokens may be rejected as a flag's "missing value" —
     # arbitrary values starting with '--' (e.g. a goal of '--- draft ---')
     # are legitimate (audit finding F3, 2026-07-17)
-    known_flags = {"--goal", "--steps-file", "--id", "--step", "--force"}
+    known_flags = {"--goal", "--steps-file", "--id", "--step", "--force",
+                   "--instructions-file"}
 
     def flag(name, default=None):
         if name in args:
@@ -311,9 +473,24 @@ def main():
                         f"(line {e.lineno}, column {e.colno})")
         if not isinstance(steps, list):
             usage_error("--steps-file must contain a JSON array of steps")
+        instructions_file = flag("--instructions-file")
         plan = {"schema": "plan/v1", "id": pid, "goal": goal, "created": today,
                 "status": "planned",
                 "steps": steps}
+        if instructions_file:
+            # hardened path: provenance records supplied by the caller are
+            # verified (digests, trust, injection screen) by validate() below,
+            # and the goal is anchored so later mutation is rejected.
+            try:
+                with open(instructions_file, encoding="utf-8") as f:
+                    plan["instructions"] = json.load(f)
+            except OSError as e:
+                usage_error(f"cannot read --instructions-file: {e}")
+            except json.JSONDecodeError as e:
+                usage_error(f"invalid JSON in --instructions-file: {e.msg} "
+                            f"(line {e.lineno}, column {e.colno})")
+            plan["schema"] = HARDENED_SCHEMA
+            plan["goal_anchor"] = compute_goal_anchor(plan)
         probs = validate(plan)
         if probs:
             print("INVALID:\n- " + "\n- ".join(probs), file=sys.stderr)
