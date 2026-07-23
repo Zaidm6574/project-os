@@ -14,7 +14,9 @@ from pathlib import Path
 TEMPLATE_ROOT = Path(__file__).resolve().parents[1]
 ADDON_ROOT = TEMPLATE_ROOT / "addons" / "full-engine"
 GENERATED_DIRS = {"__pycache__", "store", "out", "graphify-out", ".turbovec"}
-GENERATED_SUFFIXES = (".pyc", ".tvim", ".sidecar.json", ".manifest.json")
+GENERATED_SUFFIXES = (".pyc", ".tvim", ".sidecar.json", ".manifest.json",
+                      ".db", ".db.tmp", ".db-wal", ".db-shm", ".db-journal",
+                      ".db.tmp-wal", ".db.tmp-shm", ".db.tmp-journal")
 
 
 def nonempty_path(value: str) -> Path:

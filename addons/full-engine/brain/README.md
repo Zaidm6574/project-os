@@ -21,3 +21,5 @@ python3 brain/central_brain.py init --path ~/.project-os/central-brain
 python3 brain/central_brain.py push --path ~/.project-os/central-brain --project . --project-id my-project
 python3 brain/central_brain.py pull --path ~/.project-os/central-brain --project . --project-id my-project
 ```
+
+For exact keyword search over this file (instead of semantic recall), use the read-only FTS mirror: `python3 memory/brain_fts_mirror.py rebuild` then `query "<terms>"` — see the full-engine README.

@@ -13,6 +13,7 @@ It is opt-in. The normal `install.sh` starter path does not install this engine 
 - `memory/build_graph.py` for GraphOS output at `graphify-out/graph.json`.
 - `memory/osvec_adapter.py` for OSVec local memory, powered by TurboVec when installed and a numpy fallback otherwise.
 - `brain/brain.py` for a local shared-brain JSONL exchange, including `save-chat` for approved chat summaries.
+- `memory/brain_fts_mirror.py` for deterministic keyword search over the shared brain (SQLite FTS5, fail-closed on drift).
 - `brain/central_brain.py` for optional cross-project central brain sync.
 - Optional `.claude/agents` and `.claude/commands` definitions for Claude Code users, including `context-scout` for low-cost blackboard read gates and `ui-ux-designer`, `frontend-builder`, and `/ui-review` for interface projects.
 - `blackboard/21-agent-roster.md` so goal locking and goal drift checks have a public-template-safe home.
@@ -48,6 +49,23 @@ python3 brain/brain.py save-chat --summary "Approved lesson or preference from t
 ```
 
 This writes to `brain/shared-brain.jsonl`. Summary mode is the default. Raw chat storage requires explicit `--mode raw` and still refuses secret-looking text.
+
+## Brain Keyword Mirror
+
+OSVec answers "what is similar to this?"; the mirror answers "which record says exactly this?" — deterministic keyword/phrase search with BM25 ranking:
+
+```bash
+python3 memory/brain_fts_mirror.py rebuild            # build/refresh the mirror db
+python3 memory/brain_fts_mirror.py check              # exit 1 if the jsonl changed since rebuild
+python3 memory/brain_fts_mirror.py query "signed receipt" --limit 5
+```
+
+Rules of the road:
+
+- `brain/shared-brain.jsonl` stays the only write plane. The mirror is derived, read-only data — rebuild it after the brain changes.
+- Queries are fail-closed: if the JSONL no longer matches the mirror (count, hashes, or the FTS index itself), `query` refuses and tells you to rebuild rather than silently returning stale hits.
+- The generated `memory/brain-fts-mirror.db` can contain your full brain text. It is gitignored and excluded by the installers; never commit or ship it.
+- Requires Python's SQLite with the FTS5 extension (standard in python.org and Homebrew builds); if it is missing, the tool reports that cleanly instead of half-working.
 
 ## Central Brain
 

@@ -81,6 +81,38 @@ class InstallerHardeningTests(unittest.TestCase):
             self.assertFalse((engine_target / "shared-brain.jsonl").exists())
             self.assertFalse((engine_target / "brain" / "shared-brain.jsonl").exists())
 
+    def test_copy_helpers_exclude_generated_databases(self):
+        # a stale brain-fts-mirror db (or its wal/shm/tmp siblings) can hold raw
+        # brain text and an absolute source path — it must never ship on install
+        setup = load_module(SETUP, "setup_project_os_db_filter")
+        full_engine = load_module(FULL_ENGINE, "install_full_engine_db_filter")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source = base / "source"
+            (source / "memory").mkdir(parents=True)
+            (source / "memory" / "helper.py").write_text("# safe helper\n", encoding="utf-8")
+            generated = (
+                "brain-fts-mirror.db",
+                "brain-fts-mirror.db-wal",
+                "brain-fts-mirror.db-shm",
+                "brain-fts-mirror.db-journal",
+                "tmpabc123.db.tmp",
+                "tmpabc123.db.tmp-journal",
+            )
+            for name in generated:
+                (source / "memory" / name).write_text("derived\n", encoding="utf-8")
+
+            starter_target = base / "starter"
+            engine_target = base / "engine"
+            setup.copy_tree_files(source, starter_target, force=False)
+            full_engine.copy_tree(source, engine_target, force=False)
+
+            for target in (starter_target, engine_target):
+                self.assertTrue((target / "memory" / "helper.py").is_file())
+                for name in generated:
+                    self.assertFalse((target / "memory" / name).exists(), name)
+
     def test_install_script_falls_back_from_old_python3_to_valid_python(self):
         # Point the shim at a REAL >=3.10 interpreter discovered the same way
         # install.sh probes, instead of assuming sys.executable qualifies.
