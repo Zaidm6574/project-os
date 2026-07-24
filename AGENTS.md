@@ -201,6 +201,12 @@ Use the UI lane to define:
 
 If the full engine is installed, use `ui-ux-designer` for the design packet, `frontend-builder` for implementation, and `/ui-review` for the UI quality gate. For static HTML artifacts, run `python3 memory/browser_qa.py <path>` when available; for dev-server apps, use browser or Playwright QA when available. Always log whether browser QA passed, failed, or was unavailable.
 
+## Code Orientation
+
+Orient before explaining code. Before summarizing how something works, establish the entry point, the relevant path through the system, upstream callers, downstream effects, the tests that pin the behavior, and what remains unknown. Label each load-bearing claim by how you established it: read directly from source, derived from a structural relationship, or inferred and still needing verification. A fluent explanation that leaves the developer unable to name the entry point or predict what a change breaks has failed, regardless of how correct it sounds.
+
+Never let a generated structural map replace reading the code. A map orients you toward the right files; the source and its tests are the authority. If any structural evidence is stale or missing, say so and continue from direct source inspection rather than narrating plausible architecture.
+
 ## Model Routing Plan
 
 Do not blindly put every sub-agent on the strongest model.
