@@ -2,112 +2,32 @@
 
 This project uses Project OS.
 
-When the user says `$project-os`, `/project`, `project os`, or asks to start, plan, review, build, or audit a project, follow the Project OS workflow below. Keep `AGENTS.md` with this file; it is the fuller cross-agent reference.
+**`AGENTS.md` is the single source of truth for Project OS doctrine across every runtime (Claude, Codex, Cursor).** This file is only a pointer plus Claude-specific notes. When the user says `$project-os`, `/project`, `project os`, or asks to start, plan, review, build, or audit a project, read `AGENTS.md` and follow it — the workflow, execution levels (Solo Agent Loop / Mini Swarm / Full Swarm), blackboard read gate, loop tooling, context & cache economy, memory order, research refresh, UI lane, model routing, and self-improvement loop are all defined there. Doctrine changes land in `AGENTS.md`, never only here.
 
-Key rules:
+## Non-Negotiable Safety Rules
+
+Mirrored verbatim from `AGENTS.md` because this file is auto-loaded — if you edit these rules, update both blocks in the same commit.
 
 - **Never `git push` to origin without explicit user approval in the same conversation turn.** Ask first, always — even mid-run, even at closeout.
 - **Never include personal/local tooling in template commits.** If a file is hardcoded to personal or local paths, engines, or private data, it belongs in `.gitignore`, not in a public push. When in doubt, ask before committing to the public repo.
-- Start as the CEO Agent.
-- Clarify before building.
-- Keep `blackboard/` as the source of truth.
-- Use Solo Agent Loop, Mini Swarm, or Full Swarm based on project complexity.
-- Use the CFO Agent for a model-routing plan and cost visibility.
-- Do not blindly keep every sub-agent on the strongest model if the sub-task is simple.
-- Watch context/cache hygiene on long sessions: cache writes, cache reads, active context bloat, handoff packets, and fresh-session boundaries.
-- Actual different-model execution depends on Claude or the AI tool; it is not detected through the GraphOS `PROJECT_OS_GRAPHOS_CMD` or OSVec `PROJECT_OS_OSVEC_CMD`.
-- Loop tooling (locks, plan artifacts with checker steps, promptsmith, evolution records, worktrees, memory harvest, brain archive tier, nightly heartbeat) lives in `scripts/` — see the `Loop Tooling` section of `AGENTS.md` before reimplementing anything ad hoc.
-- Vector recall without Ollama: `memory/mneme_adapter.py` falls back to word-matching. Query 2–3 phrasings, and for important recalls read `memory/self-improvement-loop.md` and `blackboard/08-memory-index.md` directly and judge relevance yourself.
-- Use memory summaries only with user approval.
-- Never ingest raw private exports by default.
-- Close serious runs with evaluation, delivery, artifacts, cost actuals, and memory harvest.
-- Use the self-improvement loop to harvest approved lessons, user preferences, reusable patterns, and next-kickoff safeguards.
-- Run a research refresh when the project may be stale or when the user wants to know what changed.
-- For websites, web apps, dashboards, games with UI, mobile screens, forms, and visual tools, use the UI lane: `ui-ux-designer`, `frontend-builder`, and `/ui-review` when the full engine commands are installed.
-- Ask for approval before spending money, publishing, deleting important work, contacting people, submitting forms, or making major commitments.
+- **An artifact existing is not a run being complete.** A serious run also needs evaluation, delivery notes, artifact status, cost notes, and memory harvest before it may be called done.
+- Actual different-model execution depends on the host AI tool; it is not detected through the GraphOS `PROJECT_OS_GRAPHOS_CMD` or OSVec `PROJECT_OS_OSVEC_CMD` environment variables.
 
-If Claude-specific features differ from Codex, write the limitation in `blackboard/17-capability-preflight.md`.
+## Claude-Specific Notes
 
-Reality check:
+Everything below exists only in Claude sessions; Codex has its own equivalents documented in `AGENTS.md`.
 
-- This is a workflow template, not an autonomous swarm platform by itself.
-- OSVec, GraphOS, model routing, browser QA, containers, and network controls are optional capabilities. Mark them as `Not configured`, `Not auto-detected`, `Unavailable`, or `Not used` unless they were actually verified.
-- If `memory/build_graph.py`, `memory/mneme_adapter.py`, `memory/osvec_adapter.py`, or legacy `memory/turbovec_adapter.py` exists, do not say the graph/vector layer is unavailable. Say it is available locally but may need activation: build the graph with `python3 memory/build_graph.py --root blackboard` or a run folder, and verify vector memory with `python3 memory/mneme_adapter.py build` (core) or `python3 memory/osvec_adapter.py selftest` (full engine).
-- Do not claim a run is complete because an artifact exists. A serious run also needs evaluation, delivery notes, artifact status, cost notes, and memory harvest.
-- Do not call UI work done without checking responsive layout, accessibility basics, interaction states, and browser QA status.
-- Markdown security rules are guidance, not enforcement. Real sandboxing and network restrictions must be provided by the local toolchain.
+- **Skills.** When the full engine is installed, kickoff/status/evaluate/deliver/ui-review run as slash commands (`/kickoff`, `/status`, `/evaluate`, `/deliver`, `/ui-review`, `/project`). Prefer them over improvising the workflow from prose.
+- **Subagents.** Use `context-scout` on the smallest available model for the blackboard read gate before heavier agents act. `ui-ux-designer`, `frontend-builder`, `builder`, `researcher`, `evaluator`, and `board` are available as agent types.
+- **Brain MCP.** In Claude sessions you may call `mcp__brain__brief` directly and pass `--brief-file` to `scripts/promptsmith.py` instead of letting the script fetch the brief.
+- **Auto-continuation.** When Max-effort is selected, ask the auto-continuation preference (`Auto`, `Ask first`, or `Warn only/Disabled`) and record it — full rules in the Context Cache Hygiene section of `AGENTS.md`.
+- **Capability parity.** If a Claude-specific feature differs from Codex, record the limitation in `blackboard/17-capability-preflight.md` before serious work.
 
 ## Friend Review Mode
 
-When the user asks for critique, publishing readiness, or friend review, audit before recommending publication:
+When the user asks for critique, publishing readiness, or friend review, audit before recommending publication (full checklist in `AGENTS.md`):
 
 - Confirm a blank test install creates the documented starter files and that optional tooling remains clearly labeled.
 - Scan tracked source and Git metadata for local paths, personal names, private project names, raw chats, secrets, credentials, and unwanted private artifacts.
-- Verify `.gitignore` protects private memory, imports, vector stores, graph output, environment files, and secrets.
-- Compare implemented behavior with README claims; do not present optional or unverified capabilities as active.
 - Check delivery reports and artifact manifests distinguish current outputs from drafts, tests, superseded files, and known gaps.
 - Treat any real private-data hit, unsafe default, broken install, or unsupported readiness claim as a publishing blocker.
-
-Blackboard Read Gate:
-
-- Do not act from memory on serious work. Read the current goal, decisions, risks, open questions, approved plan, and relevant packets first.
-- Report a compact `Context Used` summary before planning, building, reviewing, delivering, or approving.
-- When available, launch `context-scout` on the smallest available model to do this read cheaply before heavier agents act.
-- If small-model routing or subagents are unavailable, do the read gate yourself and record the limitation.
-- Keep decisions and risks append-only: append dated updates and mark old entries `Superseded` instead of deleting or overwriting them.
-
-Context cache hygiene:
-
-- Use blackboard files, packets, receipts, and artifact paths as the durable state instead of carrying a giant chat forever.
-- For long runs, add a context/cache budget to the loop spec: context sources, phase handoff trigger, cache-write watch trigger, and fresh-session trigger.
-- If usage data exposes cache fields, record uncached input, output, cached reads, cached writes, and cost in `blackboard/09-cost-estimate.md`.
-- If you inspect Codex local logs under `~/.codex/sessions`, sum `payload.info.last_token_usage`; do not sum every `payload.info.total_token_usage` row because that field is cumulative. `cached_input_tokens` means cached reads/subset of input, not cache writes, and local Codex logs do not expose cache creation.
-- If cache writes become the dominant cost, checkpoint the run, write a compact handoff packet, and continue from the blackboard in a fresh session.
-- When Max-effort is selected, ask the auto-continuation preference — Auto, Ask first, or Warn only/Disabled — and record it in `blackboard/11-model-routing.md`, `blackboard/09-cost-estimate.md`, and the loop spec. Auto writes a handoff packet and creates/forks a fresh continuation when thread tools exist; if they do not, it degrades to writing the packet and giving you a prompt to paste into a new chat. Default is Ask first.
-- Do not paste raw provider logs or full transcripts into the blackboard. Summarize totals, time window, attribution filter, source, confidence, and privacy notes.
-
-Execution levels:
-
-- Solo Agent Loop: Goal -> Context -> Draft -> Evaluate -> Revise -> Approve.
-- Mini Swarm: Planner + Researcher or Builder + Reviewer.
-- Full Swarm: CEO Agent + CFO Agent + Board/Worker Agents + Evaluator + Memory/Blackboard Agent.
-- Interface projects add UI/UX Designer + Frontend Builder packets and a `/ui-review` quality gate.
-
-Memory order:
-
-1. Current project blackboard.
-2. Optional GraphOS, powered by Graphify when configured.
-3. Optional OSVec, powered by TurboVec when configured, or `blackboard/08-memory-index.md`.
-4. User-approved chat memory summaries.
-5. Raw private exports only when the user explicitly asks.
-
-Activation guard: if a capability check says no graph/vector artifact exists but local helper scripts are present, run or recommend the local activation commands before falling back to markdown-only memory. Do not confuse missing external Graphify/TurboVec CLIs with missing Project OS local memory helpers.
-
-Self-improvement loop:
-
-- At closeout, update `blackboard/19-memory-harvest.md` and `memory/self-improvement-loop.md`.
-- Promote only reviewed, useful summaries into `blackboard/08-memory-index.md` or OSVec.
-- Never promote raw chats, secrets, private personal details, or unverified claims.
-- At kickoff, check approved memories and state what should change because of previous runs.
-
-Research refresh:
-
-- Use it when the project has gone stale, the market changed, or the user wants a current-state check.
-- If slash commands or prompt aliases are available, `/research refresh` should run this same workflow.
-- Update research, risks, decisions, cost notes, and the refresh log.
-- Prefer current sources for time-sensitive claims.
-
-UI/UX and frontend work:
-
-- Before building a UI, define the first usable screen, primary workflow, responsive layout, accessibility checks, visual direction, and expected states.
-- During build, follow the approved UI packet and existing project stack.
-- Before approval, run available build/test checks and browser QA. For static HTML, use `python3 memory/browser_qa.py <path>` when available; for dev-server apps, use browser or Playwright QA when available.
-
-## Context & cache economy (added 2026-07-05)
-
-Live billing analysis (2026-07-05) confirmed the audit's #1 cost finding: the **orchestrator's context — not the subagents — dominates spend.** Four rules, enforced by `memory/context_budget.py`:
-
-1. **Kickoff preflight:** run `python3 memory/context_budget.py`; record its output line in the run's `09-cost-estimate.md`. A fat harness (>25 enabled plugins or >200K baseline) gets fixed **before** wave 1 — the CFO cannot route costs it never measured.
-2. **Wave-boundary fresh-session rule:** when the check says CHECKPOINT (>200K live context), close the wave (packets + decisions to the blackboard), then continue in a **fresh session** that re-reads only the blackboard. Never let one orchestrator context run for hours — auto-compact summaries lose decisions AND re-write the whole cache prefix at 12.5x read price.
-3. **Fewer, bigger subagents:** each spawn cache-writes ~36K of agent prompt. 3 agents x 10 items beats 30 agents x 1.
-4. **Overnight wakes:** accept one cold cache write per wake. Never keep-warm ping at <5-minute intervals — six warm pings cost more than one cold write.

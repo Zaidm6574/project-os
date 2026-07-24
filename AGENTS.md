@@ -2,7 +2,16 @@
 
 > **Naming:** "Project OS" is a descriptor, not a brand. Internal module names: vector memory **Mneme** (formerly TurboVec/OSVec — `memory/mneme_adapter.py`), knowledge graph **Arachne** (formerly Graphify — output `graphify-out/graph.json`). Historical run logs keep old names. Private working notes live in `blackboard/` (gitignored).
 
+> **Single source of truth.** This file is the canonical Project OS doctrine for EVERY runtime — Codex reads it natively; Claude reads `CLAUDE.md`, which is a thin pointer back here plus Claude-only notes. Doctrine changes land in THIS file, never only in `CLAUDE.md`. The one deliberate exception: the Non-Negotiable Safety Rules below are mirrored verbatim in `CLAUDE.md` because that file is auto-loaded — if you edit those rules, update both blocks in the same commit.
+
 This project uses Project OS.
+
+## Non-Negotiable Safety Rules
+
+- **Never `git push` to origin without explicit user approval in the same conversation turn.** Ask first, always — even mid-run, even at closeout.
+- **Never include personal/local tooling in template commits.** If a file is hardcoded to personal or local paths, engines, or private data, it belongs in `.gitignore`, not in a public push. When in doubt, ask before committing to the public repo.
+- **An artifact existing is not a run being complete.** A serious run also needs evaluation, delivery notes, artifact status, cost notes, and memory harvest before it may be called done.
+- Actual different-model execution depends on the host AI tool; it is not detected through the GraphOS `PROJECT_OS_GRAPHOS_CMD` or OSVec `PROJECT_OS_OSVEC_CMD` environment variables.
 
 When the user says `$project-os`, `/project`, `project os`, or asks to start, plan, review, build, or audit a project:
 
@@ -81,10 +90,13 @@ Check:
 
 - Is the setup understandable to a non-expert?
 - Are implemented features separated from optional future tooling?
-- Are private-memory and raw-import paths ignored by Git?
-- Are there local paths, personal names, private project names, raw chats, secrets, or vendor-specific private branding?
+- Are private-memory and raw-import paths ignored by Git? Does `.gitignore` protect private memory, imports, vector stores, graph output, environment files, and secrets?
+- Scan tracked source AND Git metadata: are there local paths, personal names, private project names, raw chats, secrets, credentials, or vendor-specific private branding?
 - Does a blank test install create the expected files?
-- Are delivery reports honest about what was verified and what was not?
+- Are delivery reports honest about what was verified and what was not? Do artifact manifests distinguish current outputs from drafts, tests, superseded files, and known gaps?
+- Does the README claim only implemented behavior? Do not present optional or unverified capabilities as active.
+
+Treat any real private-data hit, unsafe default, broken install, or unsupported readiness claim as a publishing blocker.
 
 ## Execution Levels
 
@@ -187,7 +199,7 @@ Use the UI lane to define:
 - visual direction that fits the domain rather than generic decoration
 - browser QA checks, screenshots, or manual viewport checks needed before approval
 
-If the full engine is installed, use `ui-ux-designer` for the design packet, `frontend-builder` for implementation, and `/ui-review` for the UI quality gate. For web artifacts, run `python3 memory/browser_qa.py <path>` when available and log whether browser QA passed, failed, or was unavailable.
+If the full engine is installed, use `ui-ux-designer` for the design packet, `frontend-builder` for implementation, and `/ui-review` for the UI quality gate. For static HTML artifacts, run `python3 memory/browser_qa.py <path>` when available; for dev-server apps, use browser or Playwright QA when available. Always log whether browser QA passed, failed, or was unavailable.
 
 ## Model Routing Plan
 
