@@ -102,3 +102,12 @@ UI/UX and frontend work:
 - Before building a UI, define the first usable screen, primary workflow, responsive layout, accessibility checks, visual direction, and expected states.
 - During build, follow the approved UI packet and existing project stack.
 - Before approval, run available build/test checks and browser QA. For static HTML, use `python3 memory/browser_qa.py <path>` when available; for dev-server apps, use browser or Playwright QA when available.
+
+## Context & cache economy (added 2026-07-05)
+
+Live billing analysis (2026-07-05) confirmed the audit's #1 cost finding: the **orchestrator's context — not the subagents — dominates spend.** Four rules, enforced by `memory/context_budget.py`:
+
+1. **Kickoff preflight:** run `python3 memory/context_budget.py`; record its output line in the run's `09-cost-estimate.md`. A fat harness (>25 enabled plugins or >200K baseline) gets fixed **before** wave 1 — the CFO cannot route costs it never measured.
+2. **Wave-boundary fresh-session rule:** when the check says CHECKPOINT (>200K live context), close the wave (packets + decisions to the blackboard), then continue in a **fresh session** that re-reads only the blackboard. Never let one orchestrator context run for hours — auto-compact summaries lose decisions AND re-write the whole cache prefix at 12.5x read price.
+3. **Fewer, bigger subagents:** each spawn cache-writes ~36K of agent prompt. 3 agents x 10 items beats 30 agents x 1.
+4. **Overnight wakes:** accept one cold cache write per wake. Never keep-warm ping at <5-minute intervals — six warm pings cost more than one cold write.

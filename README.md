@@ -170,3 +170,5 @@ Sharing it with an AI reviewer? Paste `docs/for-ai-reviewers.md` first — it gi
 Field notes from real runs (what broke, what changed as a result) are in [docs/field-notes.md](docs/field-notes.md).
 
 A full example flow is in [docs/example-project-flow.md](docs/example-project-flow.md).
+
+How deep to verify agent work before trusting it — seven rungs from schema gate to human judgment, grounded in a measured benchmark — is in [docs/verifier-ladder.md](docs/verifier-ladder.md).
