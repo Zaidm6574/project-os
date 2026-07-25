@@ -42,6 +42,11 @@ venv/
 .idea/
 .vscode/
 
+# Agent/MCP tooling state — per-machine caches and indexes, never ships
+.serena/
+.aider*
+.claude/settings.local.json
+
 # Build/output scratch
 tmp/
 temp/
