@@ -1,8 +1,8 @@
 ---
+name: deliver
 description: Close out a run — delivery report, memory/graph wiring, cost actuals, lesson export, and a mechanical validation gate.
+capabilities: [subagents]
 ---
-
-<!-- GENERATED from prompts/workflows/deliver.md by scripts/sync_runtime_assets.py — edit the canonical file, not this one. -->
 # deliver <run_dir>
 
 Run this at the end of a run to make closure **real**. Closure is not "I think we're done" — it is **memory actually firing** (brain + OSVec + GraphOS) and then a mechanical gate passing. Do not declare a run done until `memory/validate_run.py` prints `VALIDATE: PASS`.
@@ -72,7 +72,3 @@ python3 memory/validate_run.py runs/<slug>
 - Run the steps **in order**: export → OSVec → GraphOS → cost actuals → validate. Memory must fire (steps 2–4) before the gate (step 6), because the gate now checks that a graph/memory artifact exists.
 - Referenced tools (`brain/brain.py`, `memory/osvec_adapter.py`, `memory/build_graph.py`, `memory/cost_actuals.py`, `memory/validate_run.py`) are owned elsewhere — this command only orchestrates them.
 - All writes target `runs/<slug>/` (plus the project-level `brain/`, `graphify-out/`, and `memory/store/` that the memory tools own); `blackboard/` stays a read-only template.
-
-## Capability note
-
-This workflow uses `subagents`. If your runtime does not have them, do the work inline yourself — do **not** skip the step and do **not** refuse. Record the substitution in `blackboard/17-capability-preflight.md` so the gap is visible instead of silent.

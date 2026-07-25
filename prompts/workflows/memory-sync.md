@@ -1,11 +1,11 @@
 ---
+name: memory-sync
 description: Update memory — refresh the GraphOS graph and store durable lessons in OSVec
 argument-hint: [optional: a lesson/preference to remember]
-allowed-tools: Read Write Edit Grep Glob Task Bash
+capabilities: [subagents]
+claude-tools: Read Write Edit Grep Glob Task Bash
 ---
-
-<!-- GENERATED from prompts/workflows/memory-sync.md by scripts/sync_runtime_assets.py — edit the canonical file, not this one. -->
-Sync project memory. Optional item to remember: **$ARGUMENTS**
+Sync project memory. Optional item to remember: **{{ARGUMENTS}}**
 
 Run the `memory-librarian` role — launch it as a subagent if your runtime has them, otherwise adopt the role yourself. It should:
 1. Run `python3 scripts/check_optional_tools.py --target .` when the script exists. If the report finds local full-engine files, do not call GraphOS/OSVec unavailable just because external Graphify/TurboVec commands are missing.
@@ -14,7 +14,3 @@ Run the `memory-librarian` role — launch it as a subagent if your runtime has 
 4. If I gave a specific lesson above, store it with a stable id and a link back to its source blackboard file/packet.
 
 Report what was indexed and anything stale or contradictory worth reconciling.
-
-## Capability note
-
-This workflow uses `subagents`. If your runtime does not have them, do the work inline yourself — do **not** skip the step and do **not** refuse. Record the substitution in `blackboard/17-capability-preflight.md` so the gap is visible instead of silent.

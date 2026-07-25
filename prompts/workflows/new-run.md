@@ -1,8 +1,8 @@
 ---
+name: new-run
 description: Start a new, isolated project run cloned from the blackboard template.
+capabilities: []
 ---
-
-<!-- GENERATED from prompts/workflows/new-run.md by scripts/sync_runtime_assets.py — edit the canonical file, not this one. -->
 # new-run <slug> [--tier solo|mini|full]
 
 Create an isolated working directory for a new run and switch all wave outputs into it. `blackboard/` is a **read-only template** — never write to it during a run.

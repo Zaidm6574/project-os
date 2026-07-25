@@ -1,8 +1,8 @@
 ---
+name: adopt-project
 description: Adopt an existing codebase or docs folder into Project OS as a new run.
+capabilities: []
 ---
-
-<!-- GENERATED from prompts/workflows/adopt-project.md by scripts/sync_runtime_assets.py — edit the canonical file, not this one. -->
 # adopt-project <path> [--slug name]
 
 Bring an **existing project** (a folder with code or docs but no Project OS run scaffold) into the `runs/` lifecycle.

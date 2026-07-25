@@ -1,11 +1,11 @@
 ---
+name: cost-check
 description: Estimate cost and set model routing (CFO)
 argument-hint: [optional: balanced | cost-aware | max-effort]
-allowed-tools: Read Write Edit Grep Glob Task WebSearch
+capabilities: [subagents, websearch]
+claude-tools: Read Write Edit Grep Glob Task WebSearch
 ---
-
-<!-- GENERATED from prompts/workflows/cost-check.md by scripts/sync_runtime_assets.py — edit the canonical file, not this one. -->
-Run a CFO cost pass. Requested cost mode (if any): **$ARGUMENTS**
+Run a CFO cost pass. Requested cost mode (if any): **{{ARGUMENTS}}**
 
 Run the `project-os-cfo` role — launch it as a subagent if your runtime has them, otherwise adopt the role yourself. It should:
 1. Inventory the models/tools I actually have (update the table in `blackboard/11-model-routing.md`).
@@ -17,7 +17,3 @@ Run the `project-os-cfo` role — launch it as a subagent if your runtime has th
 7. Recommend where to save without hurting quality, when to flip the Max-effort toggle, and when to checkpoint into a fresh session.
 
 Report the estimate and routing in plain English and tell me what (if anything) needs my decision.
-
-## Capability note
-
-This workflow uses `subagents`, `websearch`. If your runtime does not have them, do the work inline yourself — do **not** skip the step and do **not** refuse. Record the substitution in `blackboard/17-capability-preflight.md` so the gap is visible instead of silent.

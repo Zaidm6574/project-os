@@ -1,9 +1,9 @@
 ---
+name: status
 description: Show the current Project OS state from the blackboard
-allowed-tools: Read Grep Glob
+capabilities: [subagents]
+claude-tools: Read Grep Glob
 ---
-
-<!-- GENERATED from prompts/workflows/status.md by scripts/sync_runtime_assets.py — edit the canonical file, not this one. -->
 Give me a concise status read of the current project from the blackboard. Do not change anything.
 
 ## Blackboard Read Gate
@@ -18,7 +18,3 @@ Read and summarize:
 - `blackboard/12-evaluation-log.md` — last evaluation verdict.
 
 Then: in 3-5 sentences, where the project stands and the single best next step. Flag any goal drift.
-
-## Capability note
-
-This workflow uses `subagents`. If your runtime does not have them, do the work inline yourself — do **not** skip the step and do **not** refuse. Record the substitution in `blackboard/17-capability-preflight.md` so the gap is visible instead of silent.

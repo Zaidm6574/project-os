@@ -80,6 +80,7 @@ CLAUDE.md.pre-symlink.bak
 arachne-out/
 graphify-out/
 graphify-out
+code-graph.json
 
 # Run deliverable moved to its own repo; local compat symlink stays untracked
 app

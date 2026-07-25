@@ -1,9 +1,9 @@
 ---
+name: save-chat
 description: Save an approved chat summary, lesson, preference, or decision into the local Project OS shared brain.
 argument-hint: <approved summary to remember>
+capabilities: []
 ---
-
-<!-- GENERATED from prompts/workflows/save-chat.md by scripts/sync_runtime_assets.py — edit the canonical file, not this one. -->
 # save-chat <approved summary>
 
 Save a compact, approved memory from the current chat into `brain/shared-brain.jsonl`.
@@ -15,7 +15,7 @@ Save a compact, approved memory from the current chat into `brain/shared-brain.j
 3. Run:
 
 ```bash
-python3 brain/brain.py save-chat --summary "$ARGUMENTS" --kind lesson --tag chat
+python3 brain/brain.py save-chat --summary "{{ARGUMENTS}}" --kind lesson --tag chat
 ```
 
 4. If the user says the memory is a preference or decision, use `--kind preference` or `--kind decision`.

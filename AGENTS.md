@@ -253,9 +253,19 @@ Capture:
 
 Before the next serious run, read the relevant approved entries and ask: `What should we do differently this time because of previous runs?`
 
+## Workflows (every runtime)
+
+The Project OS workflows — `kickoff`, `status`, `evaluate`, `deliver`, `ui-review`, `new-run`, `adopt-project`, `board-review`, `cost-check`, `memory-sync`, `save-chat` — live in runtime-neutral form in `prompts/workflows/`. That directory is the single source; nothing about a workflow is Claude-only.
+
+- **To run one in any runtime:** open `prompts/workflows/<name>.md` and follow it. The canonical file is the complete instruction — there is no host-specific step to translate. `prompts/workflows/INDEX.md` lists all of them with their arguments.
+- **Claude** additionally exposes each as a slash command (`/kickoff`, `/status`, …). Those live in `addons/full-engine/staged/commands/` and are **generated** from `prompts/workflows/` — never hand-edit them.
+- **After changing a workflow**, run `python3 scripts/sync_runtime_assets.py` to regenerate the adapters. `--check` fails if any generated asset drifted from its source; the test suite enforces this, so a hand-edit that only improves Claude's copy is caught rather than silently leaving other runtimes behind.
+
+Workflows declare the capabilities they want (`subagents`, `websearch`, `task-tracking`, `browser`). **A runtime that lacks a capability does the work inline itself — it does not skip the step and does not refuse** — and records the substitution in `blackboard/17-capability-preflight.md`. A subagent is a role plus a fresh context; a runtime without them can still adopt the role, it just loses the context isolation.
+
 ## Capability Preflight (Claude/Codex parity)
 
-If Claude-specific features differ from Codex, record the limitation in `blackboard/17-capability-preflight.md` before serious work.
+If Claude-specific features differ from Codex, record the limitation in `blackboard/17-capability-preflight.md` before serious work. The workflow layer above is the mechanism: capability gaps are declared per workflow and degrade to inline work, so the difference is logged rather than felt as one runtime silently being weaker.
 
 ## Cursor Cloud specific instructions
 

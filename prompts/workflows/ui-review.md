@@ -1,11 +1,11 @@
 ---
+name: ui-review
 description: Review or plan a Project OS user interface with UI/UX, responsive layout, accessibility, and browser QA checks
 argument-hint: <path, artifact, or UI goal>
-allowed-tools: Read Write Edit Grep Glob Task Bash
+capabilities: [subagents]
+claude-tools: Read Write Edit Grep Glob Task Bash
 ---
-
-<!-- GENERATED from prompts/workflows/ui-review.md by scripts/sync_runtime_assets.py — edit the canonical file, not this one. -->
-Run a Project OS UI review for: **$ARGUMENTS**
+Run a Project OS UI review for: **{{ARGUMENTS}}**
 
 Use this workflow for websites, web apps, dashboards, mobile screens, browser games, forms, visual tools, and any UI artifact.
 
@@ -70,7 +70,3 @@ Status: Draft / Rejected / Approved
 ```
 
 Approve only when the UI meets the Definition of Done and the verification evidence is real.
-
-## Capability note
-
-This workflow uses `subagents`. If your runtime does not have them, do the work inline yourself — do **not** skip the step and do **not** refuse. Record the substitution in `blackboard/17-capability-preflight.md` so the gap is visible instead of silent.

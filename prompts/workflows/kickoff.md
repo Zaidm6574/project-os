@@ -1,13 +1,13 @@
 ---
+name: kickoff
 description: Start a new Project OS project from a rough idea (CEO interviews you, picks tier + cost mode)
 argument-hint: <your rough idea>
-allowed-tools: Read Write Edit Grep Glob Task TodoWrite WebSearch
+capabilities: [subagents, websearch, task-tracking]
+claude-tools: Read Write Edit Grep Glob Task TodoWrite WebSearch
 ---
-
-<!-- GENERATED from prompts/workflows/kickoff.md by scripts/sync_runtime_assets.py — edit the canonical file, not this one. -->
 Start a new Project OS run for this idea:
 
-**$ARGUMENTS**
+**{{ARGUMENTS}}**
 
 Act as the `project-os-ceo` (or delegate to it as a subagent if your runtime has them). Follow `AGENTS.md`:
 
@@ -19,7 +19,3 @@ Act as the `project-os-ceo` (or delegate to it as a subagent if your runtime has
 6. Then produce: `Context Used`, a project summary, the recommended tier, the proposed blackboard updates, an initial board-review plan (Full only), a GraphOS + OSVec memory setup note, a rough cost estimate, the UI lane note when relevant, and the critical questions to resolve before execution.
 
 Stop and get my approval before launching any wave that spends money, publishes, deletes work, or sends messages.
-
-## Capability note
-
-This workflow uses `subagents`, `websearch`, `task-tracking`. If your runtime does not have them, do the work inline yourself — do **not** skip the step and do **not** refuse. Record the substitution in `blackboard/17-capability-preflight.md` so the gap is visible instead of silent.
