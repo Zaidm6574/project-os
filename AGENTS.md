@@ -263,6 +263,8 @@ The Project OS workflows — `kickoff`, `status`, `evaluate`, `deliver`, `ui-rev
 
 Workflows declare the capabilities they want (`subagents`, `websearch`, `task-tracking`, `browser`). **A runtime that lacks a capability does the work inline itself — it does not skip the step and does not refuse** — and records the substitution in `blackboard/17-capability-preflight.md`. A subagent is a role plus a fresh context; a runtime without them can still adopt the role, it just loses the context isolation.
 
+**Where the roles are.** The role definitions — `project-os-ceo`, `project-os-cfo`, `board`, `context-scout`, `researcher`, `builder`, `frontend-builder`, `ui-ux-designer`, `evaluator`, `memory-librarian` — live in `addons/full-engine/staged/agents/<role>.md`. Claude installs them as spawnable subagents; **every other runtime reads the same file and adopts the role directly.** When a workflow says "run the `evaluator` role," open that file and follow it as your instructions for that pass. The frontmatter (`tools`, `model`) is Claude wiring and can be ignored; the body is the role.
+
 ## Capability Preflight (Claude/Codex parity)
 
 If Claude-specific features differ from Codex, record the limitation in `blackboard/17-capability-preflight.md` before serious work. The workflow layer above is the mechanism: capability gaps are declared per workflow and degrade to inline work, so the difference is logged rather than felt as one runtime silently being weaker.
