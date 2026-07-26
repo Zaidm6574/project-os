@@ -40,6 +40,8 @@ import argparse
 import hashlib
 import json
 import os
+import tempfile
+import shutil
 import re
 import sys
 import time
@@ -379,6 +381,31 @@ class ProjectMemory:
 # CLI + selftest
 # --------------------------------------------------------------------------- #
 def _selftest() -> int:
+    """Run the selftest against a THROWAWAY store.
+
+    This used to instantiate ProjectMemory() on the default store, so running
+    the selftest overwrote the user's real vector memory -- verified by md5 of
+    project.sidecar.json changing across a run (audit 2026-07-25). The private
+    fork already guarded this; canon did not.
+    """
+    global STORE_DIR, INDEX_PATH, SIDECAR_PATH
+    saved = (STORE_DIR, INDEX_PATH, SIDECAR_PATH)
+    tmp = tempfile.mkdtemp(prefix="osvec-selftest-")
+    STORE_DIR = tmp
+    INDEX_PATH = os.path.join(tmp, "project.tvim")
+    SIDECAR_PATH = os.path.join(tmp, "project.sidecar.json")
+    try:
+        return _selftest_body()
+    finally:
+        STORE_DIR, INDEX_PATH, SIDECAR_PATH = saved
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _selftest_body() -> int:
+    if os.path.realpath(STORE_DIR) == os.path.realpath(
+            os.path.join(HERE, "store")):
+        raise RuntimeError("selftest refuses to use the live OSVec store")
+    print("selftest store:", STORE_DIR)
     print("backend:", end=" ")
     mem = ProjectMemory()
     print(mem.backend)

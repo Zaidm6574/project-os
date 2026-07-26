@@ -180,8 +180,16 @@ def adopt(project_path: str, slug: str | None = None, tier: str = "solo") -> int
     if not os.path.isdir(full):
         sys.stderr.write("adopt: not a directory: %s\n" % full)
         return 1
-    slug = slug or _slugify(os.path.basename(full))
-    dest = os.path.join(ROOT, "runs", slug)
+    # A caller-supplied --slug used to go into the path RAW: only the inferred
+    # slug was passed through _slugify, so `--slug ../../../../tmp/x` scaffolded
+    # a run outside runs/ entirely. Slugify every slug, then prove containment
+    # (audit 2026-07-25, reproduced end-to-end).
+    slug = _slugify(slug) if slug else _slugify(os.path.basename(full))
+    runs_root = os.path.realpath(os.path.join(ROOT, "runs"))
+    dest = os.path.join(runs_root, slug)
+    if os.path.dirname(os.path.realpath(dest)) != runs_root:
+        sys.stderr.write("adopt: refusing slug that escapes runs/: %r\n" % slug)
+        return 1
     if os.path.exists(dest):
         sys.stderr.write("runs/%s/ already exists — refusing to overwrite.\n" % slug)
         return 1

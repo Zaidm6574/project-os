@@ -17,6 +17,7 @@ import argparse
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -72,6 +73,17 @@ def _tree_fingerprint(root: str) -> dict:
     return out
 
 
+def _kill_process_group(proc):
+    """Best-effort kill of the child's entire process group."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
 def verify(project_path: str, timeout: int = DEFAULT_TIMEOUT,
            isolated: bool = False) -> int:
     full = _safe_path(project_path)
@@ -116,25 +128,38 @@ def verify(project_path: str, timeout: int = DEFAULT_TIMEOUT,
         return code
 
     print("build_verify: running %s in %s" % (label, run_dir))
+    # Run the child in its own process group so a timeout kills the WHOLE tree.
+    # subprocess.run(timeout=...) kills only the direct child, so a `make test`
+    # that spawned a compiler or a dev server left those orphaned and still
+    # running after we printed FAIL (audit 2026-07-25). Cheap containment, not
+    # a sandbox -- the child is otherwise unrestricted (fs/network/cpu).
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=run_dir,
-            timeout=timeout,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        print("BUILD-VERIFY: FAIL (timeout after %ss)" % timeout)
-        return _finish(1)
     except FileNotFoundError as exc:
         print("BUILD-VERIFY: FAIL (%s)" % exc)
+        return _finish(1)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(proc)
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        print("BUILD-VERIFY: FAIL (timeout after %ss)" % timeout)
         return _finish(1)
     if proc.returncode == 0:
         rc = _finish(0)
         print("BUILD-VERIFY: PASS" if rc == 0 else "BUILD-VERIFY: FAIL (source tree changed)")
         return rc
-    tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+    tail = (err or out or "").strip().splitlines()
     if tail:
         print("  last: %s" % tail[-1][:200])
     print("BUILD-VERIFY: FAIL (exit %s)" % proc.returncode)
