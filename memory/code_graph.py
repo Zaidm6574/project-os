@@ -147,6 +147,19 @@ def _local_names(func_node):
     verified 'ast' edge to the unrelated module-level def.
     """
     names = set()
+    # PARAMETERS shadow module-level names too. Omitting them left the exact
+    # bug this function exists to fix: `def apply(helper): return helper()`
+    # still emitted a *verified* ast edge to an unrelated module-level
+    # helper(), when at runtime the call goes to whatever was passed in
+    # (adversarial verify 2026-07-25).
+    args = getattr(func_node, "args", None)
+    if args is not None:
+        for group in ("posonlyargs", "args", "kwonlyargs"):
+            for a in getattr(args, group, []) or []:
+                names.add(a.arg)
+        for a in (getattr(args, "vararg", None), getattr(args, "kwarg", None)):
+            if a is not None:
+                names.add(a.arg)
     for sub in _scope_nodes(func_node):
         if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store):
             names.add(sub.id)
@@ -281,8 +294,13 @@ def freshness_problems(root, graph):
     # 2026-07-25: a graph built for one directory was reported "fresh" when
     # checked/oriented against an unrelated directory that happens to share
     # file names — the per-file hash loop below can't catch that on its own.
+    # Compare REALPATHs, not abspaths: on macOS /tmp is a symlink to
+    # /private/tmp, so the identical directory reached by two spellings (an
+    # explicit /tmp/... path at build time vs a later `--root .` where getcwd()
+    # returns /private/tmp/...) was reported as a wrong-root STALE with zero
+    # actual drift, silently disabling orient() (adversarial verify 2026-07-25).
     graph_root = graph.get("root")
-    if graph_root is not None and os.path.abspath(graph_root) != root:
+    if graph_root is not None and os.path.realpath(graph_root) != os.path.realpath(root):
         problems.append(f"graph built for different root: {graph_root} (now checking {root})")
         return problems
     for rel, digest in graph["files"].items():

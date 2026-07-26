@@ -407,6 +407,12 @@ class ProjectMemory:
     def load(self):
         self._acquire_lock()
         if not os.path.exists(SIDECAR_PATH):
+            # Nothing was read, so there is no read-modify-write section to
+            # protect: release immediately. Holding here leaked the lock for
+            # the whole process lifetime, so a read-only `search`/`stats`
+            # against a brand-new store blocked every other process's load()
+            # until it exited (adversarial verify 2026-07-25).
+            self._release_lock()
             return self
         with open(SIDECAR_PATH) as f:
             blob = json.load(f)

@@ -41,30 +41,48 @@ SECTION_TYPES = {  # 19-memory-harvest.md heading prefix -> shared-brain type
     "safeguard": "safeguard",
     "next-kickoff safeguard": "safeguard",
 }
-# A row is skipped only when a cell IS a rejection/private marker -- not when a
-# lesson happens to use the word. The old pattern was
-# `\breject|private[- ]only\b`, whose alternation binds as (`\breject`) OR
-# (`private[- ]only\b`), so the left branch matched any word starting with
-# "reject". A genuine lesson like "Evaluator must reject on missing evidence"
-# was silently dropped from every harvest, with no count reported
-# (audit 2026-07-25).
-# Anchored at the START of the cell but NOT at the end: a status cell reads
-# "Rejected" but also "Rejected (see note)" / "REJECTED — superseded", and a
-# fully-anchored pattern let every annotated rejection harvest through as an
-# approved lesson (adversarial verify 2026-07-25). Starting-anchored still
-# spares a real lesson like "Evaluator must reject on missing evidence",
-# because that cell starts with "Evaluator".
-REJECT_ROW = re.compile(
-    r"^[\W_]*(reject(?:ed|ion)?|private[\s-]?only|do[\s-]?not[\s-]?harvest)"
-    # After the marker, allow: end of cell, a bracketed/dashed annotation, OR a
-    # short status continuation ("pending review", "by the board", "note"...).
-    # A cell is a VERDICT; a lesson is a sentence. The end-anchored version
-    # under-matched "Rejection pending review", letting a rejected row harvest
-    # through (judge loop, 2026-07-25).
-    r"[\s*_`]*(?:$|[(\[\-–—:;,].*|\s+(?:pending|awaiting|by|per|see|note|dupe|"
-    r"duplicate|superseded|stale|obsolete|wontfix|won't\s*fix)\b.*)",
-    re.I,
-)
+# Deciding "is this a rejection marker or a lesson that says the word reject?"
+# by text alone is not solvable, and three successive regexes proved it:
+#   v1 `\breject|private[- ]only\b`  -> dropped every lesson containing "reject"
+#   v2 fully end-anchored               -> let "Rejected (see note)" harvest through
+#   v3 continuation-word allowlist      -> still missed "Rejected because ...",
+#                                          and swallowed "Reject-first workflow ..."
+# So stop guessing and use the STRUCTURE instead (adversarial verify 2026-07-25):
+#
+#   * In a TABLE, the lesson is the FIRST cell and a verdict lives in a LATER
+#     column. Marker matching therefore runs on cells[1:] only, and may be
+#     permissive there — a status cell can say anything after the marker.
+#   * A BULLET has no status column, so only an EXPLICIT annotation counts:
+#     either a directive that is never ordinary prose ("do not harvest",
+#     "private-only"), or a marker followed by real annotation punctuation
+#     ("Rejected: dupe", "[Rejected] ...").
+#
+# `(?![-\w])` keeps the marker a standalone word, so the compound
+# "Reject-first workflow ..." is not treated as a rejection.
+_MARKER = (r"(?:rejected|rejection|reject|private[\s-]?only|"
+           r"do[\s-]?not[\s-]?harvest)")
+
+# For table cells past the first: marker at the start, anything after it.
+REJECT_CELL = re.compile(r"^[\W_]*" + _MARKER + r"(?![-\w])", re.I)
+
+# Directives that are never ordinary prose — safe to honour anywhere.
+REJECT_DIRECTIVE = re.compile(
+    r"^[\W_]*(?:private[\s-]?only|do[\s-]?not[\s-]?harvest)(?![-\w])", re.I)
+
+# For free-text bullets: require explicit annotation punctuation after the
+# marker, so an ordinary sentence like "Rejection criteria belong in the
+# rubric" is kept while "Rejected: dupe" is dropped.
+REJECT_BULLET = re.compile(
+    r"^[\W_]*" + _MARKER + r"(?![-\w])[\s*_`]*[:\]\)\-–—]", re.I)
+
+
+def _is_reject_bullet(text):
+    return bool(REJECT_DIRECTIVE.match(text) or REJECT_BULLET.match(text))
+
+
+# Kept as an alias so existing callers/tests that reference REJECT_ROW keep
+# working; it is the TABLE-cell rule.
+REJECT_ROW = REJECT_CELL
 
 # Rows skipped because a cell carried a rejection/private marker. Reported at
 # the end of a harvest so the filter is auditable instead of invisible.
@@ -121,7 +139,7 @@ def bullets_by_section(md):
             # branch enforced REJECT_ROW per cell -- a bullet like "Private-only:
             # ..." harvested straight through with no exclusion at all
             # (audit 2026-07-25). Apply the same check here.
-            if REJECT_ROW.match(text):
+            if _is_reject_bullet(text):
                 DROPPED.append(line.strip()[:120])
                 continue
             if text:
@@ -135,13 +153,15 @@ def bullets_by_section(md):
             if (not first or set(first) <= {"-", ":", " "}  # separator row
                     or first.lower() in ("lesson", "preference", "pattern", "safeguard")):
                 continue
-            if any(REJECT_ROW.match(c) for c in cells):
+            # cells[1:] only: cells[0] IS the lesson text, so matching a
+            # marker there dropped real lessons (adversarial verify 2026-07-25).
+            if any(REJECT_CELL.match(c) for c in cells[1:]):
                 # Record it. Silent filtering is why the old over-broad pattern
                 # went unnoticed: a harvest that drops rows must say how many.
                 DROPPED.append(line.strip()[:120])
                 continue
             text = re.sub(r"\*\*(.+?)\*\*", r"\1", first).strip()
-            extra = next((c for c in cells[1:] if c and not REJECT_ROW.match(c)), "")
+            extra = next((c for c in cells[1:] if c and not REJECT_CELL.match(c)), "")
             if text:
                 yield cur, (text + (f" — {extra}" if extra else ""))[:400]
 

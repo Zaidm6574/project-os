@@ -93,22 +93,70 @@ class HarvestDropsRowsNotWords(unittest.TestCase):
     def setUpClass(cls):
         cls.h = load("harvest_fix", ROOT / "scripts" / "harvest.py")
 
-    def test_a_lesson_that_mentions_rejecting_is_kept(self):
+    def test_a_lesson_bullet_that_mentions_rejecting_is_kept(self):
+        """Free text is judged by _is_reject_bullet, not the table-cell rule.
+
+        Three regexes tried to tell a verdict from a lesson by TEXT and all
+        three failed (dropped real lessons, then let annotated rejections
+        through, then both). The rule is now structural, so a bullet must carry
+        an explicit directive or annotation punctuation to be dropped.
+        """
         for text in (
             "Evaluator must reject on missing evidence",
             "The plan was rejected by the board, so we revised it",
             "Rejection criteria belong in the rubric",
+            "Reject-first workflow works well when scoping new features",
         ):
             with self.subTest(text=text[:40]):
-                self.assertIsNone(
-                    self.h.REJECT_ROW.match(text),
+                self.assertFalse(
+                    self.h._is_reject_bullet(text),
                     f"a real lesson was silently dropped: {text!r}",
                 )
 
+    def test_an_explicitly_marked_bullet_is_dropped(self):
+        for text in (
+            "Private-only: internal note",
+            "Do not harvest until reviewed by the board",
+            "Rejected: dupe",
+            "[Rejected] superseded",
+        ):
+            with self.subTest(text=text[:40]):
+                self.assertTrue(
+                    self.h._is_reject_bullet(text),
+                    f"an explicit rejection marker harvested through: {text!r}",
+                )
+
     def test_a_status_cell_marking_rejection_is_dropped(self):
-        for cell in ("Rejected", "rejected", "private-only", "do-not-harvest"):
+        """Table cells past the first may say anything after the marker."""
+        for cell in (
+            "Rejected", "rejected", "private-only", "do-not-harvest",
+            "Rejected (see note)", "REJECTED — superseded",
+            "Rejected because of scope creep", "Rejection pending review",
+        ):
             with self.subTest(cell=cell):
-                self.assertIsNotNone(self.h.REJECT_ROW.match(cell))
+                self.assertIsNotNone(
+                    self.h.REJECT_CELL.match(cell),
+                    f"a rejection verdict was harvested as a lesson: {cell!r}",
+                )
+
+    def test_the_marker_must_be_a_standalone_word(self):
+        """`Reject-first` is a compound, not a verdict."""
+        for cell in ("Reject-first workflow works well", "Rejects are logged", "Approved"):
+            with self.subTest(cell=cell):
+                self.assertIsNone(self.h.REJECT_CELL.match(cell))
+
+    def test_the_lesson_cell_itself_is_never_marker_matched(self):
+        """cells[0] holds the lesson; a verdict lives in a LATER column.
+
+        Matching markers against cells[0] is what made every text-only regex
+        drop real lessons (adversarial verify 2026-07-25).
+        """
+        src = (ROOT / "scripts" / "harvest.py").read_text(encoding="utf-8")
+        body = src.split("def bullets_by_section", 1)[1]
+        self.assertIn(
+            "cells[1:]", body,
+            "the table branch still marker-matches the lesson cell itself",
+        )
 
     def test_dropped_rows_are_recorded_for_reporting(self):
         """Silent filtering is why the over-broad pattern went unnoticed."""
