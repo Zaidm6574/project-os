@@ -127,6 +127,52 @@ class ApprovalColumnRefusal(unittest.TestCase):
         self.assertEqual(len(got), 1, "a non-approval 'No' was treated as a verdict")
         self.assertEqual(dropped, [])
 
+    def test_the_rule_targets_the_right_column_in_the_SHIPPED_template(self):
+        """The fixture must come from the template, not from imagination.
+
+        The first version of this rule matched `approv|reuse` in one pass, so
+        on the shipped Project Patterns header
+        `| Pattern | Where It Helped | Reuse Guidance | Approved For Reuse? |`
+        it locked onto "Reuse Guidance" (index 2) and never read the real
+        verdict column (index 3) -- inverting the rule in BOTH directions on
+        the one table shape that ships. The Lessons and User Preferences
+        tables hid it, because there no earlier column matches, and this
+        file's other tests hid it too because their header was hand-written
+        (adversarial pre-push audit 2026-07-26). Every header below is read
+        from blackboard-template/19-memory-harvest.md at runtime, so a
+        template edit that breaks the rule fails here.
+        """
+        template = os.path.join(ROOT, "blackboard-template", "19-memory-harvest.md")
+        with open(template, encoding="utf-8") as fh:
+            headers = [ln.strip() for ln in fh
+                       if ln.strip().startswith("|") and "Approved For Reuse?" in ln]
+        self.assertTrue(headers, "the template lost its Approved For Reuse? column")
+
+        for header in headers:
+            width = len([c for c in header.strip().strip("|").split("|")])
+            first = header.strip().strip("|").split("|")[0].strip().lower()
+            sep = "|" + "---|" * width
+            private = ["the staging DSN for CLIENTX is postgres://u:p@db"] \
+                + ["deploy wave"] * (width - 2) + ["No"]
+            keep = ["Use a bounded worker pool for the harvest fan-out stage"] \
+                + ["No more than 8 workers ever"] * (width - 2) + ["Yes"]
+            # The section heading is fixed; the HEADER ROW under it is what
+            # varies, and it is the thing under test.
+            md = ("## Lessons\n%s\n%s\n| %s |\n| %s |\n"
+                  % (header, sep, " | ".join(private), " | ".join(keep)))
+
+            with self.subTest(header=header):
+                got, dropped = _scan(md)
+                self.assertFalse(
+                    any("CLIENTX" in t for t in got),
+                    "a row marked 'No' in the shipped %r table was harvested"
+                    % first)
+                self.assertEqual(len(dropped), 1, "the refusal left no audit trail")
+                self.assertTrue(
+                    any("bounded worker pool" in t for t in got),
+                    "an APPROVED row was dropped because its guidance cell "
+                    "began with 'No' -- the rule read the wrong column")
+
     def test_a_headerless_table_keeps_the_old_behaviour(self):
         md = ("## Lessons\n"
               "| Prefer the stdlib on the CI floor | No |\n")

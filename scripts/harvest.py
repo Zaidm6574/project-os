@@ -322,8 +322,21 @@ def bullets_by_section(md):
                 # discarded with zero signal (adversarial verify 2026-07-26).
                 # Identified by header, never by cell shape, so a "No" under
                 # an unrelated column ("Uses numpy?") stays ordinary prose.
+                #
+                # `approv` is tried across ALL headers BEFORE falling back to
+                # `reuse`. A single pass with `approv|reuse` locked onto the
+                # Project Patterns table's "Reuse Guidance" column (index 2)
+                # instead of its "Approved For Reuse?" (index 3), inverting
+                # the rule on the shipped template: a row marked "No" was
+                # harvested, and an approved row whose guidance began "No more
+                # than 8 workers" was dropped. Lessons and User Preferences
+                # hid it, because there no earlier column matches
+                # (adversarial pre-push audit 2026-07-26).
                 appr = next((i for i, c in enumerate(cells)
-                             if re.search(r"approv|reuse", c, re.I)), None)
+                             if re.search(r"approv", c, re.I)), None)
+                if appr is None:
+                    appr = next((i for i, c in enumerate(cells)
+                                 if re.search(r"reuse", c, re.I)), None)
                 continue
             if cur is _EXCLUDED:
                 DROPPED.append(line.strip()[:120])
