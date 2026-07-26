@@ -413,11 +413,19 @@ class Round2AdversarialBypasses(unittest.TestCase):
         )
 
     def test_a_single_user_need_lookalike_does_not_satisfy_the_gate(self):
-        """One decoy named 'User Needs Documented' shipped a Pass verdict."""
-        src = (Path("/Users/zaidmartinez/Claude/Projects/project-os")
-               / "memory" / "score_rubric.py")
+        """One decoy named 'User Needs Documented' shipped a Pass verdict.
+
+        The User Need Gate lives only in the private engine, so this test is
+        opt-in via PROJECT_OS_PRIVATE_ROOT and skips everywhere else. It must
+        never hardcode a developer's home directory -- the first version of
+        this test did, and put an absolute personal path into a public repo.
+        """
+        private_root = os.environ.get("PROJECT_OS_PRIVATE_ROOT")
+        if not private_root:
+            self.skipTest("set PROJECT_OS_PRIVATE_ROOT to run this check")
+        src = Path(private_root) / "memory" / "score_rubric.py"
         if not src.is_file():
-            self.skipTest("private fork not present")
+            self.skipTest(f"no score_rubric.py under {private_root}")
         body = src.read_text(encoding="utf-8")
         self.assertIn(
             'CANONICAL = "user need gate"', body,

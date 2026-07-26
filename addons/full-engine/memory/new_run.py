@@ -55,9 +55,26 @@ def _blackboard_dir():
     (audit 2026-07-25).
     """
     live = os.path.join(ROOT, "blackboard")
-    if os.path.isdir(live):
+    if _has_numbered_templates(live):
         return live
     return os.path.join(ROOT, "blackboard-template")
+
+
+def _has_numbered_templates(d):
+    """True only if `d` actually holds numbered blackboard files.
+
+    Preferring `blackboard/` merely because the DIRECTORY exists was wrong: a
+    partially-populated blackboard (e.g. one containing only `plans/`, which
+    other tooling creates) made numbered_templates() return nothing, so
+    scaffolding produced a run with no goal file and adopt then failed. Prefer
+    the live blackboard only when it can actually serve as a template.
+    """
+    try:
+        return any(
+            n.endswith(".md") and n[:2].isdigit() for n in os.listdir(d)
+        )
+    except OSError:
+        return False
 
 
 BLACKBOARD = _blackboard_dir()

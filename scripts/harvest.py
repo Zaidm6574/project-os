@@ -56,7 +56,13 @@ SECTION_TYPES = {  # 19-memory-harvest.md heading prefix -> shared-brain type
 # because that cell starts with "Evaluator".
 REJECT_ROW = re.compile(
     r"^[\W_]*(reject(?:ed|ion)?|private[\s-]?only|do[\s-]?not[\s-]?harvest)"
-    r"[\s*_`]*(?:$|[(\[\-–—:;,].*)",
+    # After the marker, allow: end of cell, a bracketed/dashed annotation, OR a
+    # short status continuation ("pending review", "by the board", "note"...).
+    # A cell is a VERDICT; a lesson is a sentence. The end-anchored version
+    # under-matched "Rejection pending review", letting a rejected row harvest
+    # through (judge loop, 2026-07-25).
+    r"[\s*_`]*(?:$|[(\[\-–—:;,].*|\s+(?:pending|awaiting|by|per|see|note|dupe|"
+    r"duplicate|superseded|stale|obsolete|wontfix|won't\s*fix)\b.*)",
     re.I,
 )
 

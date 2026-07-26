@@ -24,6 +24,7 @@ Standard library only.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -260,18 +261,31 @@ def _refuse_symlinked_target(path: Path, root: Path) -> None:
         raise SystemExit(
             "sync_runtime_assets: refusing to write through a symlink: %s" % path
         )
-    root = root.resolve()
-    for parent in list(path.parents):
-        if parent == root or root not in parent.parents and parent != root:
-            if not str(parent).startswith(str(root)):
-                break
-        if parent.is_symlink():
-            raise SystemExit(
-                "sync_runtime_assets: refusing to write under a symlinked "
-                "directory: %s" % parent
-            )
+    # Walk from the repo root DOWN to the file, comparing resolved paths. The
+    # first version compared unresolved strings, so on macOS (/tmp is itself a
+    # symlink to /private/tmp) the loop broke out immediately and never checked
+    # any intermediate directory -- a symlinked directory inside the tree could
+    # still redirect the write (judge loop, 2026-07-25).
+    # Walk the UNRESOLVED path component by component. Resolving first erases
+    # the very symlink we are looking for: path.resolve() turns
+    # staged/commands -> /elsewhere into /elsewhere, which then looks like an
+    # ordinary directory inside the repo (judge loop, 2026-07-25).
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        rel = None
+    if rel is not None:
+        current = root
+        for part in rel.parts[:-1]:
+            current = current / part
+            if current.is_symlink():
+                raise SystemExit(
+                    "sync_runtime_assets: refusing to write under a symlinked "
+                    "directory: %s -> %s" % (current, os.readlink(current))
+                )
     resolved_parent = path.parent.resolve()
-    if root not in resolved_parent.parents and resolved_parent != root:
+    resolved_root = root.resolve()
+    if resolved_root not in resolved_parent.parents and resolved_parent != resolved_root:
         raise SystemExit(
             "sync_runtime_assets: target escapes the repo: %s -> %s"
             % (path, resolved_parent)
