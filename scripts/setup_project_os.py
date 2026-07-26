@@ -96,7 +96,13 @@ def bootstrap(target: Path, force: bool, dry_run: bool = False) -> list[str]:
 
     results.append(copy_file(TEMPLATE_ROOT / "AGENTS.md", target / "AGENTS.md", force, dry_run=dry_run))
     results.append(copy_file(TEMPLATE_ROOT / "CLAUDE.md", target / "CLAUDE.md", force, dry_run=dry_run))
-    results.append(merge_gitignore(TEMPLATE_ROOT / ".gitignore", target / ".gitignore", force, dry_run=dry_run))
+    # Merge the CURATED ignore list, not the repo's own .gitignore. The repo
+    # file also ignores lines specific to this repository (a bare `app`,
+    # `code-graph.json`, `arachne-out/`, ...), and copying it wholesale silently
+    # un-tracked a user's own `app/` directory (audit 2026-07-25).
+    curated_ignore = TEMPLATE_ROOT / "scripts" / "project-os.gitignore"
+    ignore_src = curated_ignore if curated_ignore.is_file() else TEMPLATE_ROOT / ".gitignore"
+    results.append(merge_gitignore(ignore_src, target / ".gitignore", force, dry_run=dry_run))
     results.extend(copy_tree_files(TEMPLATE_ROOT / "prompts", target / "prompts", force, dry_run=dry_run))
     results.extend(copy_tree_files(TEMPLATE_ROOT / "scripts", target / "scripts", force, dry_run=dry_run))
     results.extend(

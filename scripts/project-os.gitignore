@@ -1,0 +1,89 @@
+# Project OS — private files to keep out of git in a project that uses it.
+#
+# This is the curated list the installer merges into a target project's
+# .gitignore. It is DELIBERATELY not the repo's own .gitignore: that file also
+# ignores lines specific to THIS repository (a bare `app`, `code-graph.json`,
+# `arachne-out/`, `command-center/`, `CLAUDE.md.pre-symlink.bak`, `memory/*.json`),
+# and copying it wholesale silently un-tracked, e.g., a user's own `app/`
+# directory (audit 2026-07-25). Only patterns that are correct for ANY project
+# belong here.
+#
+# ANCHORING: a pattern with a slash is anchored to the repo root; the code can
+# write these paths at any depth, so those rules use a leading `**/`.
+
+# Private memory, vector stores, and the shared brain — never commit these
+private-memory/
+private-imports/
+local-memory/
+vector-index/
+vector-store/
+**/memory/store/
+memory/store/
+.turbovec/
+knowledge-graph/
+graphify-out/
+**/shared-brain.jsonl
+brain/shared-brain.jsonl
+**/*.sidecar.json
+**/store/*.tvim
+central-brain/
+**/central-brain/
+.project-os-central-brain/
+private-screenshots/
+private-exports/
+raw-exports/
+
+# Secrets
+.env
+.env.*
+.envrc
+secret.env
+*.key
+*.pem
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+secrets/
+secrets
+.secrets
+secrets.*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Agent / MCP tooling state — per-machine caches, never ship
+.serena/
+.aider*
+.claude/settings.local.json
+
+# Build / output scratch
+tmp/
+temp/
+dist/
+build/
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.log
+*.tvim
+node_modules/
+
+# Project OS run working directories.
+# `runs/` and `outputs/` hold transient per-run working state and can get large;
+# they are ignored by default. `blackboard/` is your project's human-readable
+# source of truth — it is NOT ignored here, so you can commit it if you want it
+# in history. Delete the next two lines if you would rather track runs/outputs.
+runs/
+outputs/
