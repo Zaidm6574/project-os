@@ -16,6 +16,7 @@ Standard library only. No network access.
 """
 import argparse
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -140,7 +141,33 @@ SOLO_PACKETS_WAIVER = (
 )
 
 
+SAFE_SLUG = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+
+
+def _reject_unsafe_slug(slug):
+    """A slug names ONE directory under runs/ — never a path.
+
+    `os.path.join(RUNS, slug)` happily accepts "../../etc" and, for an absolute
+    slug, discards RUNS entirely and writes wherever it is pointed. Both used to
+    exit 0 and print a success line ("Scaffolded runs//tmp/x/"), while the run
+    landed outside the project where --reindex can never see it — so INDEX.md and
+    /status stayed empty while the agent believed a run existed. The slug comes
+    from agent-supplied idea text via prompts/workflows/new-run.md, so it is not
+    trusted input. plan_artifact.py hardened this same class on 2026-07-25;
+    new_run.py was not brought along (audit 2026-07-26).
+    """
+    if not slug or not SAFE_SLUG.match(slug) or slug != os.path.basename(slug):
+        sys.stderr.write(
+            "refusing slug %r: a run slug is a single directory name under runs/, "
+            "matching [A-Za-z0-9][A-Za-z0-9._-]* — not a path.\n" % slug)
+        return 2
+    return 0
+
+
 def scaffold(slug, tier="full"):
+    bad = _reject_unsafe_slug(slug)
+    if bad:
+        return bad
     dest = os.path.join(RUNS, slug)
     if os.path.exists(dest):
         sys.stderr.write("runs/%s/ already exists — refusing to overwrite.\n" % slug)

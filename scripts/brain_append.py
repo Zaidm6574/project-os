@@ -128,6 +128,21 @@ def main():
         sys.exit(1)
     try:
         with open(SHARED_BRAIN, "a", encoding="utf-8") as f:
+            # Never weld onto a truncated tail. If a previous write died between
+            # the buffered write and the flush (SIGKILL, full disk, an
+            # interrupted `bb_lock append`), the last line is a partial JSON
+            # fragment with no newline. Appending to it produces ONE unparseable
+            # line, destroying both the truncated record and the one being saved
+            # now — and every reader skips unparseable lines silently
+            # (central_brain.read_jsonl, mneme_adapter._gather, the FTS mirror),
+            # so the loss is invisible forever while this command prints
+            # "appended" and exits 0. Start a new line instead; the damaged
+            # fragment stays damaged, but it stays ALONE (audit 2026-07-26).
+            if f.tell():
+                with open(SHARED_BRAIN, "rb") as probe:
+                    probe.seek(-1, os.SEEK_END)
+                    if probe.read(1) != b"\n":
+                        f.write("\n")
             # Write the object that was SCANNED, not the raw input text. JSON
             # allows duplicate keys and json.loads keeps only the last, so
             # `{"text":"<secret>","text":"clean"}` was screened as clean while

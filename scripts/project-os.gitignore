@@ -19,6 +19,15 @@ vector-index/
 vector-store/
 **/memory/store/
 memory/store/
+# The retrieval index is derived from the CENTRAL brain, not this project's own.
+# `mneme_adapter.py` ships into every install and stores `text[:240]` of each
+# lesson verbatim, so a lesson harvested while working on one client ends up in
+# plaintext inside the next client's repository, ready for `git add -A`. The
+# repo's own .gitignore has always covered this via `memory/*.json`, but that
+# rule was dropped from this curated list as repository-specific — it is not
+# (audit 2026-07-26). Named explicitly rather than restoring `memory/*.json`,
+# which would silently untrack a user's own files under memory/.
+**/mneme_index.json
 .turbovec/
 knowledge-graph/
 graphify-out/
