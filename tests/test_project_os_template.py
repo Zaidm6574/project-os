@@ -1,6 +1,10 @@
 import functools
 import importlib.util
+import json
+import os
+import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -16,6 +20,7 @@ TOOL_CHECK = ROOT / "scripts" / "check_optional_tools.py"
 IMPORTER = ROOT / "scripts" / "import_chat_history.py"
 FULL_ENGINE = ROOT / "scripts" / "install_full_engine.py"
 CENTRAL_BRAIN = ROOT / "addons" / "full-engine" / "brain" / "central_brain.py"
+COST_ACTUALS = ROOT / "addons" / "full-engine" / "memory" / "cost_actuals.py"
 VALIDATE_RUN = ROOT / "addons" / "full-engine" / "memory" / "validate_run.py"
 
 
@@ -401,15 +406,166 @@ class SetupProjectOSTests(unittest.TestCase):
             ROOT / "addons" / "full-engine" / "staged" / "agents" / "project-os-cfo.md",
         ]
         combined = "\n".join(path.read_text(encoding="utf-8") for path in files)
-        cost_tool = (ROOT / "addons" / "full-engine" / "memory" / "cost_actuals.py").read_text(encoding="utf-8")
 
-        self.assertIn("--codex-sessions", cost_tool)
+        # Docs only. The CLI flag itself is covered behaviourally by
+        # test_codex_session_rollup_cli_counts_real_session_files — asserting
+        # "--codex-sessions" against cost_actuals.py source proved nothing,
+        # because the module docstring and the --sessions-dir help string both
+        # keep the substring alive after the whole feature is deleted.
+        self.assertIn("--codex-sessions", combined)
         self.assertIn("last_token_usage", combined)
         self.assertIn("total_token_usage", combined)
         self.assertIn("cumulative", combined)
         self.assertIn("cached_input_tokens", combined)
         self.assertIn("cache writes", combined)
         self.assertIn("cache_creation_input_tokens", combined)
+
+    @staticmethod
+    def _write_codex_session(path, events):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            for event in events:
+                handle.write(json.dumps(event) + "\n")
+
+    @staticmethod
+    def _codex_usage(input_tokens, cached, output_tokens, reasoning, total):
+        return {
+            "input_tokens": input_tokens,
+            "cached_input_tokens": cached,
+            "output_tokens": output_tokens,
+            "reasoning_output_tokens": reasoning,
+            "total_tokens": total,
+        }
+
+    def test_codex_session_rollup_cli_counts_real_session_files(self):
+        # Behavioural cover for --codex-sessions: build a fake ~/.codex/sessions
+        # tree and assert the rendered numbers, so deleting the flag, the
+        # dispatch, the file collector, or the parser fails this test.
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions = Path(tmp) / "sessions"
+            nested = sessions / "2026" / "07" / "session-a.jsonl"
+            self._write_codex_session(
+                nested,
+                [
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "info": {
+                                "last_token_usage": self._codex_usage(100, 40, 10, 3, 110),
+                                "total_token_usage": self._codex_usage(100, 40, 10, 3, 110),
+                            }
+                        },
+                    },
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "info": {
+                                "last_token_usage": self._codex_usage(200, 50, 20, 6, 220),
+                                "total_token_usage": self._codex_usage(300, 90, 30, 9, 330),
+                            }
+                        },
+                    },
+                ],
+            )
+            self._write_codex_session(
+                sessions / "session-b.jsonl",
+                [
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "info": {
+                                "last_token_usage": self._codex_usage(50, 0, 5, 1, 55),
+                                "total_token_usage": self._codex_usage(50, 0, 5, 1, 55),
+                            }
+                        },
+                    }
+                ],
+            )
+            # Noise the collector must ignore: a non-jsonl file and a corrupt line.
+            (sessions / "notes.txt").write_text("not a session log\n", encoding="utf-8")
+            with open(sessions / "session-b.jsonl", "a", encoding="utf-8") as handle:
+                handle.write("{ this is not json\n")
+
+            result = subprocess.run(
+                [sys.executable, str(COST_ACTUALS), "--codex-sessions", "--sessions-dir", str(sessions)],
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            out = result.stdout
+            self.assertIn("## Codex local session token rollup", out)
+            self.assertIn(str(sessions), out)
+            self.assertIn("| Files scanned | 2 |", out)
+            self.assertIn("| Sessions with usage | 2 |", out)
+            self.assertIn("| Usage events | 3 |", out)
+            # sum(last_token_usage) = 350 input / 90 cached / 35 output / 385 total
+            self.assertIn("| input_tokens | 350 | 350 | 450 |", out)
+            self.assertIn("| cached_input_tokens | 90 | 90 | 130 |", out)
+            self.assertIn("| output_tokens | 35 | 35 | 45 |", out)
+            self.assertIn("| total_tokens | 385 | 385 | 495 |", out)
+            self.assertIn("| uncached_input_tokens | 260 | 260 | 320 |", out)
+            self.assertIn("| Cached-input share of input | 25.7% |", out)
+            self.assertIn("| Wrong cumulative-row overcount | 1.3x |", out)
+            self.assertIn("| Final-session cross-check | matches |", out)
+
+    def test_codex_session_rollup_refuses_a_missing_sessions_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "no-such-sessions"
+            result = subprocess.run(
+                [sys.executable, str(COST_ACTUALS), "--codex-sessions", "--sessions-dir", str(missing)],
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            combined = result.stdout + result.stderr
+            self.assertIn(str(missing), combined)
+            self.assertIn("not found", combined)
+            self.assertNotIn("Codex local session token rollup", result.stdout)
+
+    def test_installer_refuses_python_39_even_when_it_is_the_only_interpreter(self):
+        # Behavioural cover for the >=3.10 boundary in install.sh. The shim is a
+        # REAL interpreter that reports 3.9.6, so relaxing the gate to (3, 0)
+        # re-admits it and this test fails. A shim that just `exit 1`s would
+        # pass no matter where the boundary sits.
+        real_python = _find_python310() or sys.executable
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            fake_bin = base / "bin"
+            fake_bin.mkdir()
+            shim = (
+                "#!/bin/sh\n"
+                'if [ "$1" = "-c" ]; then\n'
+                "  shift\n"
+                "  exec %s -c 'import sys, platform\n"
+                'sys.version_info = (3, 9, 6, "final", 0)\n'
+                'platform.python_version = lambda: "3.9.6"\n'
+                "exec(sys.argv[1])\n"
+                "' \"$1\"\n"
+                "fi\n"
+                "exec %s \"$@\"\n"
+            ) % (shlex.quote(real_python), shlex.quote(real_python))
+            for name in _PYTHON_CANDIDATES:
+                fake = fake_bin / name
+                fake.write_text(shim, encoding="utf-8")
+                fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+
+            target = base / "project"
+            env = os.environ.copy()
+            env["PATH"] = os.pathsep.join((str(fake_bin), "/usr/bin", "/bin"))
+            result = subprocess.run(
+                ["sh", str(INSTALL), str(target), "--dry-run"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("found python3 = 3.9.6", result.stderr)
+            self.assertIn("Python 3.10 or newer", result.stderr)
+            self.assertNotIn("dry run complete", result.stdout)
+            self.assertFalse(target.exists())
 
     def test_max_effort_auto_continuation_prompt_is_wired(self):
         files = [

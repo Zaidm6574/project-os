@@ -64,30 +64,59 @@ SECTION_TYPES = {  # 19-memory-harvest.md heading prefix -> shared-brain type
 # into a PUBLIC brain. A missed marker leaks; an over-eager one only costs a row
 # that `DROPPED` reports out loud, so this side fails closed.
 #
-# `(?![-\w])` keeps the marker a standalone word, so the compound
+# `(?![-\w])` keeps the REJECT WORD a standalone word, so the compound
 # "Reject-first workflow ..." is not treated as a rejection, and "Rejects are
 # logged" / "rejecting a plan" stay ordinary prose.
-_MARKER = (r"(?:rejected|rejection|reject|private[\s-]?only|"
-           r"do[\s-]?not[\s-]?harvest)")
+_REJECT_WORD = r"(?:rejected|rejection|reject)"
+
+# A DIRECTIVE is never ordinary prose, so its tail boundary is deliberately
+# looser than the reject word's. The separators allow `_` as well as
+# space/hyphen (run notes get written in snake_case, and `do_not_harvest:` /
+# `private_only` bypassed every rule while reading as the plainest possible
+# directive), and a `-`/`_`-joined CONTINUATION is still the directive:
+# `do_not_harvest_this_row` slipped past `(?![-\w])` because the trailing `_`
+# reads as a word character (audit 2026-07-26). A letter-joined tail is still
+# rejected, so "do not harvesting" stays ordinary prose and the standalone-word
+# property the earlier rewrites depend on survives.
+_DIRECTIVE = r"(?:private[\s\-_]?only|do[\s\-_]?not[\s\-_]?harvest)"
+_DIRECTIVE_END = r"(?:(?![-\w])|(?=[-_]\w))"
+_MARKER = (r"(?:" + _REJECT_WORD + r"(?![-\w])|"
+           + _DIRECTIVE + _DIRECTIVE_END + r")")
 
 # For table cells past the first: marker at the start, anything after it.
-REJECT_CELL = re.compile(r"^[\W_]*" + _MARKER + r"(?![-\w])", re.I)
+REJECT_CELL = re.compile(r"^[\W_]*" + _MARKER, re.I)
 
 # Same marker anywhere inside a status/verdict column, not just at its start:
 # "Not approved, rejected" and "No — private-only" are verdicts too.
-REJECT_CELL_ANY = re.compile(r"(?<![-\w])" + _MARKER + r"(?![-\w])", re.I)
+REJECT_CELL_ANY = re.compile(r"(?<![-\w])" + _MARKER, re.I)
 
 # Directives that are never ordinary prose — honoured anywhere in the text.
 REJECT_DIRECTIVE = re.compile(
-    r"(?<![-\w])(?:private[\s-]?only|do[\s-]?not[\s-]?harvest)(?![-\w])", re.I)
+    r"(?<![-\w])" + _DIRECTIVE + _DIRECTIVE_END, re.I)
 
 # For free prose (a bullet, or a table's lesson cell): require explicit
 # annotation punctuation after the marker, so an ordinary sentence like
 # "Rejection criteria belong in the rubric" is kept while "Rejected: dupe",
 # "Rejected — dupe" and "Rejected, dupe" are dropped. The comma and semicolon
 # were missing, so "Rejected, this holds a private token" harvested through.
+#
+# The class used to be an ENUMERATION of the punctuation seen so far, and an
+# enumeration can never be exhaustive: it grew `;,` then `.!?'"` and STILL let
+# "Rejected… the transcript holds the client token" (the U+2026 ellipsis that
+# smart-punctuation editors substitute for "..."), "Rejected* ...",
+# "Rejected → ...", "Rejected = ..." and "Rejected» ..." harvest through, each
+# time failing OPEN in the exact family three rewrites had already chased
+# (audit 2026-07-26). So define it by what an annotation IS instead: any
+# character that is neither a word character nor whitespace. A terminator right
+# after the marker also defeats the continuation-word rule below (which needs
+# whitespace there), which is why this side has to be closed by construction.
+#
+# The one carve-out is a POSSESSIVE apostrophe — "Rejection's reason must be
+# written down" is ordinary prose, while "'Rejected' pending legal review" is
+# an annotation — so an apostrophe counts only when a letter does NOT follow.
+_ANNOTATION_PUNCT = r"(?:['’](?![A-Za-z])|[^\w\s'’])"
 REJECT_BULLET = re.compile(
-    r"^[\W_]*" + _MARKER + r"(?![-\w])[\s*_`]*[:;,\[\(\]\)\-–—]", re.I)
+    r"^[\W_]*" + _MARKER + r"[\s*_`]*" + _ANNOTATION_PUNCT, re.I)
 
 # Prose that is NOTHING BUT the marker is a verdict, not a sentence.
 REJECT_ONLY = re.compile(r"^[\W_]*" + _MARKER + r"[\W_]*$", re.I)
@@ -117,8 +146,26 @@ REJECT_BULLET_CONTINUED = re.compile(
     + r"(?![-\w])", re.I)
 
 
+def _plain(text):
+    """Drop PAIRED markdown emphasis so the annotation rules see the prose.
+
+    Now that any non-word character counts as annotation punctuation, the
+    emphasis a lesson is written in must not be mistaken for it: the bullet
+    branch already stripped `**bold**` before checking, but a TABLE's lesson
+    cell was checked raw, so "| *Rejection* criteria belong in the rubric |"
+    would read as "marker followed by punctuation" and be dropped. Only
+    BALANCED wrappers are removed, so a lone footnote star ("Rejected* holds
+    the client token") is still the annotation it looks like. `_` is left
+    alone on purpose — stripping it would tear `do_not_harvest` apart.
+    """
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"\*(.+?)\*", r"\1", text)
+    return re.sub(r"`(.+?)`", r"\1", text)
+
+
 def _is_reject_bullet(text):
     """Free-prose rule: bullets and a table row's lesson cell."""
+    text = _plain(text)
     return bool(REJECT_DIRECTIVE.search(text)
                 or REJECT_BULLET.match(text)
                 or REJECT_BULLET_CONTINUED.match(text)
@@ -220,13 +267,29 @@ def bullets_by_section(md):
 
 
 def eval_log_candidates(md):
-    """Fallback: fail/revise table rows from 12-evaluation-log.md."""
+    """Fallback: fail/revise table rows from 12-evaluation-log.md.
+
+    This path used to yield rows with NO reject/private filtering at all: a run
+    with no 19-memory-harvest.md staged "| ... token ... | private-only, do not
+    harvest |" straight into the proposals file, directive text and all, and
+    recorded nothing in DROPPED (audit 2026-07-26). It is the worse half of the
+    two paths, because it also joins the status/verdict columns INTO the
+    harvested text, so a rejection verdict rides along verbatim. Apply exactly
+    the rules bullets_by_section uses: free prose for the first cell, the
+    permissive verdict rule for the status columns after it, and the directive
+    rule anywhere in the row.
+    """
     for line in md.splitlines():
         if not line.strip().startswith("|"):
             continue
         if re.search(r"\bfail(ed)?\b|\brevise[d]?\b|\bwrong\b|\bbug\b", line, re.I):
             cells = [c.strip() for c in line.split("|") if c.strip() and set(c.strip()) != {"-"}]
             if len(cells) >= 2:
+                if (REJECT_DIRECTIVE.search(line)
+                        or _is_reject_bullet(cells[0])
+                        or any(_is_reject_verdict(c) for c in cells[1:])):
+                    DROPPED.append(line.strip()[:120])
+                    continue
                 yield "lesson", " — ".join(cells)[:400]
 
 
@@ -285,8 +348,15 @@ def cmd_scan(run):
     # DROPPED is module state; a scan reports only its OWN filtered rows.
     del DROPPED[:]
     harvest_md = read(os.path.join(d, "19-memory-harvest.md"))
-    cands = list(bullets_by_section(harvest_md)) if harvest_md else \
-        list(eval_log_candidates(read(os.path.join(d, "12-evaluation-log.md"))))
+    if harvest_md:
+        source_file = "19-memory-harvest.md"
+        cands = list(bullets_by_section(harvest_md))
+    else:
+        # Record the file the lesson actually came from. origin_id was
+        # hardcoded to 19-memory-harvest.md, so every fallback proposal
+        # misattributed its provenance in a PUBLIC brain (audit 2026-07-26).
+        source_file = "12-evaluation-log.md"
+        cands = list(eval_log_candidates(read(os.path.join(d, source_file))))
     norms = brain_norms()
     today = datetime.date.today().isoformat()
     fresh, skipped = [], 0
@@ -295,7 +365,7 @@ def cmd_scan(run):
             skipped += 1
             continue
         fresh.append({
-            "id": f"harvest-{slug}-{today}-{i:02d}", "origin_id": f"{slug}/19-memory-harvest.md",
+            "id": f"harvest-{slug}-{today}-{i:02d}", "origin_id": f"{slug}/{source_file}",
             "project_id": slug, "project_name": slug, "source": "harvest.py",
             "tags": [typ, "harvest"], "text": text, "ts": today, "type": typ,
         })
