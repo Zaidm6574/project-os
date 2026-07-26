@@ -92,11 +92,25 @@ REJECT_BULLET = re.compile(
 # Prose that is NOTHING BUT the marker is a verdict, not a sentence.
 REJECT_ONLY = re.compile(r"^[\W_]*" + _MARKER + r"[\W_]*$", re.I)
 
+# A verdict does not always reach for punctuation. "Rejected pending review" and
+# "Rejected dupe of lesson 12" are verdicts written in plain words, and the
+# punctuation-only rule above silently harvested them. These continuation words
+# only ever introduce a verdict's REASON, never a sentence about rejection as a
+# subject, so requiring the marker to be standalone and immediately followed by
+# one of them keeps "Rejection criteria belong in the rubric" (criteria is not a
+# continuation word) and "Reject-first workflow" (the marker is not standalone).
+_CONTINUATION = (r"(?:pending|awaiting|by|per|see|note|dupe|duplicate|"
+                 r"superseded|stale|obsolete|wontfix)")
+REJECT_BULLET_CONTINUED = re.compile(
+    r"^[\W_]*" + _MARKER + r"(?![-\w])[\s*_`]+" + _CONTINUATION + r"(?![-\w])",
+    re.I)
+
 
 def _is_reject_bullet(text):
     """Free-prose rule: bullets and a table row's lesson cell."""
     return bool(REJECT_DIRECTIVE.search(text)
                 or REJECT_BULLET.match(text)
+                or REJECT_BULLET_CONTINUED.match(text)
                 or REJECT_ONLY.match(text))
 
 
