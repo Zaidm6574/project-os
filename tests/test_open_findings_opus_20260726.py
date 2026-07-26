@@ -65,6 +65,33 @@ class InstalledProjectsIgnoreTheRetrievalIndex(unittest.TestCase):
                     "%s was over-matched; the curated list must not untrack "
                     "a user's own files" % path)
 
+    def test_the_fts_mirror_scratch_file_is_ignored(self):
+        """brain_fts_mirror builds the mirror in a `*.db.tmp` scratch file.
+
+        Cleanup lives in a `finally`, so a Python-level error is handled --
+        but a SIGKILL or a power cut leaves the fully populated file behind
+        with brain records in plaintext. This repo's own .gitignore covers
+        the family and the installer already refuses to COPY it; the list the
+        installer WRITES did not, so the residue sat untracked-but-not-ignored
+        in a stranger's project (adversarial pre-push audit 2026-07-26).
+        """
+        for path in ("memory/tmpab12cd34.db.tmp",
+                     "memory/tmpab12cd34.db.tmp-journal",
+                     "nested/deeper/memory/tmpx.db.tmp"):
+            with self.subTest(path=path):
+                self.assertTrue(
+                    self._check_ignore(path),
+                    "%s holds brain records and would be committed into a "
+                    "user's project" % path)
+
+    def test_a_users_own_tmp_named_source_file_is_still_tracked(self):
+        """The control: the rule must key on the .db.tmp suffix, not on 'tmp'."""
+        for path in ("app/tmp_helpers.py", "memory/db.tmpl"):
+            with self.subTest(path=path):
+                self.assertFalse(
+                    self._check_ignore(path),
+                    "%s was over-matched by the .db.tmp rule" % path)
+
 
 class ARunSlugIsADirectoryNameNotAPath(unittest.TestCase):
     """os.path.join(RUNS, slug) accepts '../..' and discards RUNS for an

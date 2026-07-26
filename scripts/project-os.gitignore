@@ -85,6 +85,15 @@ build/
 *.db-wal
 *.db-shm
 *.db-journal
+# brain_fts_mirror.py builds the full-text mirror in a `*.db.tmp` scratch file
+# and only then os.replace()s it into place. Its cleanup is in a `finally`, so
+# a Python-level error is handled — but a SIGKILL, an OOM or a power cut leaves
+# the FULLY POPULATED scratch file behind, holding brain records in plaintext.
+# The installer already refuses to COPY this family; leaving it out of the list
+# it WRITES made it untracked-but-not-ignored in a stranger's project, one
+# `git add -A` from being committed (adversarial pre-push audit 2026-07-26).
+*.db.tmp
+*.db.tmp-*
 *.log
 *.tvim
 node_modules/
