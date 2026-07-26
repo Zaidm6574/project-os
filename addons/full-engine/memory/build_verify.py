@@ -29,30 +29,84 @@ def _safe_path(path: str) -> str:
     return os.path.abspath(path)
 
 
-def _detect_command(project_path: str) -> tuple[list[str], str] | None:
+def _detect(project_path: str):
+    """Detect the project's stack AND the cheapest runnable verify command.
+
+    Returns ``(cmd, label, detected, blockers)``:
+
+      cmd/label -- the command to run, or ``(None, None)`` when nothing here
+                   is runnable.
+      detected  -- stack markers actually found on disk. This can be non-empty
+                   while ``cmd`` is None: the stack IS there, the toolchain is
+                   not. Callers must not report that case as "no detectable
+                   stack" -- that sends the reader hunting for a project-layout
+                   problem that does not exist (audit 2026-07-26).
+      blockers  -- why each detected lane could not be run, in detection order.
+    """
+    detected = []
+    blockers = []
+
     pkg = os.path.join(project_path, "package.json")
     if os.path.isfile(pkg):
+        detected.append("package.json")
         if shutil.which("npm"):
-            return (["npm", "test"], "npm test")
+            return (["npm", "test"], "npm test", detected, blockers)
         # Fail-closed (2026-07-25): npm missing means BOTH "npm test" and
         # "npm run build" are guaranteed to fail the same way ("npm not
-        # found"), not a real build/test result. Fall through to "no
-        # detectable stack" instead of returning a doomed npm invocation.
-        return None
+        # found"), not a real build/test result -- so never return a doomed
+        # npm invocation. Refined 2026-07-26: keep looking instead of giving
+        # up outright. A polyglot repo (JS front end + Python/Make back end)
+        # can still be verified by a toolchain that IS installed; we only
+        # refuse when nothing on disk is runnable, and we say so out loud
+        # (see the partial-verify NOTE in verify()).
+        blockers.append("npm not on PATH")
+
     pyproject = os.path.join(project_path, "pyproject.toml")
     setup = os.path.join(project_path, "setup.py")
-    if os.path.isfile(pyproject) or os.path.isfile(setup) or os.path.isdir(
+    py_markers = []
+    if os.path.isfile(pyproject):
+        py_markers.append("pyproject.toml")
+    if os.path.isfile(setup):
+        py_markers.append("setup.py")
+    # A bare tests/ directory is only a Python signal when nothing else has
+    # claimed the project. Plenty of JS repos ship tests/, and handing one to
+    # pytest yields "no tests collected" -- a false FAIL dressed up as a real
+    # one.
+    if not py_markers and not detected and os.path.isdir(
         os.path.join(project_path, "tests")
     ):
+        py_markers.append("tests/")
+    if py_markers:
+        detected.extend(py_markers)
         if shutil.which("pytest"):
-            return (["pytest", "-q"], "pytest")
+            return (["pytest", "-q"], "pytest", detected, blockers)
+        blockers.append("pytest not on PATH")
+
     makefile = os.path.join(project_path, "Makefile")
     if os.path.isfile(makefile):
-        with open(makefile, encoding="utf-8", errors="replace") as fh:
-            body = fh.read()
-        if _has_test_target(body) and shutil.which("make"):
-            return (["make", "test"], "make test")
-    return None
+        detected.append("Makefile")
+        body = None
+        try:
+            with open(makefile, encoding="utf-8", errors="replace") as fh:
+                body = fh.read()
+        except OSError as exc:
+            blockers.append("Makefile unreadable (%s)" % exc)
+        if body is not None:
+            if not _has_test_target(body):
+                blockers.append("Makefile has no `test:` target")
+            elif not shutil.which("make"):
+                blockers.append("make not on PATH")
+            else:
+                return (["make", "test"], "make test", detected, blockers)
+    return (None, None, detected, blockers)
+
+
+def _detect_command(project_path: str) -> tuple[list[str], str] | None:
+    """Back-compat shim: the runnable command only, no diagnostics."""
+    cmd, label, _detected, _blockers = _detect(project_path)
+    if cmd is None:
+        return None
+    return (cmd, label)
 
 
 def _has_test_target(body: str) -> bool:
@@ -94,11 +148,26 @@ def verify(project_path: str, timeout: int = DEFAULT_TIMEOUT,
     if not os.path.isdir(full):
         print("BUILD-VERIFY: FAIL (not a directory)")
         return 1
-    detected = _detect_command(full)
-    if not detected:
-        print("BUILD-VERIFY: FAIL (no detectable stack: package.json/pyproject/Makefile)")
+    cmd, label, detected, blockers = _detect(full)
+    if cmd is None:
+        if detected:
+            # The stack WAS detected; the toolchain to run it is missing. Say
+            # exactly that -- the old "no detectable stack" line was false here
+            # and sent readers looking for a layout bug (audit 2026-07-26).
+            print("BUILD-VERIFY: FAIL (stack detected (%s) but no usable "
+                  "toolchain: %s)"
+                  % (", ".join(detected),
+                     "; ".join(blockers) or "reason unknown"))
+        else:
+            print("BUILD-VERIFY: FAIL (no detectable stack: package.json/pyproject/Makefile)")
         return 1
-    cmd, label = detected
+    if blockers:
+        # We moved past a detected-but-unrunnable lane. The result that follows
+        # covers less than the whole project, so never let it read as full
+        # coverage.
+        print("build_verify: NOTE %s — falling back to %s; detected stack (%s) "
+              "is only PARTIALLY verified"
+              % ("; ".join(blockers), label, ", ".join(detected)))
 
     # Isolated-copy damage guard (hardening 2026-07-22): the verify command
     # runs against a DISPOSABLE copy, so a test/build step that writes files
@@ -161,7 +230,21 @@ def verify(project_path: str, timeout: int = DEFAULT_TIMEOUT,
         return _finish(1)
     if proc.returncode == 0:
         rc = _finish(0)
-        print("BUILD-VERIFY: PASS" if rc == 0 else "BUILD-VERIFY: FAIL (source tree changed)")
+        if rc != 0:
+            print("BUILD-VERIFY: FAIL (source tree changed)")
+            return rc
+        # Agents paste the BUILD-VERIFY line verbatim as a receipt, so a
+        # partial verify has to carry its caveat ON that line -- a separate
+        # NOTE line does not survive the copy/paste.
+        # Name the lane that actually RAN, then the reasons the others did
+        # not. Listing `detected` here was itself a false message: it includes
+        # the lane that just passed, so the receipt claimed the verified lane
+        # was unverified (audit 2026-07-26, repair round).
+        if blockers:
+            print("BUILD-VERIFY: PASS (PARTIAL: %s only; %s)"
+                  % (label, "; ".join(blockers)))
+        else:
+            print("BUILD-VERIFY: PASS")
         return rc
     tail = (err or out or "").strip().splitlines()
     if tail:

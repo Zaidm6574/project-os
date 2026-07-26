@@ -38,6 +38,7 @@ import argparse
 import json
 import os
 import pathlib
+import stat as stat_module
 import sys
 import tempfile
 
@@ -555,18 +556,83 @@ def _update_markers(dest, table_md):
         + "\n"
         + text[ei:]
     )
-    # Write atomically (2026-07-25): a plain write_text() truncates dest before
-    # the new bytes are flushed, so a crash/kill mid-write (or a concurrent
-    # reader) can observe a half-written or empty file. Write to a temp file in
-    # the same directory, then os.replace() so the swap is a single atomic
-    # rename.
+    _atomic_write_preserving_mode(dest, new_text)
+
+
+def _atomic_write_preserving_mode(dest, new_text):
+    """Replace dest's contents atomically without changing its permissions.
+
+    Write atomically (2026-07-25): a plain write_text() truncates dest before
+    the new bytes are flushed, so a crash/kill mid-write (or a concurrent
+    reader) can observe a half-written or empty file. Write to a temp file in
+    the same directory, then os.replace() so the swap is a single atomic rename.
+
+    Carry the destination's own mode/ownership across the swap (2026-07-26):
+    tempfile.mkstemp() always creates its file 0600 (deliberately, and
+    independent of umask), and os.replace() renames that file *with its mode*
+    over the destination. So every --write silently narrowed a world-readable
+    0644 cost report to owner-only 0600 — no error, no message, and the next
+    teammate or CI reader just gets EACCES. Statting the destination first and
+    chmod-ing the temp file to match keeps a 0644 file 0644 and equally keeps an
+    intentionally restrictive 0600 file at 0600; we never widen, we only
+    reproduce what was already there -- including the setuid/setgid bits, which
+    is why the best-effort chown has to happen *before* the chmod (see below).
+
+    If dest is a symlink, resolve it first: os.replace() on the link path would
+    otherwise delete the symlink and leave a regular file in its place (and, if
+    the link points at another filesystem, the rename fails with EXDEV because
+    the temp file was created next to the link, not next to the real file).
+    """
+    real_dest = pathlib.Path(os.path.realpath(str(dest)))
+    try:
+        dest_stat = os.stat(str(real_dest))
+    except OSError:
+        dest_stat = None
+
     fd, tmp_name = tempfile.mkstemp(
-        dir=dest.parent, prefix=dest.name + ".", suffix=".tmp"
+        dir=str(real_dest.parent), prefix=real_dest.name + ".", suffix=".tmp"
     )
     try:
         with os.fdopen(fd, "w") as fh:
             fh.write(new_text)
-        os.replace(tmp_name, dest)
+        if dest_stat is not None:
+            wanted_mode = stat_module.S_IMODE(dest_stat.st_mode)
+            if hasattr(os, "chown"):
+                # Ownership is best-effort: only root can hand a file to
+                # another uid, and a non-root run that merely has write access
+                # should still get the atomic write.
+                #
+                # chown MUST run before chmod (2026-07-26): POSIX requires
+                # chown() by a non-root process to clear S_ISUID/S_ISGID, and
+                # it does so even for a same-owner no-op chown. Doing it after
+                # the chmod silently turned a 0o2644 destination into 0o644 --
+                # the very silent-narrowing bug this helper exists to prevent.
+                try:
+                    os.chown(tmp_name, dest_stat.st_uid, dest_stat.st_gid)
+                except OSError:
+                    pass
+            # Not best-effort: a failure here would silently re-introduce the
+            # 0600 narrowing this function exists to prevent, so let it raise
+            # and take the cleanup path below.
+            os.chmod(tmp_name, wanted_mode)
+            # chmod() is also allowed to drop setuid/setgid silently (e.g. the
+            # caller does not belong to the file's group), so confirm what
+            # actually stuck. We cannot restore those bits without privilege,
+            # but we refuse to narrow a file *quietly*.
+            final_mode = stat_module.S_IMODE(os.stat(tmp_name).st_mode)
+            if final_mode != wanted_mode:
+                sys.stderr.write(
+                    "WARNING: could not preserve mode %s on %s; wrote it as %s\n"
+                    % (oct(wanted_mode), real_dest, oct(final_mode))
+                )
+        else:
+            # No existing destination to copy from: fall back to the ordinary
+            # create-a-file mode (0666 honoring the process umask) instead of
+            # leaving mkstemp's 0600.
+            umask = os.umask(0)
+            os.umask(umask)
+            os.chmod(tmp_name, 0o666 & ~umask)
+        os.replace(tmp_name, str(real_dest))
     except BaseException:
         try:
             os.unlink(tmp_name)

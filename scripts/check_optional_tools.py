@@ -198,24 +198,245 @@ def build_report(target: Path | None = None) -> str:
 
 REPORT_MARKER = "## Automated Optional Tool Check"
 
+# Explicit machine-owned delimiters. Everything between them belongs to this
+# script and is replaced on every run; everything outside them is hand-written
+# and must survive untouched. Older reports were written with the bare
+# REPORT_MARKER heading only, so write_report() migrates those once (see
+# _legacy_block) and from then on relies on these delimiters.
+BEGIN_MARKER = "<!-- project-os:optional-tool-check:begin -->"
+END_MARKER = "<!-- project-os:optional-tool-check:end -->"
+
+# Lines that only a generated block carries, in the exact order build_report()
+# emits them. Requiring the full shape - heading, then `- Date:`, then
+# `- Scope: local machine PATH` - is what tells a real legacy report apart from
+# hand-written prose that happens to reuse the heading or quote a bullet.
+_DATE_FINGERPRINT = "- Date:"
+_SCOPE_FINGERPRINT = "- Scope: local machine PATH"
+_SUMMARY_HEADING = "### Plain-English Summary"
+_FINGERPRINT_WINDOW = 8
+
+
+def _fence_delimiter(line: str) -> tuple[str, int] | None:
+    """Return ``(char, run_length)`` when ``line`` opens or closes a code fence."""
+    stripped = line.lstrip(" ")
+    if len(line) - len(stripped) > 3:
+        return None
+    for char in ("`", "~"):
+        if stripped.startswith(char * 3):
+            return char, len(stripped) - len(stripped.lstrip(char))
+    return None
+
+
+def _fence_mask(lines: list) -> tuple[list, bool]:
+    """Mark every line markdown would render as fenced code.
+
+    Returns ``(mask, unclosed)``. An unclosed fence legitimately runs to end of
+    file, so it can hide a large tail of the document - including our own block.
+    ``unclosed`` lets callers know the mask cannot be trusted.
+    """
+    mask = [False] * len(lines)
+    open_fence = None
+    for index, line in enumerate(lines):
+        fence = _fence_delimiter(line)
+        if open_fence is None:
+            if fence is not None:
+                open_fence = fence
+                mask[index] = True
+            continue
+        mask[index] = True
+        if fence is not None:
+            char, run = fence
+            info = line.strip().lstrip(char).strip()
+            if char == open_fence[0] and run >= open_fence[1] and not info:
+                open_fence = None
+    return mask, open_fence is not None
+
+
+def _delimited_blocks(lines: list, mask: list) -> list:
+    """Return ``(start, end_exclusive)`` for every complete BEGIN..END block."""
+    blocks = []
+    start = None
+    for index, line in enumerate(lines):
+        if mask[index]:
+            continue
+        stripped = line.strip()
+        if stripped == BEGIN_MARKER:
+            start = index
+        elif stripped == END_MARKER and start is not None:
+            blocks.append((start, index + 1))
+            start = None
+    return blocks
+
+
+def _orphan_begin(lines: list, mask: list) -> int | None:
+    """Index of a BEGIN marker that has no matching END marker after it."""
+    orphan = None
+    for index, line in enumerate(lines):
+        if mask[index]:
+            continue
+        stripped = line.strip()
+        if stripped == BEGIN_MARKER:
+            orphan = index
+        elif stripped == END_MARKER:
+            orphan = None
+    return orphan
+
+
+def _looks_generated(lines: list, index: int) -> bool:
+    """True when the heading at ``index`` is followed by generated report content."""
+    head = []
+    for line in lines[index + 1 : index + 1 + _FINGERPRINT_WINDOW]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        head.append(stripped)
+        if len(head) == 2:
+            break
+    return (
+        len(head) == 2
+        and head[0].startswith(_DATE_FINGERPRINT)
+        and head[1].startswith(_SCOPE_FINGERPRINT)
+    )
+
+
+def _legacy_block_end(lines: list, mask: list, start: int) -> int:
+    """Exclusive end of an un-delimited legacy block opened at ``start``.
+
+    Walks the exact shape build_report() has always emitted - metadata bullets,
+    a blank, the capability table, a blank, the summary heading, a blank, the
+    summary bullets - and stops at the first line that breaks it. Bounding by
+    shape rather than by "the next `## ` heading" is what lets hand-written
+    `###` subsections under an old report survive the one-time migration. When
+    the shape is broken early the block simply ends early, which leaves a few
+    stale generated lines behind: noisy, but never destructive.
+    """
+    limit = len(lines)
+    index = start + 1
+    end = start + 1
+
+    def content(position):
+        """Stripped line, or None once generated content cannot continue."""
+        if position >= limit or mask[position]:
+            return None
+        stripped = lines[position].strip()
+        if stripped == BEGIN_MARKER or stripped.startswith("## "):
+            return None
+        return stripped
+
+    def take(prefix):
+        """Consume consecutive lines starting with ``prefix``."""
+        nonlocal index, end
+        while True:
+            stripped = content(index)
+            if stripped is None or not stripped.startswith(prefix):
+                return
+            index += 1
+            end = index
+
+    def skip_blank():
+        nonlocal index
+        if content(index) == "":
+            index += 1
+
+    if content(index) == END_MARKER:
+        return index + 1
+
+    skip_blank()
+    take("- ")  # - Date: / - Scope:
+    skip_blank()
+    take("|")  # capability table
+    skip_blank()
+    if content(index) == _SUMMARY_HEADING:
+        index += 1
+        end = index
+        skip_blank()
+        take("- ")  # summary bullets
+    if content(index) == END_MARKER:
+        return index + 1
+    return end
+
+
+def _legacy_block(lines: list, mask: list) -> tuple[int, int] | None:
+    for index, line in enumerate(lines):
+        if mask[index] or line.strip() != REPORT_MARKER:
+            continue
+        if _looks_generated(lines, index):
+            return index, _legacy_block_end(lines, mask, index)
+    return None
+
+
+def _locate_block(lines: list) -> tuple[int, int, list] | None:
+    """Locate the machine-owned block.
+
+    Returns ``(start, end_exclusive, duplicates)`` or ``None`` when the file has
+    no machine block yet. ``duplicates`` are stale extra delimited blocks that
+    must be dropped so an old report is never presented as current.
+    """
+    mask, unclosed = _fence_mask(lines)
+    blocks = _delimited_blocks(lines, mask)
+    if blocks:
+        first = blocks[0]
+        return first[0], first[1], blocks[1:]
+    orphan = _orphan_begin(lines, mask)
+    if orphan is not None:
+        # A BEGIN with no END is a hand-mangled file. Replace only the marker
+        # line: consuming to the next heading or to EOF would delete prose a
+        # human wrote below it.
+        return orphan, orphan + 1, []
+    legacy = _legacy_block(lines, mask)
+    if legacy is not None:
+        return legacy[0], legacy[1], []
+    if unclosed:
+        # The mask is unreliable, so our own block may be hidden inside the open
+        # fence. Retry fence-blind on the delimiters only - never on the legacy
+        # heading, so a *balanced* fenced example is still never touched. Without
+        # this, every run would append yet another block.
+        blind = [False] * len(lines)
+        blocks = _delimited_blocks(lines, blind)
+        if blocks:
+            last = blocks[-1]
+            return last[0], last[1], []
+        orphan = _orphan_begin(lines, blind)
+        if orphan is not None:
+            return orphan, orphan + 1, []
+    return None
+
+
+def render_block(report: str) -> str:
+    """Wrap a generated report in the machine-owned delimiters."""
+    return f"{BEGIN_MARKER}\n{report.strip()}\n{END_MARKER}"
+
+
+def apply_report(existing: str, report: str) -> str:
+    """Return ``existing`` with the machine-owned block replaced by ``report``."""
+    block_lines = render_block(report).split("\n")
+    if not existing.strip():
+        return "# Capability Preflight\n\n" + "\n".join(block_lines) + "\n"
+
+    lines = existing.rstrip("\n").split("\n")
+    location = _locate_block(lines)
+    if location is None:
+        return "\n".join(lines).rstrip() + "\n\n" + "\n".join(block_lines) + "\n"
+
+    start, end, duplicates = location
+    merged = list(lines)
+    # Duplicates always sit after the primary block, so removing them from the
+    # tail first keeps the primary indices valid.
+    for dup_start, dup_end in reversed(duplicates):
+        del merged[dup_start:dup_end]
+        while 0 < dup_start < len(merged) and not merged[dup_start - 1].strip() and not merged[dup_start].strip():
+            del merged[dup_start]
+    merged[start:end] = block_lines
+    return "\n".join(merged).rstrip("\n") + "\n"
+
 
 def write_report(target: Path) -> Path:
     target = target.expanduser().resolve()
     preflight = target / "blackboard" / "17-capability-preflight.md"
     preflight.parent.mkdir(parents=True, exist_ok=True)
     report = build_report(target)
-    if preflight.exists() and preflight.read_text(encoding="utf-8").strip():
-        existing = preflight.read_text(encoding="utf-8").rstrip()
-        # 2026-07-25 defect fix: previously this always appended, so re-running
-        # the check against the same target duplicated the report block
-        # without bound. Strip any prior automated report (found via
-        # REPORT_MARKER) before appending the fresh one, so the file only ever
-        # carries the latest automated snapshot plus any hand-written content
-        # that preceded it.
-        prefix = existing.split(REPORT_MARKER, 1)[0].rstrip()
-        preflight.write_text(f"{prefix}\n\n{report}", encoding="utf-8")
-    else:
-        preflight.write_text(f"# Capability Preflight\n\n{report}", encoding="utf-8")
+    existing = preflight.read_text(encoding="utf-8") if preflight.exists() else ""
+    preflight.write_text(apply_report(existing, report), encoding="utf-8")
     return preflight
 
 

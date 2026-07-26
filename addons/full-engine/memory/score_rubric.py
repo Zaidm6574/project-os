@@ -91,7 +91,12 @@ def score(payload):
             2,
         )
 
-    passk_cell = passk if artifact_type == "executable" else "N/A"
+    # 2026-07-26: this row rendered off the RAW artifact_type while the
+    # refusal gate above used the normalized one, so "Executable" or
+    # " executable " passed the gate carrying a real k/pass-count and then
+    # printed "N/A" — a receipt that understated what was verified. Every
+    # artifact_type comparison must use artifact_type_norm.
+    passk_cell = passk if artifact_type_norm == "executable" else "N/A"
     row = "| %s | %s | %s | %s | %s |" % (
         verdict,
         total,
@@ -149,6 +154,21 @@ def selftest():
     })
     assert v == "Pass" and code == 0, (v, code)
     assert "3/3" in row, row
+
+    # Case/whitespace variants of "executable" must render pass@k too, not
+    # "N/A" — the gate and the row must agree on the same normalized value.
+    for variant in ("Executable", " executable ", "EXECUTABLE"):
+        v, total, row, code = score({
+            "criteria": [
+                {"name": "a", "score": 0.9, "weight": 0.5},
+                {"name": "b", "score": 0.9, "weight": 0.5},
+            ],
+            "artifact_type": variant,
+            "passk": "3/3",
+        })
+        assert v == "Pass" and code == 0, (variant, v, code)
+        assert "3/3" in row, (variant, row)
+        assert "N/A" not in row, (variant, row)
 
     # Reject WITH red-team + strategy change emits a row, exit 0.
     v, total, row, code = score({

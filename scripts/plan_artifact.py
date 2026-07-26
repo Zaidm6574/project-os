@@ -10,8 +10,9 @@ Lifecycle:  planned -> approved -> running -> done      (human gate at approve)
 
 Usage:
   python3 scripts/plan_artifact.py create --goal "..." --steps-file steps.json [--id ID]
-  python3 scripts/plan_artifact.py validate <id>
+  python3 scripts/plan_artifact.py validate <id> [--migrate]
   python3 scripts/plan_artifact.py approve  <id>          # the human gate
+  python3 scripts/plan_artifact.py migrate  <id>          # re-pin a bumped SCHEMA only
   python3 scripts/plan_artifact.py compile  <id>          # runFromPlan: emit worker packets
   python3 scripts/plan_artifact.py complete <id> --step <step-id>
   python3 scripts/plan_artifact.py show <id> | list
@@ -28,8 +29,15 @@ and >=1 work-dependent checker carrying verification with nonempty,
 non-placeholder method/expected ("-", "n/a", "todo", "tbd", ... are rejected).
 NOTE: validation re-runs at approve and compile (even with --force), so plans
 approved before 2026-07-17 must be re-validated — they may no longer compile.
+
+`migrate` is the ONLY supported way to move an approved plan's schema pin
+forward, and it is deliberately not a way to re-approve anything: it refuses
+unless the approved CONTENT (goal, steps, instruction provenance) still hashes
+to the digest recorded at approve time, and it appends an audit record to
+plan["migrations"]. Anything else — edited steps, a backwards schema, a plan
+approved before content digests were recorded — needs the human gate again.
 """
-import os, sys, json, re, datetime, hashlib
+import os, sys, json, re, datetime, hashlib, copy
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project-os/
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
@@ -161,6 +169,10 @@ def _real_verification_value(value):
 # execution-continuing failure branch.
 # ---------------------------------------------------------------------------
 HARDENED_SCHEMA = "plan/v2"
+# Oldest -> newest. `migrate` may only move a plan's approved_schema pin
+# FORWARD along this list; anything unlisted, or any backwards move, is a
+# downgrade attempt and is refused.
+SCHEMA_ORDER = ("plan/v1", "plan/v2")
 TRUST_LEVELS = ("authoritative", "trusted", "untrusted")
 # on_fail must stop the loop: halt outright, escalate to the human gate, or
 # roll back. A step id or "continue" here means a FAILED check keeps
@@ -214,6 +226,153 @@ def compute_goal_anchor(plan):
         "authoritative": authoritative,
     }, sort_keys=True, separators=(",", ":"))
     return _sha256(payload)
+
+
+# --- approval content digest ------------------------------------------------
+# What the human actually approved is the plan MINUS its bookkeeping: the
+# schema string, the lifecycle status, the approval record itself, the audit
+# trail, and the goal anchor (which is derived, and covers the schema). Every
+# other key — including keys added by future versions — is content, because
+# the digest is built by EXCLUSION: a field nobody thought of still lands
+# inside the hash instead of silently escaping it.
+APPROVAL_DIGEST_VERSION = "approval-content/1"
+NON_CONTENT_FIELDS = frozenset({
+    "schema", "status", "approved_at", "approved_schema", "approved_digest",
+    "migrations", "goal_anchor",
+})
+# per-step execution state, not approved content
+NON_CONTENT_STEP_FIELDS = frozenset({"done"})
+
+
+def compute_content_digest(plan):
+    """Digest of the substantive plan content (goal, steps, instructions, ...).
+
+    Recorded at `approve` so a later `migrate` can PROVE that only the schema
+    version moved. `create` normalizes depends_on/outputs, so both are
+    normalized here too — an explicit `"outputs": []` and an absent one mean
+    the same plan and must hash the same.
+    """
+    if not isinstance(plan, dict):
+        return _sha256("")
+    body = {k: v for k, v in plan.items() if k not in NON_CONTENT_FIELDS}
+    steps = []
+    for s in plan.get("steps", []) if isinstance(plan.get("steps"), list) else []:
+        if isinstance(s, dict):
+            step = {k: v for k, v in s.items() if k not in NON_CONTENT_STEP_FIELDS}
+            step.setdefault("depends_on", [])
+            step.setdefault("outputs", [])
+            steps.append(step)
+        else:
+            steps.append(s)
+    if "steps" in body:
+        body["steps"] = steps
+    payload = json.dumps({"v": APPROVAL_DIGEST_VERSION, "plan": body},
+                         sort_keys=True, separators=(",", ":"), default=str)
+    return _sha256(payload)
+
+
+def plan_migration(plan):
+    """Decide whether a schema-version migration may be applied.
+
+    Returns (problems, record). A nonempty `problems` means REFUSE — the plan
+    needs the human gate (`approve`) again, not a migration. `record` is the
+    audit entry to append to plan["migrations"].
+
+    The guarantee this must never break: `migrate` re-pins approved_schema, so
+    it must be impossible to use it as an approval-laundering tool. It may only
+    move the SCHEMA VERSION FORWARD on a plan whose approved content still
+    matches the digest taken at approve time; content edits, sideways/backwards
+    schema moves, and plans with no digest to compare against are all refused.
+    """
+    probs = []
+    if not isinstance(plan, dict):
+        return ["plan must be a JSON object"], None
+    pinned = plan.get("approved_schema")
+    current = plan.get("schema")
+    if not plan.get("approved_at"):
+        probs.append("plan is not approved, so there is no approval to carry "
+                     "forward. Run `approve` (the human gate) instead.")
+    if not isinstance(pinned, str) or not pinned.strip():
+        probs.append("no approved_schema pin to migrate — the approval record "
+                     "was never written or was edited. Re-run `approve`.")
+    migrations = plan.get("migrations")
+    if migrations is not None and not isinstance(migrations, list):
+        probs.append("migrations must be a JSON array (the audit trail was "
+                     "overwritten with something else)")
+    if probs:
+        return probs, None
+    if pinned not in SCHEMA_ORDER:
+        probs.append("unknown approved schema %r — cannot order it against %s"
+                     % (pinned, "|".join(SCHEMA_ORDER)))
+    if not isinstance(current, str) or current not in SCHEMA_ORDER:
+        probs.append("unknown target schema %r — cannot order it against %s"
+                     % (current, "|".join(SCHEMA_ORDER)))
+    if probs:
+        return probs, None
+    if SCHEMA_ORDER.index(current) <= SCHEMA_ORDER.index(pinned):
+        probs.append(
+            "migration is forward-only: approved as %r, plan now declares %r "
+            "which is not newer. Restore schema=%r, or re-approve." %
+            (pinned, current, pinned))
+        return probs, None
+    approved_digest = plan.get("approved_digest")
+    if not isinstance(approved_digest, str) or not approved_digest.strip():
+        probs.append(
+            "plan carries no approved_digest, so there is no record of what "
+            "was approved and migration cannot prove the content is unchanged. "
+            "Re-run `approve` (human gate) to establish one.")
+        return probs, None
+    if approved_digest != compute_content_digest(plan):
+        probs.append(
+            "plan content changed after approval (goal, steps or instruction "
+            "provenance no longer match approved_digest). `migrate` only bumps "
+            "the schema version — a changed plan needs re-approval by a human.")
+        return probs, None
+    anchor = plan.get("goal_anchor")
+    if anchor is not None:
+        as_approved = dict(plan)
+        as_approved["schema"] = pinned
+        if anchor != compute_goal_anchor(as_approved):
+            probs.append(
+                "goal_anchor does not match the plan as it was approved; "
+                "migrating would silently repair it. Re-run `approve`.")
+            return probs, None
+    record = {
+        "at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "from_schema": pinned,
+        "to_schema": current,
+        "approved_at": plan.get("approved_at"),
+        "approved_digest": approved_digest,
+        "note": "schema version re-pinned; approved content unchanged "
+                "(no re-approval)",
+    }
+    if anchor is not None:
+        record["goal_anchor_before"] = anchor
+    # Dry-run the migrated artifact: a plan that cannot pass validate() under
+    # the newer schema must not get the pin (e.g. plan/v1 -> plan/v2 without
+    # the provenance records v2 requires — adding those is a content change,
+    # so it goes back through the human gate).
+    candidate = copy.deepcopy(plan)
+    apply_migration(candidate, record)
+    candidate_probs = validate(candidate)
+    if candidate_probs:
+        probs.append("plan does not validate as %s: %s" %
+                     (current, "; ".join(candidate_probs)))
+        return probs, None
+    return [], record
+
+
+def apply_migration(plan, record):
+    """Apply an approved-content-preserving schema re-pin, auditably."""
+    plan["approved_schema"] = plan.get("schema")
+    if plan.get("goal_anchor") is not None:
+        # the anchor covers `schema`, so it MUST be recomputed; every other
+        # anchor input is pinned by approved_digest, which was verified above
+        plan["goal_anchor"] = compute_goal_anchor(plan)
+    trail = plan.get("migrations")
+    if not isinstance(trail, list):
+        trail = []
+    plan["migrations"] = trail + [record]
 
 
 def _validate_instructions(plan, probs):
@@ -325,9 +484,26 @@ def validate(plan):
         elif approved_schema != plan.get("schema"):
             probs.append(
                 "schema changed after approval: approved as %r, now declares %r. "
-                "This disables the plan/v2 checks the human approved."
+                "This disables the plan/v2 checks the human approved. If the "
+                "schema was bumped FORWARD and nothing else changed, run "
+                "`plan_artifact.py migrate <id>` to re-pin it auditably; "
+                "otherwise the plan needs re-approval."
                 % (approved_schema, plan.get("schema"))
             )
+        # Content pin, when the approval recorded one. Plans approved before
+        # approved_digest existed carry none: those stay as evidence-poor as
+        # they already were (no new failure mode), but they can never be
+        # migrated — plan_migration() refuses without a digest to compare.
+        approved_digest = plan.get("approved_digest")
+        if isinstance(approved_digest, str) and approved_digest.strip():
+            if approved_digest != compute_content_digest(plan):
+                probs.append(
+                    "plan content changed after approval: goal, steps or "
+                    "instruction provenance no longer match approved_digest. "
+                    "Re-run `approve` (the human gate) if the change is intended."
+                )
+    if "migrations" in plan and not isinstance(plan.get("migrations"), list):
+        probs.append("migrations must be a JSON array of migration records")
     instruction_refs = set()
     if hardened or "instructions" in plan:
         instruction_refs = _validate_instructions(plan, probs)
@@ -500,6 +676,37 @@ def topo_order(plan):
     return order
 
 
+def run_migration(pid):
+    """CLI half of `migrate`: refuse loudly, or re-pin under the plan lock."""
+    plan = load(pid)
+    if plan.get("approved_at") and plan.get("approved_schema") == plan.get("schema"):
+        print("nothing to migrate: %s is already pinned to %r"
+              % (plan.get("id", pid), plan.get("schema")))
+        sys.exit(0)
+    probs, _record = plan_migration(plan)
+    if probs:
+        print("REFUSED (migrate re-pins a schema version; it never re-approves "
+              "a plan):\n- " + "\n- ".join(probs), file=sys.stderr)
+        sys.exit(1)
+
+    def _migrate(current_plan):
+        # re-decide against the plan as locked, not the copy read a moment ago
+        fresh_probs, fresh_record = plan_migration(current_plan)
+        if fresh_probs:
+            print("REFUSED (plan changed while locking):\n- "
+                  + "\n- ".join(fresh_probs), file=sys.stderr)
+            sys.exit(1)
+        apply_migration(current_plan, fresh_record)
+
+    migrated = locked_update(pid, _migrate)
+    trail = migrated.get("migrations") or [{}]
+    print("migrated %s: approved_schema %r -> %r (approved content unchanged; "
+          "recorded in migrations[])"
+          % (migrated.get("id", pid), trail[-1].get("from_schema"),
+             trail[-1].get("to_schema")))
+    sys.exit(0)
+
+
 def main():
     args = sys.argv[1:]
 
@@ -511,7 +718,7 @@ def main():
     # arbitrary values starting with '--' (e.g. a goal of '--- draft ---')
     # are legitimate (audit finding F3, 2026-07-17)
     known_flags = {"--goal", "--steps-file", "--id", "--step", "--force",
-                   "--instructions-file"}
+                   "--instructions-file", "--migrate"}
 
     def flag(name, default=None):
         if name in args:
@@ -617,7 +824,9 @@ def main():
         sys.exit(2)
     pid = args.pop(0) if args else None
 
-    if cmd == "validate":
+    if cmd in ("validate", "migrate"):
+        if cmd == "migrate" or "--migrate" in args:
+            run_migration(pid)  # never returns
         probs = validate(load(pid))
         print("VALID" if not probs else "INVALID:\n- " + "\n- ".join(probs))
         sys.exit(0 if not probs else 1)
@@ -641,6 +850,11 @@ def main():
             # downgrade detectable at compile time (adversarial verify
             # 2026-07-25).
             plan["approved_schema"] = plan.get("schema")
+            # Pin WHAT was approved, not just under which schema. Without this
+            # there is nothing a later `migrate` could check the plan against,
+            # and re-pinning the schema would be indistinguishable from
+            # laundering an edited plan through the human gate.
+            plan["approved_digest"] = compute_content_digest(plan)
         plan = locked_update(pid, _approve)
         print(f"{plan['id']} approved — compile when ready")
         sys.exit(0)
