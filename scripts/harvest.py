@@ -80,7 +80,18 @@ _REJECT_WORD = r"(?:rejected|rejection|reject)"
 # property the earlier rewrites depend on survives.
 _DIRECTIVE = r"(?:private[\s\-_]?only|do[\s\-_]?not[\s\-_]?harvest)"
 _DIRECTIVE_END = r"(?:(?![-\w])|(?=[-_]\w))"
-_MARKER = (r"(?:" + _REJECT_WORD + r"(?![-\w])|"
+# The reject word's tail boundary. `(?![-\w])` alone made `-` and `_`
+# characters that could NEVER follow a marker, so the glued annotations
+# "Rejected--", "Rejected->" and "Rejected_ <reason>" bypassed every rule —
+# while the em-dash form "Rejected — ..." was dropped, an arbitrary
+# distinction from an author's point of view (adversarial verify
+# 2026-07-26). A letter/digit after `-`/`_` still reads as a compound word,
+# so "Reject-first workflow ..." stays ordinary prose.
+# `_` needs its own carve-out from `\w`: "Rejected_ <reason>" is the marker
+# plus an annotation, while "rejected_foo" is a snake_case compound — the
+# difference is whether an alphanumeric follows the joiner.
+_WORD_END = r"(?![A-Za-z0-9])(?![-_][A-Za-z0-9])"
+_MARKER = (r"(?:" + _REJECT_WORD + _WORD_END + r"|"
            + _DIRECTIVE + _DIRECTIVE_END + r")")
 
 # For table cells past the first: marker at the start, anything after it.
@@ -114,7 +125,9 @@ REJECT_DIRECTIVE = re.compile(
 # The one carve-out is a POSSESSIVE apostrophe — "Rejection's reason must be
 # written down" is ordinary prose, while "'Rejected' pending legal review" is
 # an annotation — so an apostrophe counts only when a letter does NOT follow.
-_ANNOTATION_PUNCT = r"(?:['’](?![A-Za-z])|[^\w\s'’])"
+# `_` is annotation punctuation too ("Rejected_ holds the token") — but only
+# when it does not open a snake_case compound, which is ordinary prose.
+_ANNOTATION_PUNCT = r"(?:['’](?![A-Za-z])|[^\w\s'’]|_(?![A-Za-z0-9]))"
 REJECT_BULLET = re.compile(
     r"^[\W_]*" + _MARKER + r"[\s*_`]*" + _ANNOTATION_PUNCT, re.I)
 
@@ -141,9 +154,15 @@ _CONTINUATION = (r"(?:pending|awaiting|by|per|see|note|dupe|duplicate|"
 # "Rejection"; nothing is lost, because "private-only" and "do not harvest"
 # are still honoured anywhere by REJECT_DIRECTIVE.
 _VERDICT_MARKER = r"(?:rejected|rejection)"
+# The joiner before the continuation word allows a single `-`/`_` as well as
+# whitespace: "Rejected-dupe of lesson 12" is the same verdict as
+# "Rejected dupe of lesson 12" with a different separator, and the old
+# `(?![-\w])` boundary made it unmatchable (adversarial verify 2026-07-26).
+# "Rejection-driven development" stays prose because "driven" is not a
+# continuation word.
 REJECT_BULLET_CONTINUED = re.compile(
-    r"^[\W_]*" + _VERDICT_MARKER + r"(?![-\w])[\s*_`]+" + _CONTINUATION
-    + r"(?![-\w])", re.I)
+    r"^[\W_]*" + _VERDICT_MARKER + r"(?:(?![-\w])[\s*_`]+|[-_])"
+    + _CONTINUATION + r"(?![-\w])", re.I)
 
 
 def _plain(text):
@@ -155,11 +174,18 @@ def _plain(text):
     cell was checked raw, so "| *Rejection* criteria belong in the rubric |"
     would read as "marker followed by punctuation" and be dropped. Only
     BALANCED wrappers are removed, so a lone footnote star ("Rejected* holds
-    the client token") is still the annotation it looks like. `_` is left
-    alone on purpose — stripping it would tear `do_not_harvest` apart.
+    the client token") is still the annotation it looks like.
+
+    Underscore emphasis is stripped only when the pair sits at WORD
+    boundaries: "_do not harvest_" is markdown italics hiding a directive
+    (it bypassed every status-column rule while `*do not harvest*` was
+    caught — adversarial verify 2026-07-26), while the underscores inside
+    `do_not_harvest_this_row` are word-internal and must survive.
     """
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
     text = re.sub(r"\*(.+?)\*", r"\1", text)
+    text = re.sub(r"(?<!\w)__([^_]+)__(?!\w)", r"\1", text)
+    text = re.sub(r"(?<!\w)_([^_]+)_(?!\w)", r"\1", text)
     return re.sub(r"`(.+?)`", r"\1", text)
 
 
@@ -173,8 +199,14 @@ def _is_reject_bullet(text):
 
 
 def _is_reject_verdict(cell):
-    """Status-column rule: a standalone marker anywhere in the cell."""
-    return bool(REJECT_CELL_ANY.search(cell))
+    """Status-column rule: a standalone marker anywhere in the cell.
+
+    The cell goes through _plain() first: a status column that literally
+    reads "_do not harvest_" or "_Rejected_" is the directive dressed in
+    markdown italics, and checking it raw let the underscore wrapper defeat
+    the `(?<![-\\w])` word boundary (adversarial verify 2026-07-26).
+    """
+    return bool(REJECT_CELL_ANY.search(_plain(cell)))
 
 
 # Kept as an alias so existing callers/tests that reference REJECT_ROW keep
@@ -184,6 +216,21 @@ REJECT_ROW = REJECT_CELL
 # Rows skipped because a cell carried a rejection/private marker. Reported at
 # the end of a harvest so the filter is auditable instead of invisible.
 DROPPED = []
+
+# Sentinel for a section whose HEADING carries a rejection/private marker.
+# Distinct from None (an unrecognised heading, whose rows were never
+# candidates): rows under an excluded section were explicitly refused by the
+# operator, so each one must land in DROPPED.
+_EXCLUDED = object()
+
+# An approval column's explicit refusal. Bare "no" plus the common longhand
+# forms; anything that STARTS as a refusal is a refusal even with a reason
+# after it ("No — pending legal"). Affirmatives and blanks stay untouched:
+# `scan` only stages proposals and `apply` is the human gate, so an empty
+# cell means "not decided yet", not "refused".
+NOT_APPROVED = re.compile(
+    r"^[\W_]*(?:no|not[\s\-_]*approved|not[\s\-_]*for[\s\-_]*reuse|"
+    r"denied|declined|never)(?![-\w])", re.I)
 
 
 def norm(t):
@@ -221,16 +268,34 @@ def bullets_by_section(md):
     template uses tables; a row is text = first cell, and any row marked
     Rejected/Private-only is never harvested)."""
     cur = None
+    appr = None
     for line in md.splitlines():
         h = re.match(r"^##\s+(.+?)\s*(?:\(.*\))?\s*$", line)
         if h:
             key = h.group(1).strip().lower()
             cur = next((v for k, v in SECTION_TYPES.items() if key.startswith(k)), None)
+            appr = None
+            # The regex above STRIPS a trailing parenthetical before the key
+            # is matched, so "## Lessons (private-only)" — the least
+            # ambiguous marker an operator can write, covering a whole
+            # section in one stroke — was silently discarded and every row
+            # under it harvested with nothing in DROPPED. The dash/bracket
+            # forms ("## Lessons — private-only", "## Lessons [REJECTED]")
+            # leaked the same way via the startswith match (adversarial
+            # verify 2026-07-26). A heading is a status slot, not free
+            # prose, so it gets the permissive verdict rule over the WHOLE
+            # line; the rows still land in DROPPED below, because a silent
+            # section drop is the same defect as a silent row drop.
+            if cur and REJECT_CELL_ANY.search(_plain(line.lstrip("#").strip())):
+                cur = _EXCLUDED
             continue
         if not cur:
             continue
         b = re.match(r"^[-*]\s+(.+)$", line)
         if b:
+            if cur is _EXCLUDED:
+                DROPPED.append(line.strip()[:120])
+                continue
             text = re.sub(r"\*\*(.+?)\*\*", r"\1", b.group(1)).strip()
             # The bullet branch used to yield unconditionally while the table
             # branch enforced REJECT_ROW per cell -- a bullet like "Private-only:
@@ -247,15 +312,31 @@ def bullets_by_section(md):
             first = cells[0] if cells else ""
             # Check CELLS, not the raw line: a status cell of "Rejected" skips
             # the row, but the same word inside the lesson text does not.
-            if (not first or set(first) <= {"-", ":", " "}  # separator row
-                    or first.lower() in ("lesson", "preference", "pattern", "safeguard")):
+            if not first or set(first) <= {"-", ":", " "}:  # separator row
+                continue
+            if first.lower() in ("lesson", "preference", "pattern", "safeguard"):
+                # Header row: remember WHICH column is the approval verdict.
+                # "Approved For Reuse?" is the template's own reuse gate, and
+                # the natural way to decline it is a bare "No" — which no
+                # marker enumeration contains, so the operator's answer was
+                # discarded with zero signal (adversarial verify 2026-07-26).
+                # Identified by header, never by cell shape, so a "No" under
+                # an unrelated column ("Uses numpy?") stays ordinary prose.
+                appr = next((i for i, c in enumerate(cells)
+                             if re.search(r"approv|reuse", c, re.I)), None)
+                continue
+            if cur is _EXCLUDED:
+                DROPPED.append(line.strip()[:120])
                 continue
             # cells[0] IS the lesson, so it gets the free-prose rule (matching
             # a bare marker there dropped real lessons -- adversarial verify
             # 2026-07-25); cells[1:] are status columns and get the permissive
             # verdict rule. Skipping cells[0] entirely let "| Rejected: holds a
             # private token | ... |" harvest through.
-            if _is_reject_bullet(first) or any(_is_reject_verdict(c) for c in cells[1:]):
+            if (_is_reject_bullet(first)
+                    or any(_is_reject_verdict(c) for c in cells[1:])
+                    or (appr is not None and appr < len(cells)
+                        and NOT_APPROVED.match(cells[appr]))):
                 # Record it. Silent filtering is why the old over-broad pattern
                 # went unnoticed: a harvest that drops rows must say how many.
                 DROPPED.append(line.strip()[:120])
