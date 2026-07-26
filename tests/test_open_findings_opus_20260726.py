@@ -86,12 +86,30 @@ class ARunSlugIsADirectoryNameNotAPath(unittest.TestCase):
 
     def test_ordinary_slugs_are_still_accepted(self):
         """The control: an over-tightened guard that refuses everything is
-        just as broken as no guard."""
-        for slug in ("my-run", "run_2", "2026-07-26-audit", "a", "A.b-c_1"):
+        just as broken as no guard.
+
+        `_selftest_tmp_run` and `_probe` are not hypothetical -- they are the
+        slugs this module's OWN selftest scaffolds, and --reindex deliberately
+        skips `slug.startswith("_")` so scratch runs stay out of INDEX.md. The
+        first version of this guard excluded a leading underscore from the
+        opening character class and broke the selftest, which this control did
+        not catch because its inputs were invented rather than taken from the
+        code being guarded.
+        """
+        for slug in ("my-run", "run_2", "2026-07-26-audit", "a", "A.b-c_1",
+                     "_selftest_tmp_run", "_probe"):
             with self.subTest(slug=slug):
                 self.assertEqual(
                     self.nr._reject_unsafe_slug(slug), 0,
                     "legitimate slug %r was refused" % slug)
+
+    def test_the_modules_own_selftest_still_passes(self):
+        """The end-to-end control: whatever the guard does, `new_run.py
+        --selftest` must still scaffold, validate and clean up its probe runs."""
+        proc = subprocess.run([sys.executable, NEW_RUN, "--selftest"],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0,
+                         "new_run --selftest broke:\n%s" % (proc.stdout + proc.stderr))
 
     def test_scaffold_creates_nothing_when_the_slug_escapes(self):
         with tempfile.TemporaryDirectory() as d:

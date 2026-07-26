@@ -141,7 +141,12 @@ SOLO_PACKETS_WAIVER = (
 )
 
 
-SAFE_SLUG = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+# A leading underscore is this module's own convention for a scratch run:
+# --reindex skips `slug.startswith("_")` so probes stay out of INDEX.md, and the
+# selftest scaffolds `_selftest_tmp_run`. Excluding it from the first character
+# refused the module's own selftest (caught by the re-judge pass, 2026-07-26).
+# A leading DOT stays refused, because "." and ".." are the traversal case.
+SAFE_SLUG = re.compile(r"\A[A-Za-z0-9_][A-Za-z0-9._-]*\Z")
 
 
 def _reject_unsafe_slug(slug):
