@@ -121,7 +121,14 @@ def bootstrap(target: Path, force: bool, dry_run: bool = False) -> list[str]:
     # must deliver what the README promises. The core adapters ship from the
     # repo's own memory/; the full-engine helpers fill in anything missing.
     delivered = set()
-    for adapter in ("mneme_adapter.py", "build_graph.py"):
+    # context_budget.py and code_graph.py were added to memory/ without being
+    # added here, so AGENTS.md's "Kickoff preflight: run `python3
+    # memory/context_budget.py`" -- the FIRST documented step of a run --
+    # pointed at a nonexistent file in every installed project
+    # (pre-push audit 2026-07-26). Doc drift in an installer is a broken
+    # promise, not a cosmetic issue: ship what the docs tell people to run.
+    for adapter in ("mneme_adapter.py", "build_graph.py",
+                    "context_budget.py", "code_graph.py"):
         src = TEMPLATE_ROOT / "memory" / adapter
         if src.is_file():
             results.append(copy_file(src, target / "memory" / adapter, force, dry_run=dry_run))

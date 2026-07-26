@@ -25,6 +25,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# Every check here asks GIT what it would ignore, so it is only meaningful
+# inside a real repository. GitHub offers "Download ZIP" right next to the
+# clone URL, and in a .git-less copy `git check-ignore` returns non-zero for
+# EVERY path -- read as NOT-IGNORED -- so the whole module failed loudly with
+# alarming "this repo is public / holds PLAINTEXT memory text" messages, on
+# the very command the README leads with (pre-push audit 2026-07-26). Skip
+# with a reason instead; CI uses actions/checkout, which provides a real .git,
+# so the guard still fails closed everywhere it can actually run.
+HAVE_GIT_REPO = (ROOT / ".git").exists()
+requires_repo = unittest.skipUnless(
+    HAVE_GIT_REPO,
+    "no .git here (ZIP download or vendored copy) — git check-ignore cannot "
+    "answer, and a non-answer must not read as a leak",
+)
+
 
 def is_ignored(path: str) -> bool:
     """True when git would ignore `path` (whether or not it exists)."""
@@ -65,6 +80,7 @@ def module_constant_dir(module_rel: str, name: str) -> Path | None:
     return None
 
 
+@requires_repo
 class PrivateWritePathsAreIgnored(unittest.TestCase):
     """The regression tests for the audit finding, stated as paths."""
 

@@ -10,7 +10,7 @@ Don't take the README's word for any of this:
 
 ```bash
 git clone https://github.com/Zaidm6574/project-os.git && cd project-os
-python3 -m unittest discover -s tests    # over 120 tests, ~10 seconds, zero dependencies
+python3 -m unittest discover -s tests    # 438 tests, ~75 seconds, zero dependencies
 ```
 
 Built by someone with ADHD who needed project state to live outside his head. The first version of that detailing site looked finished but couldn't take a booking — it failed silently, for real people. Project OS is what I built so that never happens again: plans are rejected unless they declare how the result will be checked, concurrent agents can't silently erase each other's work (fencing-token file locks), and chat-derived memory never syncs without explicit approval (privacy fail-closed).
