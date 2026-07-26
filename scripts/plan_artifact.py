@@ -46,7 +46,39 @@ class PlanInputError(ValueError):
     pass
 
 
+# The STORED plan id must be a slug, because compile() interpolates it into
+# every worker-packet filename: with an absolute id like /tmp/x/p9.json,
+# os.path.join(PACKETS, id + "-s1.md") discards PACKETS entirely and the
+# packets landed beside the plan file instead of under packets/
+# (audit 2026-07-25, reproduced).
+#
+# Writing the plan FILE to an explicit path stays supported — the CLI documents
+# `<id>` as accepting a path and callers rely on it — but the id recorded
+# INSIDE the artifact is always the slugified basename.
+SAFE_PLAN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def safe_plan_id(pid):
+    """Slug to record as the plan's id, derived from an id or a .json path."""
+    slug = os.path.basename((pid or "").strip())
+    if slug.endswith(".json"):
+        slug = slug[: -len(".json")]
+    if not SAFE_PLAN_ID.match(slug) or ".." in slug:
+        raise PlanInputError(
+            "unsafe plan id %r: the name must match %s (no path separators, "
+            "no '..') because it becomes part of every worker-packet filename."
+            % (pid, SAFE_PLAN_ID.pattern)
+        )
+    return slug
+
+
 def plan_path(pid):
+    """Resolve an id OR an explicit .json path to a plan file.
+
+    Reading an existing plan by full path stays supported (the CLI documents
+    `<id>` as accepting a path, and callers pass one). Building a NEW plan id
+    goes through safe_plan_id() instead — see `create`.
+    """
     p = pid if pid.endswith(".json") else os.path.join(PLANS, pid + ".json")
     return p
 
@@ -504,6 +536,14 @@ def main():
             sys.exit(2)
         today = datetime.date.today().isoformat()
         pid = flag("--id", f"plan-{today}-" + re.sub(r"[^a-z0-9]+", "-", goal.lower()).strip("-")[:32].strip("-"))
+        # `pid` may be a bare name or an explicit .json path. The FILE goes
+        # where the caller asked; the id stored inside the artifact is always
+        # the slugified basename, so packet filenames stay under packets/.
+        dest_path = plan_path(pid)
+        try:
+            plan_id = safe_plan_id(pid)
+        except PlanInputError as e:
+            usage_error(str(e))
         try:
             with open(steps_file, encoding="utf-8") as f:
                 steps = json.load(f)
@@ -515,7 +555,7 @@ def main():
         if not isinstance(steps, list):
             usage_error("--steps-file must contain a JSON array of steps")
         instructions_file = flag("--instructions-file")
-        plan = {"schema": "plan/v1", "id": pid, "goal": goal, "created": today,
+        plan = {"schema": "plan/v1", "id": plan_id, "goal": goal, "created": today,
                 "status": "planned",
                 "steps": steps}
         if instructions_file:
@@ -540,8 +580,27 @@ def main():
             s.setdefault("depends_on", [])
             s.setdefault("outputs", [])
             s.setdefault("done", False)
-        save(plan)
-        print(f"created {plan_path(pid)} (status: planned — needs `approve` before compile)")
+
+        # Never clobber an existing plan. `create` with an id that already
+        # existed silently overwrote it and reset status to "planned",
+        # DISCARDING an approval record — which defeats the human gate that
+        # approve/approved_schema exist to enforce (audit 2026-07-25).
+        dest = dest_path
+        if os.path.exists(dest):
+            try:
+                prior = load(dest)
+                prior_status = prior.get("status", "?")
+            except PlanInputError:
+                prior_status = "unreadable"
+            print(
+                f"REFUSED: {dest} already exists (status: {prior_status}).\n"
+                f"Creating over it would discard that plan and any approval it "
+                f"carries. Pick a different --id, or delete the file first.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        save(plan, dest)
+        print(f"created {dest} (status: planned — needs `approve` before compile)")
         sys.exit(0)
 
     if cmd == "list":
