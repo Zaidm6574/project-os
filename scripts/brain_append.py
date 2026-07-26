@@ -29,9 +29,18 @@ MNEME = os.path.join(ROOT, "memory", "mneme_adapter.py")
 def main():
     args = sys.argv[1:]
 
+    # only these exact tokens may be rejected as a flag's "missing value" —
+    # a --line value that itself starts with -- is legitimate JSON-ish text,
+    # but a bare trailing flag must not IndexError (audit finding, 2026-07-25;
+    # same fix already landed in bb_lock.py/plan_artifact.py).
+    known_flags = {"--line", "--agent", "--no-reindex"}
+
     def flag(name, default=None):
         if name in args:
             i = args.index(name)
+            if i + 1 >= len(args) or args[i + 1] in known_flags:
+                print(f"usage error: missing value for {name}", file=sys.stderr)
+                sys.exit(2)
             v = args[i + 1]
             del args[i:i + 2]
             return v
@@ -60,6 +69,7 @@ def main():
     # One gate, all writers: reuse brain.py's rather than forking the patterns.
     _brain_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                               "addons", "full-engine", "brain")
+    _brain = None
     if os.path.isdir(_brain_dir):
         sys.path.insert(0, _brain_dir)
         try:
@@ -68,29 +78,32 @@ def main():
             _brain = None
         finally:
             sys.path.pop(0)
-        if _brain is not None and hasattr(_brain, "record_secret_hit"):
-            field = _brain.record_secret_hit(record)
-            if field:
-                print(
-                    f"REFUSED: field '{field}' looks like it contains a secret. "
-                    "Redact it and retry — the shared brain syncs to the central "
-                    "brain and must never carry credentials.",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-        else:
-            # Fail closed on BOTH failure shapes. The first version had an
-            # `elif _brain is None`, so an importable-but-wrong brain module
-            # (missing record_secret_hit, or a different `brain` already in
-            # sys.modules) matched neither branch and appended with no scan at
-            # all (line-comb finding, 2026-07-25).
-            why = ("could not be imported" if _brain is None
-                   else "has no record_secret_hit(); it may be a different "
-                        "module named 'brain' that shadowed it on sys.path")
-            print(f"REFUSED: the brain privacy gate {why}; refusing to append "
-                  "unscreened. Check addons/full-engine/brain/brain.py.",
-                  file=sys.stderr)
+    if _brain is not None and hasattr(_brain, "record_secret_hit"):
+        field = _brain.record_secret_hit(record)
+        if field:
+            print(
+                f"REFUSED: field '{field}' looks like it contains a secret. "
+                "Redact it and retry — the shared brain syncs to the central "
+                "brain and must never carry credentials.",
+                file=sys.stderr,
+            )
             sys.exit(2)
+    else:
+        # Fail closed on ALL failure shapes, including the addon simply not
+        # being present. The prior version guarded this whole else-branch
+        # behind `if os.path.isdir(_brain_dir)`, so a fresh clone / any
+        # environment missing addons/full-engine/brain skipped the privacy
+        # gate ENTIRELY and appended unscreened secrets with exit 0
+        # (audit finding, 2026-07-25).
+        why = ("the brain addon is not present at addons/full-engine/brain"
+               if not os.path.isdir(_brain_dir) else
+               "could not be imported" if _brain is None
+               else "has no record_secret_hit(); it may be a different "
+                    "module named 'brain' that shadowed it on sys.path")
+        print(f"REFUSED: the brain privacy gate {why}; refusing to append "
+              "unscreened. Check addons/full-engine/brain/brain.py.",
+              file=sys.stderr)
+        sys.exit(2)
 
     _bp = os.path.dirname(os.path.abspath(SHARED_BRAIN))
     os.makedirs(_bp, exist_ok=True)

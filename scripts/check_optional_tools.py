@@ -196,6 +196,9 @@ def build_report(target: Path | None = None) -> str:
     return "\n".join(lines)
 
 
+REPORT_MARKER = "## Automated Optional Tool Check"
+
+
 def write_report(target: Path) -> Path:
     target = target.expanduser().resolve()
     preflight = target / "blackboard" / "17-capability-preflight.md"
@@ -203,7 +206,14 @@ def write_report(target: Path) -> Path:
     report = build_report(target)
     if preflight.exists() and preflight.read_text(encoding="utf-8").strip():
         existing = preflight.read_text(encoding="utf-8").rstrip()
-        preflight.write_text(f"{existing}\n\n{report}", encoding="utf-8")
+        # 2026-07-25 defect fix: previously this always appended, so re-running
+        # the check against the same target duplicated the report block
+        # without bound. Strip any prior automated report (found via
+        # REPORT_MARKER) before appending the fresh one, so the file only ever
+        # carries the latest automated snapshot plus any hand-written content
+        # that preceded it.
+        prefix = existing.split(REPORT_MARKER, 1)[0].rstrip()
+        preflight.write_text(f"{prefix}\n\n{report}", encoding="utf-8")
     else:
         preflight.write_text(f"# Capability Preflight\n\n{report}", encoding="utf-8")
     return preflight

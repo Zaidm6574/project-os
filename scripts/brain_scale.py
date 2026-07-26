@@ -86,6 +86,11 @@ def count_stale_interest(p, days):
                     o = json.loads(ln)
                 except ValueError:
                     continue
+                # 2026-07-25: a non-dict JSONL line (e.g. a bare int) has no
+                # .get() — crashed with an unhandled AttributeError and exit 1,
+                # indistinguishable from a real WATCH status. Skip it instead.
+                if not isinstance(o, dict):
+                    continue
                 if (o.get("type") or o.get("kind")) != "interest":
                     continue
                 ts = str(o.get("ts") or o.get("date") or "")[:10]
@@ -119,7 +124,11 @@ def main():
     except (OSError, ValueError):
         pass
     neural = embedder.startswith("neural-")
-    entries_ceil = ENTRIES_CEIL_NEURAL if neural else PAGES_CEIL
+    # 2026-07-25: flat mode must calibrate shared-brain entries against
+    # SOURCES_CEIL (~100 sources), not PAGES_CEIL (~200 md pages) — the two
+    # dimensions count different things and reusing PAGES_CEIL here silently
+    # halved the reported retrieval-degradation risk in flat (non-neural) mode.
+    entries_ceil = ENTRIES_CEIL_NEURAL if neural else SOURCES_CEIL
 
     dims = [
         ("shared-brain entries (active)", shared, entries_ceil, status_for(shared, entries_ceil)),

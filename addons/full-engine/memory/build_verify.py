@@ -34,7 +34,11 @@ def _detect_command(project_path: str) -> tuple[list[str], str] | None:
     if os.path.isfile(pkg):
         if shutil.which("npm"):
             return (["npm", "test"], "npm test")
-        return (["npm", "run", "build"], "npm run build")
+        # Fail-closed (2026-07-25): npm missing means BOTH "npm test" and
+        # "npm run build" are guaranteed to fail the same way ("npm not
+        # found"), not a real build/test result. Fall through to "no
+        # detectable stack" instead of returning a doomed npm invocation.
+        return None
     pyproject = os.path.join(project_path, "pyproject.toml")
     setup = os.path.join(project_path, "setup.py")
     if os.path.isfile(pyproject) or os.path.isfile(setup) or os.path.isdir(

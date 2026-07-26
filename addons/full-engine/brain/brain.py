@@ -101,8 +101,16 @@ def _read_jsonl(path):
     with open(path) as f:
         for line in f:
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            # 2026-07-25 audit: this used to call json.loads with no
+            # try/except, so one corrupt line anywhere in the file (a crash
+            # mid-write, a hand edit) raised and took the whole read down.
+            # central_brain.py's read_jsonl already skips bad lines instead.
+            try:
                 out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
     return out
 
 
@@ -336,12 +344,22 @@ def cmd_save_chat(args):
 
 
 def _selftest():
+    global BRAIN_FILE
     syn = {"id": "selftest-%d" % int(time.time()),
            "ts": _now(), "source": "codex",
            "type": "lesson", "text": "round-trip self-test lesson", "tags": ["selftest"]}
     tmp = os.path.join(HERE, ".selftest-from.jsonl")
     with open(tmp, "w") as f:
         f.write(json.dumps(syn) + "\n")
+    # 2026-07-25 audit: this used to run cmd_export/cmd_save_chat/cmd_import
+    # against the module-level BRAIN_FILE with no override, so --selftest
+    # appended synthetic "selftest-*" records into the real, live
+    # shared-brain.jsonl every time it ran. Swap BRAIN_FILE to a scratch
+    # file inside HERE (must stay inside ROOT for _safe_path) for the
+    # duration of the test, same isolation central_brain.py's selftest
+    # gets via tempfile.TemporaryDirectory.
+    real_brain_file = BRAIN_FILE
+    BRAIN_FILE = os.path.join(HERE, ".selftest-brain.jsonl")
     try:
         cmd_export(argparse.Namespace(from_file=tmp))
         cmd_save_chat(
@@ -362,8 +380,12 @@ def _selftest():
         print("selftest: OK")
         return 0
     finally:
+        BRAIN_FILE = real_brain_file
         if os.path.exists(tmp):
             os.remove(tmp)
+        scratch = os.path.join(HERE, ".selftest-brain.jsonl")
+        if os.path.exists(scratch):
+            os.remove(scratch)
 
 
 def main():

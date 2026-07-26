@@ -35,7 +35,13 @@ HOME = os.path.expanduser("~")
 BRAIN = os.environ.get(
     "PROJECT_OS_SHARED_BRAIN",
     os.path.join(HOME, ".project-os", "central-brain", "shared-brain.jsonl"))
-ARCHIVE = BRAIN.replace(".jsonl", "-archive.jsonl")
+# 2026-07-25: BRAIN.replace(".jsonl", "-archive.jsonl") collapsed ARCHIVE ==
+# BRAIN whenever the configured brain path lacked a .jsonl suffix, so
+# archiving silently deleted entries from the live file. Derive the archive
+# path by appending a suffix instead of relying on a substring replace, and
+# fail closed if it ever still collides with BRAIN.
+ARCHIVE = (BRAIN[: -len(".jsonl")] if BRAIN.endswith(".jsonl") else BRAIN) + "-archive.jsonl"
+assert ARCHIVE != BRAIN, "archive path must never collide with the active brain path"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -116,6 +122,16 @@ def cmd_apply(args):
         print("FAILED: could not lock shared brain", file=sys.stderr)
         return 1
     try:
+        # 2026-07-25: rows/move were computed from a pre-lock read; a
+        # concurrent writer could append between that read and lock
+        # acquisition, and the stale in-memory `keep` snapshot written back
+        # below would silently drop it. Re-read under the lock and re-derive
+        # move/keep from the freshly-locked file.
+        rows = _rows(BRAIN)
+        if args.ids:
+            move = [o for o in rows if _rid(o) in wanted]
+        else:
+            move = [o for o, _ in _interest_candidates(rows, args.interest_days)]
         backup = BRAIN + ".pre-archive-" + time.strftime("%Y%m%d-%H%M%S")
         shutil.copy2(BRAIN, backup)
         move_ids = {id(o) for o in move}

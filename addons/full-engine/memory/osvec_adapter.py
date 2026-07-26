@@ -54,6 +54,11 @@ except Exception:  # pragma: no cover
     sys.stderr.write("This tool needs numpy: pip install numpy --break-system-packages\n")
     raise
 
+try:
+    import fcntl  # POSIX only; this add-on's install target may not have it
+except ImportError:  # pragma: no cover
+    fcntl = None
+
 # --------------------------------------------------------------------------- #
 # Config
 # --------------------------------------------------------------------------- #
@@ -225,8 +230,21 @@ class _BruteForceIndex:
 def _new_index(dim: int):
     try:
         from turbovec import IdMapIndex  # type: ignore
+    except ImportError:
+        # Expected, quiet path: turbovec isn't installed.
+        return _BruteForceIndex(dim), _BruteForceIndex.backend
+    try:
         return IdMapIndex(dim=dim, bit_width=BIT_WIDTH), "turbovec.IdMapIndex"
-    except Exception:
+    except Exception as exc:
+        # turbovec IS installed but the real index construction failed (bad
+        # native build, corrupt lib, bad args, etc). This used to be caught by
+        # the same bare `except Exception` as the ImportError case, so a real
+        # break silently downgraded to the bruteforce fallback with no signal
+        # (audit 2026-07-25). Warn loudly instead of swallowing it.
+        sys.stderr.write(
+            f"WARNING: turbovec.IdMapIndex failed to construct ({exc!r}); "
+            "falling back to bruteforce index.\n"
+        )
         return _BruteForceIndex(dim), _BruteForceIndex.backend
 
 
@@ -257,7 +275,36 @@ class ProjectMemory:
         self.index, self.backend = _new_index(self.dim)
         self.sidecar = {}          # str(u64_id) -> record dict
         self.id_to_u64 = {}        # memory_id -> u64_id
+        self._lock_fd = None       # held from load() through save(), see _acquire_lock
         os.makedirs(STORE_DIR, exist_ok=True)
+
+    # ---- locking (audit 2026-07-25) ----
+    # save() used to write index.write() + json.dump() with no locking at all,
+    # so two concurrent CLI invocations (load -> add -> save) could each load
+    # the same pre-write state and the second save() would silently clobber
+    # the first's write. Hold an exclusive flock from load() through save() so
+    # a whole load-mutate-save cycle is serialized across processes. Best
+    # effort only where fcntl isn't available (non-POSIX) or the lock file
+    # can't be opened -- never blocks the caller on that failure.
+    def _acquire_lock(self):
+        if fcntl is None or self._lock_fd is not None:
+            return
+        try:
+            os.makedirs(STORE_DIR, exist_ok=True)
+            fd = open(os.path.join(STORE_DIR, "project.lock"), "a+")
+            fcntl.flock(fd.fileno(), fcntl.LOCK_EX)
+            self._lock_fd = fd
+        except OSError:
+            self._lock_fd = None
+
+    def _release_lock(self):
+        if self._lock_fd is None:
+            return
+        try:
+            fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._lock_fd.close()
+            self._lock_fd = None
 
     # ---- write ----
     def add(self, text, memory_type, source_file="", memory_id=None, tags=None,
@@ -326,22 +373,39 @@ class ProjectMemory:
         return out
 
     def remove(self, memory_id) -> bool:
-        uid = self.id_to_u64.pop(memory_id, None)
+        uid = self.id_to_u64.get(memory_id)
         if uid is None:
             return False
+        # Check the index BEFORE mutating id_to_u64/sidecar (audit 2026-07-25):
+        # this used to pop() both mappings first and only then ask the index to
+        # remove, so an index/sidecar desync (index.remove() returns False) still
+        # deleted the record from both mappings while reporting failure.
+        if not bool(self.index.remove(np.uint64(uid))):
+            return False
+        self.id_to_u64.pop(memory_id, None)
         self.sidecar.pop(str(uid), None)
-        return bool(self.index.remove(np.uint64(uid)))
+        return True
 
     # ---- persistence (index + side-car, kept in sync) ----
     def save(self):
-        os.makedirs(STORE_DIR, exist_ok=True)
-        self.index.write(INDEX_PATH)
-        with open(SIDECAR_PATH, "w") as f:
-            json.dump({"backend": self.backend, "dim": self.dim,
-                       "embedder": getattr(self.embedder, "name", "?"),
-                       "records": self.sidecar}, f, indent=2)
+        # Acquire the lock if this instance never called load() (e.g. a fresh
+        # add()-then-save() with no prior read) so the write is still guarded.
+        self._acquire_lock()
+        try:
+            os.makedirs(STORE_DIR, exist_ok=True)
+            self.index.write(INDEX_PATH)
+            with open(SIDECAR_PATH, "w") as f:
+                json.dump({"backend": self.backend, "dim": self.dim,
+                           "embedder": getattr(self.embedder, "name", "?"),
+                           "records": self.sidecar}, f, indent=2)
+        finally:
+            # Release after the write completes: this ends the load-mutate-save
+            # critical section this instance started, letting the next waiting
+            # process's load() proceed against our just-written state.
+            self._release_lock()
 
     def load(self):
+        self._acquire_lock()
         if not os.path.exists(SIDECAR_PATH):
             return self
         with open(SIDECAR_PATH) as f:
@@ -360,11 +424,20 @@ class ProjectMemory:
             for r in self.sidecar.values():
                 vec = self.embedder.embed([r["text"]]).astype(np.float32)
                 self.index.add_with_ids(vec, np.array([int(r["u64_id"])], dtype=np.uint64))
-        # consistency check (mirrors turbovec's check_persisted_handles intent)
+        # consistency check (mirrors turbovec's check_persisted_handles intent).
+        # Used to only sys.stderr.write() a warning and still `return self` on a
+        # known-bad state -- callers had no way to tell a healthy load from a
+        # corrupted one short of grepping stderr (audit 2026-07-25). Fail
+        # closed: refuse to hand back a store we know is inconsistent.
         if len(self.index) != len(self.sidecar):
-            sys.stderr.write(
-                f"WARNING: index ({len(self.index)}) and side-car ({len(self.sidecar)}) "
-                "are out of sync.\n"
+            # Release the lock we're holding before raising: this instance is
+            # being abandoned by the caller, so don't leave a waiting process
+            # blocked on it until we happen to get garbage collected.
+            self._release_lock()
+            raise RuntimeError(
+                f"OSVec store is inconsistent: index ({len(self.index)}) and "
+                f"side-car ({len(self.sidecar)}) record counts differ. Refusing "
+                "to load a known-bad store."
             )
         return self
 

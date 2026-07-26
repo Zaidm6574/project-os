@@ -87,7 +87,10 @@ def stuck_plans():
             if p.get("status") == "running" and os.path.getmtime(fp) < cutoff:
                 done = sum(1 for s in p.get("steps", []) if s.get("done"))
                 out.append(f"{p.get('id')} ({done}/{len(p.get('steps', []))} steps)")
-        except (OSError, ValueError):
+        except (OSError, ValueError, AttributeError):
+            # 2026-07-25: non-dict JSON (e.g. `[]`) parses fine but has no
+            # .get(), so a bare AttributeError must be caught alongside the
+            # read/parse errors or it crashes the whole nightly heartbeat.
             out.append(os.path.basename(fp) + " (unreadable)")
     return sorted(out)
 

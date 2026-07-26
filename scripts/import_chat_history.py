@@ -151,6 +151,12 @@ def write_summary(lines: list[str], output: Path, max_items: int, include_excerp
     tools = count_tools(lines).most_common(20)
 
     output.parent.mkdir(parents=True, exist_ok=True)
+    # 2026-07-25: back up any pre-existing report before truncating it. A prior
+    # run's output (or a hand-curated file placed at the same path) would
+    # otherwise be silently destroyed by the unconditional open("w") below.
+    if output.exists():
+        backup = output.with_name(output.name + ".bak")
+        backup.write_bytes(output.read_bytes())
     with output.open("w", encoding="utf-8") as f:
         f.write("# Private Chat Memory Summary\n\n")
         f.write("Generated locally from user-provided exports. Review before using. Keep this file private.\n\n")

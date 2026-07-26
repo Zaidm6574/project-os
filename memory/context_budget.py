@@ -14,6 +14,7 @@ Verdicts (exit code):
   0 OK          < 120K live context
   1 WATCH       120-200K -- plan a checkpoint at the next wave boundary
   2 CHECKPOINT  > 200K -- close the wave to the blackboard, continue FRESH
+  3 UNKNOWN     no transcript / no usage data found -- fail-closed, NOT an OK
 Also flags a fat harness (>25 enabled plugins): fix BEFORE wave 1.
 """
 import argparse, glob, json, os, sys
@@ -55,10 +56,14 @@ def main():
 
     path = a.session or newest_transcript()
     if not path or not os.path.exists(path):
-        print("context_budget: no session transcript found"); return 0
+        # Fail-closed (2026-07-25): an unfindable transcript is NOT a measured
+        # low-usage session -- exit 0 here made this silently indistinguishable
+        # from a real OK verdict. Exit UNKNOWN(3) so callers/hooks can't mistake
+        # "couldn't check" for "checked, and it's fine".
+        print("context_budget: UNKNOWN (no session transcript found)"); return 3
     u = last_usage(path)
     if not u:
-        print("context_budget: no usage entries yet"); return 0
+        print("context_budget: UNKNOWN (no usage entries yet)"); return 3
 
     ctx = (u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0)
            + u.get("cache_creation_input_tokens", 0))

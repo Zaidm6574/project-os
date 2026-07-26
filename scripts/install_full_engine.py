@@ -41,6 +41,14 @@ def copy_file(src: Path, dst: Path, force: bool, dry_run: bool = False) -> str:
         action = "overwrite" if dst.exists() else "write"
         return f"would {action} {dst}"
     dst.parent.mkdir(parents=True, exist_ok=True)
+    # 2026-07-25: --force silently destroyed user edits (no backup step, unlike
+    # setup_project_os.py's copy_file). Keep a one-deep .pre-force backup when
+    # the existing target differs from the template before overwriting.
+    if dst.exists() and dst.read_bytes() != src.read_bytes():
+        backup = dst.with_name(dst.name + ".pre-force")
+        shutil.copy2(dst, backup)
+        shutil.copy2(src, dst)
+        return f"wrote {dst} (previous version saved to {backup.name})"
     shutil.copy2(src, dst)
     return f"wrote {dst}"
 

@@ -27,7 +27,19 @@ VERDICTS = ("approve", "reject", "revise")
 
 
 def paths(run):
+    # 2026-07-25: --run was joined into ROOT unsanitized, so an absolute path
+    # or a ../ traversal in --run escaped runs/ entirely (path traversal /
+    # arbitrary-write). Reject anything that isn't a plain run-name segment,
+    # and confirm the resolved directory still lands inside runs/.
+    if not run or os.path.isabs(run) or run in (".", "..") or "/" in run or "\\" in run:
+        print(f"invalid --run {run!r}: must be a single path segment, "
+              f"no slashes and no absolute paths", file=sys.stderr)
+        sys.exit(2)
     d = os.path.join(ROOT, "runs", run)
+    runs_root = os.path.join(ROOT, "runs")
+    if os.path.realpath(d) != os.path.join(os.path.realpath(runs_root), run):
+        print(f"invalid --run {run!r}: escapes runs/", file=sys.stderr)
+        sys.exit(2)
     return d, os.path.join(d, "evolution.json"), os.path.join(d, "evolution.md")
 
 

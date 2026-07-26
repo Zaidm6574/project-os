@@ -117,6 +117,13 @@ def bullets_by_section(md):
         b = re.match(r"^[-*]\s+(.+)$", line)
         if b:
             text = re.sub(r"\*\*(.+?)\*\*", r"\1", b.group(1)).strip()
+            # The bullet branch used to yield unconditionally while the table
+            # branch enforced REJECT_ROW per cell -- a bullet like "Private-only:
+            # ..." harvested straight through with no exclusion at all
+            # (audit 2026-07-25). Apply the same check here.
+            if REJECT_ROW.match(text):
+                DROPPED.append(line.strip()[:120])
+                continue
             if text:
                 yield cur, text
             continue
@@ -227,27 +234,43 @@ def cmd_apply(path):
     if not os.path.isfile(path):
         sys.exit(f"no such proposals file: {path}")
     ba = os.path.join(ROOT, "scripts", "brain_append.py")
-    n, slug = 0, None
+    # Parse EVERY line before appending any of them. The old loop parsed and
+    # appended in the same pass, so a malformed line N left lines 1..N-1
+    # already committed to the brain despite the docstring's promise to
+    # "refuse malformed before touching the brain" (audit 2026-07-25).
+    lines, slugs = [], []
     with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
+        for i, raw in enumerate(f, 1):
+            line = raw.strip()
             if not line:
                 continue
-            o = json.loads(line)  # refuse malformed before touching the brain
-            slug = o.get("project_id", slug)
-            r = subprocess.run([sys.executable, ba, "--line", line, "--agent", "harvest",
-                                "--no-reindex"], capture_output=True, text=True)
-            if r.returncode != 0:
-                sys.exit(f"brain_append failed on line {n + 1}: "
-                         f"{(r.stderr or r.stdout).strip()[:300]}")
-            n += 1
+            try:
+                o = json.loads(line)
+            except ValueError as e:
+                sys.exit(f"malformed proposals line {i}, nothing appended: {e}")
+            lines.append(line)
+            slugs.append(o.get("project_id"))
+    n = 0
+    for line in lines:
+        r = subprocess.run([sys.executable, ba, "--line", line, "--agent", "harvest",
+                            "--no-reindex"], capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit(f"brain_append failed on line {n + 1}: "
+                     f"{(r.stderr or r.stdout).strip()[:300]}")
+        n += 1
     # one reindex for the whole batch
     subprocess.run([sys.executable, os.path.join(ROOT, "memory", "mneme_adapter.py"), "build"],
                    check=True)
-    if slug and os.path.isdir(os.path.join(RUNS, slug)):
-        with open(os.path.join(RUNS, slug, MARKER), "w", encoding="utf-8") as f:
-            f.write(datetime.date.today().isoformat() + "\n")
-    print(f"appended {n} lessons + reindexed; marked {slug or '?'} harvested")
+    # Mark EVERY contributing run harvested, not just the last project_id seen:
+    # a batch spanning proja/projb/projc used to leave proja and projb
+    # unmarked even though their lessons were appended (audit 2026-07-25).
+    marked = []
+    for slug in dict.fromkeys(s for s in slugs if s):
+        if os.path.isdir(os.path.join(RUNS, slug)):
+            with open(os.path.join(RUNS, slug, MARKER), "w", encoding="utf-8") as f:
+                f.write(datetime.date.today().isoformat() + "\n")
+            marked.append(slug)
+    print(f"appended {n} lessons + reindexed; marked {', '.join(marked) if marked else '?'} harvested")
     return 0
 
 

@@ -46,10 +46,16 @@ def _sha256_file(path):
 
 def _module_name(rel):
     """app/core.py -> app.core ; app/__init__.py -> app  (rel uses '/')"""
-    parts = rel[:-3].split("/")
+    stem = rel[:-3]
+    parts = stem.split("/")
     if parts[-1] == "__init__":
         parts = parts[:-1]
-    return ".".join(parts) if parts else rel
+    # 2026-07-25: a top-level __init__.py has no parent dir, so `parts` goes
+    # empty here. Falling back to the raw `rel` (still carrying the '.py'
+    # extension) produced a module id inconsistent with every other dotted
+    # name in the graph, breaking import-edge matching. Fall back to the
+    # extensionless stem instead.
+    return ".".join(parts) if parts else stem
 
 
 def _is_test_module(rel):
@@ -105,11 +111,48 @@ def _scan_module(rel, full):
     return mod
 
 
+def _scope_nodes(func_node):
+    """Yield every AST node within func_node's own scope, without descending
+    into a nested FunctionDef/AsyncFunctionDef/Lambda's body.
+
+    2026-07-25: a plain ast.walk() has no scope boundary, so a nested
+    closure's calls (and its locally-bound names) were being misattributed
+    to the enclosing function even when the closure itself is never called.
+    """
+    stack = list(ast.iter_child_nodes(func_node))
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue  # nested scope: stop here, its body is not "this" function's
+        stack.extend(ast.iter_child_nodes(node))
+
+
 def _call_targets(func_node):
-    """Yield (callee expression, lineno) for every call inside a function."""
-    for sub in ast.walk(func_node):
+    """Yield (callee expression, lineno) for every call inside a function,
+    not counting calls made only by a nested closure (see _scope_nodes)."""
+    for sub in _scope_nodes(func_node):
         if isinstance(sub, ast.Call):
             yield sub.func, sub.lineno
+
+
+def _local_names(func_node):
+    """Plain local-variable names bound within func_node's own scope
+    (assignment targets, for/with targets, except-as), not counting names
+    bound only inside a nested closure.
+
+    2026-07-25: a bare-name call resolved against module-level defs even
+    when the name was shadowed by a local variable in the calling function,
+    mislabeling a guess (whatever the local variable holds at runtime) as a
+    verified 'ast' edge to the unrelated module-level def.
+    """
+    names = set()
+    for sub in _scope_nodes(func_node):
+        if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store):
+            names.add(sub.id)
+        elif isinstance(sub, ast.ExceptHandler) and sub.name:
+            names.add(sub.name)
+    return names
 
 
 def build(root, out=None):
@@ -163,11 +206,19 @@ def build(root, out=None):
             func_node = _find_def(mod.tree, local)
             if func_node is None:
                 continue
+            local_names = _local_names(func_node)
             for callee, lineno in _call_targets(func_node):
                 target, method = None, None
                 if isinstance(callee, ast.Name):
                     name = callee.id
-                    if name in mod.defs:
+                    if name in local_names:
+                        # shadowed by a local variable in this scope: a def/
+                        # import match would be an unverified guess, so only
+                        # allow the explicitly-uncertain bare-name fallback
+                        if name in bare_names and len(bare_names[name]) == 1 \
+                                and bare_names[name][0] != caller_id:
+                            target, method = bare_names[name][0], "inferred"
+                    elif name in mod.defs:
                         target, method = mod.defs[name][0], "ast"
                     elif name in mod.import_symbols:
                         sid = mod.import_symbols[name]
@@ -227,6 +278,13 @@ def freshness_problems(root, graph):
     unindexed new file makes the graph untrustworthy for orientation."""
     root = os.path.abspath(root)
     problems = []
+    # 2026-07-25: a graph built for one directory was reported "fresh" when
+    # checked/oriented against an unrelated directory that happens to share
+    # file names — the per-file hash loop below can't catch that on its own.
+    graph_root = graph.get("root")
+    if graph_root is not None and os.path.abspath(graph_root) != root:
+        problems.append(f"graph built for different root: {graph_root} (now checking {root})")
+        return problems
     for rel, digest in graph["files"].items():
         full = os.path.join(root, rel)
         if not os.path.isfile(full):

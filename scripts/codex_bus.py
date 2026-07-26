@@ -24,6 +24,7 @@ import glob
 import json
 import time
 import uuid
+import asyncio
 import subprocess
 from pathlib import Path
 
@@ -75,9 +76,27 @@ def cmd_serve() -> int:
     py = str(_VENV_PY) if _VENV_PY.is_file() else sys.executable
     log = Path.home() / ".claude" / "data" / "inter-session" / "server.log"
     log.parent.mkdir(parents=True, exist_ok=True)
+    log_pos = log.stat().st_size if log.is_file() else 0
     with open(log, "a") as lf:
         p = subprocess.Popen([py, str(root / "bin" / "server.py")],
                              stdout=lf, stderr=lf, start_new_session=True)
+    # 2026-07-25 fix: Popen succeeding only means fork+exec worked, not that the
+    # server bound its port — poll briefly so a fast crash (e.g. port already in
+    # use) is reported as a failure instead of a silent RC=0 "success".
+    for _ in range(20):
+        time.sleep(0.1)
+        if p.poll() is not None:
+            tail = ""
+            try:
+                with open(log, "r") as rf:
+                    rf.seek(log_pos)
+                    tail = rf.read().strip()
+            except OSError:
+                pass
+            print(f"server failed to start (exit {p.returncode}); log: {log}", file=sys.stderr)
+            if tail:
+                print(tail, file=sys.stderr)
+            return 1
     print(f"server starting (pid {p.pid}); log: {log}")
     print("note: it auto-exits after the configured idle window with no clients")
     return 0
@@ -112,7 +131,13 @@ async def _hello(ws, name: str, token: str):
         "label": "codex bridge", "cwd": os.getcwd(), "pid": os.getpid(),
         "role": "agent", "token": token,
     }))
-    welcome = json.loads(await ws.recv())
+    # 2026-07-25 fix: every other recv() in this file is wrapped in a 5s
+    # asyncio.wait_for; this one wasn't, so a server that accepted the hello
+    # but never replied hung list/send/listen forever.
+    try:
+        welcome = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+    except asyncio.TimeoutError:
+        sys.exit("hello timed out — server accepted the connection but never replied")
     if welcome.get("op") == "error":
         sys.exit(f"hello rejected: {welcome.get('code')} {welcome.get('message', '')}")
     return welcome

@@ -31,10 +31,31 @@ def score(payload):
     if not criteria:
         return ("Reject", 0.0, "no criteria supplied", 2)
 
+    # 2026-07-25: individual score/weight values were never range-checked, so
+    # e.g. weight=-0.5 paired with weight=1.5 elsewhere still summed to
+    # ~1.0 while pushing the weighted total (and the verdict) outside
+    # [0, 1]. Range-check every value before trusting the sum.
+    for c in criteria:
+        c_score = float(c["score"])
+        c_weight = float(c["weight"])
+        if not (0.0 <= c_score <= 1.0):
+            raise ValueError(
+                "criterion %r score out of range [0,1]: %r"
+                % (c.get("name"), c_score)
+            )
+        if not (0.0 <= c_weight <= 1.0):
+            raise ValueError(
+                "criterion %r weight out of range [0,1]: %r"
+                % (c.get("name"), c_weight)
+            )
+
     weights = sum(float(c["weight"]) for c in criteria)
-    assert abs(weights - 1.0) <= WEIGHT_TOL, (
-        "weights must sum to ~1.0, got %r" % weights
-    )
+    # 2026-07-25: this guard used to be a bare `assert`, which is stripped
+    # under `python -O` / PYTHONOPTIMIZE=1, silently letting a bogus weight
+    # sum through to a confident Pass/Reject. Raise explicitly instead so it
+    # cannot be compiled away.
+    if abs(weights - 1.0) > WEIGHT_TOL:
+        raise ValueError("weights must sum to ~1.0, got %r" % weights)
 
     # UNROUNDED weighted total.
     total = sum(float(c["score"]) * float(c["weight"]) for c in criteria)
@@ -44,12 +65,16 @@ def score(payload):
     verdict = "Pass" if passes else "Reject"
 
     artifact_type = payload.get("artifact_type", "doc")
+    # 2026-07-25: the executable gate matched the exact literal string
+    # "executable", so a case variant (e.g. "Executable") bypassed the
+    # mandatory pass@k refusal entirely. Normalize before comparing.
+    artifact_type_norm = (artifact_type or "").strip().lower()
     passk = payload.get("passk")
     redteam = (payload.get("redteam") or "").strip()
     strategy_change = (payload.get("strategy_change") or "").strip()
 
     # Refusal: executable artifacts must carry a k/pass-count.
-    if artifact_type == "executable" and not passk:
+    if artifact_type_norm == "executable" and not passk:
         return (
             verdict,
             total,

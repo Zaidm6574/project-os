@@ -77,16 +77,28 @@ def _model_tier(model_slug):
 
 
 def _find_latest_jsonl():
-    """Return the most recently modified *.jsonl under ~/.claude/projects."""
+    """Return the most recently modified *.jsonl under ~/.claude/projects.
+
+    Excludes files inside any "subagents" directory (2026-07-25): a subagent's
+    own .jsonl can be newer than the orchestrator's main session file (it was
+    written after the orchestrator spawned it), so an unfiltered mtime-max can
+    silently pick a subagent transcript as the "main" one. _collect_jsonl_files
+    then looks for a sibling subagents/ dir under that subagent file itself,
+    which won't exist, so only that one subagent's tokens get counted with no
+    warning that the orchestrator loop was never measured.
+    """
     base = pathlib.Path.home() / ".claude" / "projects"
     if not base.exists():
         raise FileNotFoundError(
             "~/.claude/projects not found; use --transcript to specify a file"
         )
-    candidates = list(base.rglob("*.jsonl"))
+    candidates = [
+        p for p in base.rglob("*.jsonl") if "subagents" not in p.parts
+    ]
     if not candidates:
         raise FileNotFoundError(
-            "No *.jsonl files found under ~/.claude/projects"
+            "No main-session *.jsonl files found under ~/.claude/projects "
+            "(subagent-only files were excluded)"
         )
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
@@ -120,11 +132,19 @@ def _empty_counts():
 def _parse_usage(files, main_file):
     """Parse usage from JSONL files.
 
-    Returns (main_totals, sub_totals): dicts mapping tier -> count dict.
+    Returns (main_totals, sub_totals, unreadable): dicts mapping tier -> count
+    dict, plus a list of files that could not be opened/read at all.
     main_totals covers the main session file; sub_totals covers everything else.
+
+    unreadable is tracked (2026-07-25) because a missing/unreadable transcript
+    previously fell through as an empty totals dict, which unpriced_tiers()
+    cannot see (there is nothing to flag), so the caller silently reported a
+    confident $0.00 "measured" total instead of refusing. Callers MUST check
+    this list before trusting main_totals/sub_totals as measured.
     """
     main_totals = {}
     sub_totals  = {}
+    unreadable  = []
 
     for fpath in files:
         target = main_totals if fpath == main_file else sub_totals
@@ -138,14 +158,16 @@ def _parse_usage(files, main_file):
                         msg = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    # usage may sit at the top level or inside a "message" key
-                    usage = msg.get("usage") or msg.get("message", {}).get("usage")
-                    if not usage:
+                    # usage may sit at the top level or inside a "message" key.
+                    # Either key can be present-but-null or hold a non-dict
+                    # value (e.g. "message": "hello"); .get() on those raises
+                    # AttributeError, so guard with isinstance (2026-07-25).
+                    message = msg.get("message")
+                    message = message if isinstance(message, dict) else {}
+                    usage = msg.get("usage") or message.get("usage")
+                    if not isinstance(usage, dict):
                         continue
-                    model = (
-                        msg.get("model")
-                        or msg.get("message", {}).get("model", "unknown")
-                    )
+                    model = msg.get("model") or message.get("model", "unknown")
                     tier = _model_tier(model)
                     if tier not in target:
                         target[tier] = _empty_counts()
@@ -154,9 +176,9 @@ def _parse_usage(files, main_file):
                     target[tier]["cache_creation"] += usage.get("cache_creation_input_tokens", 0)
                     target[tier]["cache_read"]     += usage.get("cache_read_input_tokens", 0)
         except OSError:
-            pass
+            unreadable.append(fpath)
 
-    return main_totals, sub_totals
+    return main_totals, sub_totals, unreadable
 
 
 def unpriced_tiers(totals, prices):
@@ -166,12 +188,22 @@ def unpriced_tiers(totals, prices):
     {"in": 0.0, "out": 0.0}, so its spend was reported as a confident $0.00 and
     presented as *measured*. Cost actuals are doctrine-bound to be measured and
     never hand-entered, which makes a silent zero worse than a loud refusal.
+
+    Also flags a tier that IS present in the price table but is missing "in"
+    or "out" (2026-07-25): a price entry like {"sonnet": {"in": 3.0}} used to
+    pass the `tier in prices` check untouched, so output tokens for that tier
+    were silently priced at the {"in": 0.0, "out": 0.0} fallback used inside
+    _compute_cost_parts, with no warning that the entry was incomplete.
     """
     missing = []
     for tier, counts in totals.items():
-        if tier in prices:
+        has_tokens = any(
+            counts.get(k, 0) for k in ("input", "output", "cache_creation", "cache_read")
+        )
+        if not has_tokens:
             continue
-        if any(counts.get(k, 0) for k in ("input", "output", "cache_creation", "cache_read")):
+        price = prices.get(tier)
+        if price is None or "in" not in price or "out" not in price:
             missing.append(tier)
     return sorted(missing)
 
@@ -508,6 +540,14 @@ def _update_markers(dest, table_md):
     ei = text.find(end_tag)
     if si == -1 or ei == -1:
         raise ValueError("Markers not found in %s" % dest)
+    if ei < si:
+        # Fail closed (2026-07-25): an END tag before START would otherwise
+        # splice table_md into the *middle* of unrelated text and duplicate
+        # both markers instead of replacing the block between them.
+        raise ValueError(
+            "ACTUALS:END appears before ACTUALS:START in %s; refusing to "
+            "write a corrupted splice" % dest
+        )
     new_text = (
         text[: si + len(start_tag)]
         + "\n"
@@ -515,7 +555,24 @@ def _update_markers(dest, table_md):
         + "\n"
         + text[ei:]
     )
-    dest.write_text(new_text)
+    # Write atomically (2026-07-25): a plain write_text() truncates dest before
+    # the new bytes are flushed, so a crash/kill mid-write (or a concurrent
+    # reader) can observe a half-written or empty file. Write to a temp file in
+    # the same directory, then os.replace() so the swap is a single atomic
+    # rename.
+    fd, tmp_name = tempfile.mkstemp(
+        dir=dest.parent, prefix=dest.name + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(new_text)
+        os.replace(tmp_name, dest)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -530,7 +587,7 @@ def run(transcript_path, prices, write, target_path):
     knowingly-incomplete number as a measured actual.
     """
     files      = _collect_jsonl_files(transcript_path)
-    main_t, sub_t = _parse_usage(files, transcript_path)
+    main_t, sub_t, unreadable = _parse_usage(files, transcript_path)
     main_costs = _compute_cost(main_t, prices)
     sub_costs  = _compute_cost(sub_t,  prices)
     table_md   = _build_table(main_costs, sub_costs, main_t, sub_t, prices)
@@ -545,6 +602,17 @@ def run(transcript_path, prices, write, target_path):
     )
     print(block)
 
+    if unreadable:
+        # A missing/unreadable transcript previously fell through _parse_usage
+        # as an empty totals dict, which unpriced_tiers() cannot detect, so the
+        # table above rendered a confident $0.00 with no warning (2026-07-25).
+        sys.stderr.write(
+            "\nUNREADABLE TRANSCRIPT FILE(S): %s\n"
+            "These could not be opened/read, so the totals above are INCOMPLETE\n"
+            "(possibly all-zero) rather than measured.\n"
+            % ", ".join(str(f) for f in unreadable)
+        )
+
     if missing:
         sys.stderr.write(
             "\nUNPRICED MODELS: %s\n"
@@ -554,6 +622,12 @@ def run(transcript_path, prices, write, target_path):
         )
 
     if write:
+        if unreadable:
+            sys.stderr.write(
+                "REFUSING --write: transcript file(s) unreadable, actuals would be\n"
+                "incomplete. Nothing was written to the ACTUALS block.\n"
+            )
+            return 2
         if missing:
             sys.stderr.write(
                 "REFUSING --write: cost actuals must be measured, not partial.\n"
@@ -605,7 +679,8 @@ def selftest():
         tmp = pathlib.Path(fh.name)
 
     try:
-        main_totals, sub_totals = _parse_usage([tmp], tmp)
+        main_totals, sub_totals, unreadable = _parse_usage([tmp], tmp)
+        assert unreadable == [], "expected no unreadable files, got %r" % unreadable
 
         # ---- opus ----
         # 1M input * $5/1M = $5.00
@@ -683,7 +758,8 @@ def selftest():
             fh.write(json.dumps(sub_opus) + "\n")
 
         files = _collect_jsonl_files(main_file)
-        main_t, sub_t = _parse_usage(files, main_file)
+        main_t, sub_t, unreadable = _parse_usage(files, main_file)
+        assert unreadable == [], "expected no unreadable files, got %r" % unreadable
 
         # 3 orchestrator turns * 1M input each = 3M summed into the main loop.
         assert main_t["opus"]["input"] == 3_000_000, (

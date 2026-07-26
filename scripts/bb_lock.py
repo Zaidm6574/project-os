@@ -125,8 +125,12 @@ def renew(target, token=None):
             return False
 
 
-def release(target, agent=None, force=False, token=None):
+def release(target, agent="unknown", force=False, token=None):
     """Release the lock only when its fencing token still owns the lease."""
+    # agent must default to "unknown" (matching acquire()'s default), not
+    # None: a caller that omits agent entirely used to sail through the
+    # tokenless-legacy-lock ownership guard below, since `agent is not None`
+    # was False and the whole check short-circuited (2026-07-25).
     lp = lock_path(target)
     expected = token or _HELD_TOKENS.get(lp)
     with _guard(lp):
@@ -263,7 +267,11 @@ def main():
     except ValueError as exc:
         sys.exit(_usage_error(str(exc)))
 
-    if not rest:
+    # "--" is a reserved separator (only meaningful for `run <path> -- <cmd>`),
+    # never a legitimate <path>; without this check an omitted <path> silently
+    # keyed the lock off the literal string "--" instead of erroring
+    # (2026-07-25).
+    if not rest or rest[0] == "--":
         print("missing <path>", file=sys.stderr)
         sys.exit(2)
     target = rest[0]

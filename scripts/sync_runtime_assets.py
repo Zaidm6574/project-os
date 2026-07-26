@@ -54,12 +54,21 @@ class Workflow:
 # Minimal frontmatter handling (stdlib only — no PyYAML dependency).
 # --------------------------------------------------------------------------
 
-def split_frontmatter(text: str) -> tuple[dict, str]:
+def split_frontmatter(text: str, source: Path | None = None) -> tuple[dict, str]:
     if not text.startswith("---\n"):
         return {}, text
     end = text.find("\n---\n", 4)
     if end == -1:
-        return {}, text
+        # An opening `---` with no closing `---` used to fall through to
+        # `return {}, text`: every key silently vanished (empty frontmatter
+        # written out) and the raw, unparsed frontmatter leaked verbatim into
+        # the generated command body -- with `--check` still reporting OK,
+        # because it only compares against the same silently-wrong render
+        # (audit 2026-07-25). Fail closed instead of guessing.
+        raise SystemExit(
+            "sync_runtime_assets: unterminated frontmatter (opening `---` with "
+            "no closing `---`) in %s" % (source if source is not None else "<unknown>")
+        )
     raw, body = text[4:end], text[end + 5:]
     meta: dict = {}
     key = None
@@ -124,12 +133,25 @@ def safe_workflow_name(raw: str, source: Path) -> str:
 def load_workflows(root: Path) -> list:
     canon = Path(root) / "prompts" / "workflows"
     workflows = []
+    seen_names: dict = {}
     for path in sorted(canon.glob("*.md")):
         if path.stem == "INDEX":
             continue
-        meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
+        meta, body = split_frontmatter(path.read_text(encoding="utf-8"), source=path)
+        name = safe_workflow_name(meta.get("name", path.stem), path)
+        if name in seen_names:
+            # Two canonical files declaring the same `name:` used to render to
+            # the SAME staged path with no diagnostic: whichever file sorted
+            # last silently won and the other file's adapter vanished, with
+            # `--check` reporting only generic "hand-edited or stale" drift
+            # rather than a collision (audit 2026-07-25). Fail closed.
+            raise SystemExit(
+                "sync_runtime_assets: duplicate workflow name %r in %s and %s"
+                % (name, seen_names[name], path)
+            )
+        seen_names[name] = path
         workflows.append(Workflow(
-            name=safe_workflow_name(meta.get("name", path.stem), path),
+            name=name,
             description=meta.get("description", ""),
             argument_hint=meta.get("argument-hint", ""),
             capabilities=meta.get("capabilities", []) or [],

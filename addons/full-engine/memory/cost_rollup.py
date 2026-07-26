@@ -47,7 +47,10 @@ def _parse_actuals(text):
             continue
         label = cells[0]
         low = label.lower()
-        if low.startswith("model") or "total" in low or set(label) <= set("-: "):
+        # 2026-07-25: guard against blank label — set("") <= set(...) is True,
+        # so an empty/whitespace Model cell was mistaken for a separator row
+        # and its $ amount silently dropped instead of counted.
+        if low.startswith("model") or "total" in low or (label and set(label) <= set("-: ")):
             continue  # header, subtotal, total, or separator row
         m = DOLLARS_RE.search(cells[2])
         if not m:

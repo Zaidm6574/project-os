@@ -45,7 +45,15 @@ def main_root(root):
 
 
 def wt_dir(root, name):
-    return os.path.join(HOME, ".project-os", "worktrees", os.path.basename(root), name)
+    # defect (2026-07-25): `name` came straight from argv into os.path.join with no
+    # containment check, so `../../../../tmp/evil-marker-dir/sub` escaped
+    # ~/.project-os/worktrees/<repo>/ and os.makedirs created it before git ever
+    # validated the branch ref. Reject traversal/separators before building the path.
+    base = os.path.join(HOME, ".project-os", "worktrees", os.path.basename(root))
+    path = os.path.normpath(os.path.join(base, name))
+    if os.path.commonpath([os.path.normpath(base), path]) != os.path.normpath(base):
+        sys.exit(f"REFUSED: worktree name escapes worktrees root: {name!r}")
+    return path
 
 
 def dirty(tree):

@@ -190,7 +190,11 @@ Compiled: {today} by promptsmith from the SAME brief as the worker prompt
         if os.path.exists(idx):
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
             import bb_lock
-            row = (f"| {pid} | promptsmith | {task[:60]} | Draft | "
+            # 2026-07-25: sanitize task before embedding in the markdown table row —
+            # an unescaped `|` or newline in --task could inject extra cells (e.g. a
+            # fake "Approved" status) into the shared blackboard index.
+            safe_task = task.replace("|", "/").replace("\n", " ").replace("\r", " ")
+            row = (f"| {pid} | promptsmith | {safe_task[:60]} | Draft | "
                    f"packets/{os.path.basename(wp)} |")
             if bb_lock.acquire(idx, agent="promptsmith", wait=10):
                 try:
