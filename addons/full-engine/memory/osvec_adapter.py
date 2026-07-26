@@ -275,27 +275,63 @@ class ProjectMemory:
         self.index, self.backend = _new_index(self.dim)
         self.sidecar = {}          # str(u64_id) -> record dict
         self.id_to_u64 = {}        # memory_id -> u64_id
-        self._lock_fd = None       # held from load() through save(), see _acquire_lock
+        self._lock_fd = None       # see _acquire_lock for the locking discipline
+        self._lock_shared = False  # True while the held lock is LOCK_SH
         os.makedirs(STORE_DIR, exist_ok=True)
 
-    # ---- locking (audit 2026-07-25) ----
+    # ---- locking (audit 2026-07-25, lock-mode fix 2026-07-26) ----
     # save() used to write index.write() + json.dump() with no locking at all,
     # so two concurrent CLI invocations (load -> add -> save) could each load
     # the same pre-write state and the second save() would silently clobber
-    # the first's write. Hold an exclusive flock from load() through save() so
-    # a whole load-mutate-save cycle is serialized across processes. Best
-    # effort only where fcntl isn't available (non-POSIX) or the lock file
-    # can't be opened -- never blocks the caller on that failure.
-    def _acquire_lock(self):
-        if fcntl is None or self._lock_fd is not None:
+    # the first's write. The first fix took an EXCLUSIVE flock in load() and
+    # released it only in save() -- which meant a read-only consumer
+    # (`search`, `stats`, or any long-lived process that loads once and never
+    # writes) held an exclusive lock on the store for its whole lifetime and
+    # blocked every other process's load().
+    #
+    # The discipline now is the standard reader/writer one:
+    #
+    #   * load()               takes LOCK_SH and RELEASES it before returning.
+    #                          Any number of readers proceed in parallel, and
+    #                          none of them can observe a half-written store
+    #                          because a writer holds LOCK_EX across its write.
+    #   * load(for_update=True) takes LOCK_EX and HOLDS it through save(), so a
+    #                          whole read-modify-write cycle is serialized
+    #                          against other writers (no lost updates). Use
+    #                          close()/`with` if such a load is abandoned
+    #                          without saving.
+    #   * save()               takes LOCK_EX (if not already held) and releases
+    #                          it when the write completes.
+    #
+    # Best effort only where fcntl isn't available (non-POSIX) or the lock file
+    # can't be opened -- never blocks the caller on that failure. save() also
+    # replaces the side-car atomically, so even an unlocked reader (or a crash
+    # mid-write) can never see a truncated JSON file.
+    def _acquire_lock(self, shared: bool = False):
+        if fcntl is None:
             return
+        if self._lock_fd is not None:
+            if self._lock_shared == shared:
+                return
+            # Mode change (a shared reader that now wants to write). Drop and
+            # retake rather than relying on flock conversion semantics; the
+            # caller that needs an uninterrupted read-modify-write section is
+            # expected to have asked for for_update=True up front.
+            self._release_lock()
+        fd = None
         try:
             os.makedirs(STORE_DIR, exist_ok=True)
             fd = open(os.path.join(STORE_DIR, "project.lock"), "a+")
-            fcntl.flock(fd.fileno(), fcntl.LOCK_EX)
-            self._lock_fd = fd
+            fcntl.flock(fd.fileno(),
+                        fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
         except OSError:
+            if fd is not None:
+                fd.close()
             self._lock_fd = None
+            self._lock_shared = False
+            return
+        self._lock_fd = fd
+        self._lock_shared = shared
 
     def _release_lock(self):
         if self._lock_fd is None:
@@ -305,6 +341,22 @@ class ProjectMemory:
         finally:
             self._lock_fd.close()
             self._lock_fd = None
+            self._lock_shared = False
+
+    def close(self):
+        """Release any held store lock. Safe to call more than once.
+
+        Only a `load(for_update=True)` that is abandoned without calling save()
+        needs this; read-only loads and completed saves release on their own.
+        """
+        self._release_lock()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
 
     # ---- write ----
     def add(self, text, memory_type, source_file="", memory_id=None, tags=None,
@@ -388,63 +440,90 @@ class ProjectMemory:
 
     # ---- persistence (index + side-car, kept in sync) ----
     def save(self):
-        # Acquire the lock if this instance never called load() (e.g. a fresh
-        # add()-then-save() with no prior read) so the write is still guarded.
-        self._acquire_lock()
+        # Acquire the exclusive lock if this instance isn't already holding one
+        # (a read-only load() released it, or load() was never called at all --
+        # e.g. a fresh add()-then-save()) so the write is still guarded.
+        self._acquire_lock(shared=False)
         try:
             os.makedirs(STORE_DIR, exist_ok=True)
             self.index.write(INDEX_PATH)
-            with open(SIDECAR_PATH, "w") as f:
-                json.dump({"backend": self.backend, "dim": self.dim,
-                           "embedder": getattr(self.embedder, "name", "?"),
-                           "records": self.sidecar}, f, indent=2)
+            # Write to a sibling temp file and os.replace() it: readers that
+            # don't take the lock (brain.py reads SIDECAR_PATH directly) and
+            # readers running after a crashed write see either the old file or
+            # the new one, never a truncated one.
+            fd, tmp_path = tempfile.mkstemp(prefix=".project.sidecar.",
+                                            suffix=".json", dir=STORE_DIR)
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump({"backend": self.backend, "dim": self.dim,
+                               "embedder": getattr(self.embedder, "name", "?"),
+                               "records": self.sidecar}, f, indent=2)
+                os.replace(tmp_path, SIDECAR_PATH)
+            except BaseException:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                raise
         finally:
             # Release after the write completes: this ends the load-mutate-save
             # critical section this instance started, letting the next waiting
             # process's load() proceed against our just-written state.
             self._release_lock()
 
-    def load(self):
-        self._acquire_lock()
-        if not os.path.exists(SIDECAR_PATH):
-            # Nothing was read, so there is no read-modify-write section to
-            # protect: release immediately. Holding here leaked the lock for
-            # the whole process lifetime, so a read-only `search`/`stats`
-            # against a brand-new store blocked every other process's load()
-            # until it exited (adversarial verify 2026-07-25).
-            self._release_lock()
-            return self
-        with open(SIDECAR_PATH) as f:
-            blob = json.load(f)
-        self.sidecar = blob.get("records", {})
-        self.id_to_u64 = {r["memory_id"]: int(r["u64_id"]) for r in self.sidecar.values()}
+    def load(self, for_update: bool = False):
+        """Read the store into this instance.
+
+        for_update=False (default) is a READ: it takes a shared lock for the
+        duration of the read and releases it before returning, so read-only
+        consumers never block anyone. Holding an exclusive lock here leaked it
+        for the whole process lifetime -- a `search`/`stats` process blocked
+        every other process's load() until it exited (verified 2026-07-26).
+
+        for_update=True keeps the exclusive lock held until save() (or
+        close()), which is what a read-modify-write caller needs to be safe
+        against a concurrent writer's lost update.
+        """
+        self._acquire_lock(shared=not for_update)
+        held = False
         try:
-            if self.backend.startswith("turbovec"):
-                from turbovec import IdMapIndex  # type: ignore
-                self.index = IdMapIndex.load(INDEX_PATH)
-            else:
-                self.index = _BruteForceIndex.load(INDEX_PATH, self.dim)
-        except Exception:
-            # Rebuild from side-car text if the binary index is missing/out of sync.
-            self.index, self.backend = _new_index(self.dim)
-            for r in self.sidecar.values():
-                vec = self.embedder.embed([r["text"]]).astype(np.float32)
-                self.index.add_with_ids(vec, np.array([int(r["u64_id"])], dtype=np.uint64))
-        # consistency check (mirrors turbovec's check_persisted_handles intent).
-        # Used to only sys.stderr.write() a warning and still `return self` on a
-        # known-bad state -- callers had no way to tell a healthy load from a
-        # corrupted one short of grepping stderr (audit 2026-07-25). Fail
-        # closed: refuse to hand back a store we know is inconsistent.
-        if len(self.index) != len(self.sidecar):
-            # Release the lock we're holding before raising: this instance is
-            # being abandoned by the caller, so don't leave a waiting process
-            # blocked on it until we happen to get garbage collected.
-            self._release_lock()
-            raise RuntimeError(
-                f"OSVec store is inconsistent: index ({len(self.index)}) and "
-                f"side-car ({len(self.sidecar)}) record counts differ. Refusing "
-                "to load a known-bad store."
-            )
+            if os.path.exists(SIDECAR_PATH):
+                with open(SIDECAR_PATH) as f:
+                    blob = json.load(f)
+                self.sidecar = blob.get("records", {})
+                self.id_to_u64 = {r["memory_id"]: int(r["u64_id"])
+                                  for r in self.sidecar.values()}
+                try:
+                    if self.backend.startswith("turbovec"):
+                        from turbovec import IdMapIndex  # type: ignore
+                        self.index = IdMapIndex.load(INDEX_PATH)
+                    else:
+                        self.index = _BruteForceIndex.load(INDEX_PATH, self.dim)
+                except Exception:
+                    # Rebuild from side-car text if the binary index is missing/out of sync.
+                    self.index, self.backend = _new_index(self.dim)
+                    for r in self.sidecar.values():
+                        vec = self.embedder.embed([r["text"]]).astype(np.float32)
+                        self.index.add_with_ids(
+                            vec, np.array([int(r["u64_id"])], dtype=np.uint64))
+                # consistency check (mirrors turbovec's check_persisted_handles
+                # intent). Used to only sys.stderr.write() a warning and still
+                # `return self` on a known-bad state -- callers had no way to
+                # tell a healthy load from a corrupted one short of grepping
+                # stderr (audit 2026-07-25). Fail closed: refuse to hand back a
+                # store we know is inconsistent.
+                if len(self.index) != len(self.sidecar):
+                    raise RuntimeError(
+                        f"OSVec store is inconsistent: index ({len(self.index)}) and "
+                        f"side-car ({len(self.sidecar)}) record counts differ. Refusing "
+                        "to load a known-bad store."
+                    )
+            held = for_update
+        finally:
+            # Release unless this is an explicit for_update load that succeeded.
+            # In particular a raising load() must not leave a lock behind: the
+            # caller is abandoning this instance, and a waiting process would
+            # otherwise block until we happened to be garbage collected.
+            if not held:
+                self._release_lock()
         return self
 
     def stats(self):
@@ -563,22 +642,28 @@ def main():
     if args.cmd == "selftest":
         sys.exit(_selftest())
 
-    mem = ProjectMemory().load()
-    if args.cmd == "stats":
-        print(json.dumps(mem.stats(), indent=2))
-    elif args.cmd == "add":
-        rec = mem.add(args.text, args.mtype, args.source, args.id,
-                      [t for t in args.tags.split(",") if t],
-                      run_slug=args.run_slug)
-        mem.save()
-        print("stored:", rec.memory_id, "(u64", rec.u64_id, ")")
-    elif args.cmd == "search":
-        types = set(t for t in args.types.split(",") if t) or None
-        for hit in mem.search(args.query, args.k, types):
-            print(f"  {hit['score']:.3f}  [{hit['memory_type']}]  {hit['memory_id']}: {hit['text'][:80]}")
-    elif args.cmd == "remove":
-        print("removed" if mem.remove(args.id) else "not found")
-        mem.save()
+    # `add`/`remove` are read-modify-write cycles, so they load for update and
+    # hold the exclusive lock through save(). `stats`/`search` are pure reads:
+    # they must not hold a lock while they print. `with` guarantees the lock is
+    # released even if the command body raises before save().
+    writing = args.cmd in ("add", "remove")
+    with ProjectMemory() as mem:
+        mem.load(for_update=writing)
+        if args.cmd == "stats":
+            print(json.dumps(mem.stats(), indent=2))
+        elif args.cmd == "add":
+            rec = mem.add(args.text, args.mtype, args.source, args.id,
+                          [t for t in args.tags.split(",") if t],
+                          run_slug=args.run_slug)
+            mem.save()
+            print("stored:", rec.memory_id, "(u64", rec.u64_id, ")")
+        elif args.cmd == "search":
+            types = set(t for t in args.types.split(",") if t) or None
+            for hit in mem.search(args.query, args.k, types):
+                print(f"  {hit['score']:.3f}  [{hit['memory_type']}]  {hit['memory_id']}: {hit['text'][:80]}")
+        elif args.cmd == "remove":
+            print("removed" if mem.remove(args.id) else "not found")
+            mem.save()
 
 
 if __name__ == "__main__":

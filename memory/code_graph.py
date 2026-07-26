@@ -137,9 +137,10 @@ def _call_targets(func_node):
 
 
 def _local_names(func_node):
-    """Plain local-variable names bound within func_node's own scope
-    (assignment targets, for/with targets, except-as), not counting names
-    bound only inside a nested closure.
+    """Names bound within func_node's own scope — parameters, assignment
+    targets, for/with targets, except-as, nested def/class names, and
+    function-local import aliases — not counting names bound only inside a
+    nested closure.
 
     2026-07-25: a bare-name call resolved against module-level defs even
     when the name was shadowed by a local variable in the calling function,
@@ -165,6 +166,18 @@ def _local_names(func_node):
             names.add(sub.id)
         elif isinstance(sub, ast.ExceptHandler) and sub.name:
             names.add(sub.name)
+        # 2026-07-26: parameters were not the only unclaimed binding. A nested
+        # `def helper()` and a function-local `from x import helper` also bind
+        # `helper` in THIS scope, and both were still emitting a *verified* ast
+        # edge to an unrelated module-level helper() (probed, not theorized).
+        # _scope_nodes yields the nested def/lambda node itself before refusing
+        # to descend, so its NAME is ours to claim even though its body is not.
+        elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef,
+                              ast.ClassDef)):
+            names.add(sub.name)
+        elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+            for alias in sub.names:
+                names.add((alias.asname or alias.name).split(".")[0])
     return names
 
 

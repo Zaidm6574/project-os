@@ -50,38 +50,63 @@ SECTION_TYPES = {  # 19-memory-harvest.md heading prefix -> shared-brain type
 # So stop guessing and use the STRUCTURE instead (adversarial verify 2026-07-25):
 #
 #   * In a TABLE, the lesson is the FIRST cell and a verdict lives in a LATER
-#     column. Marker matching therefore runs on cells[1:] only, and may be
-#     permissive there — a status cell can say anything after the marker.
-#   * A BULLET has no status column, so only an EXPLICIT annotation counts:
-#     either a directive that is never ordinary prose ("do not harvest",
-#     "private-only"), or a marker followed by real annotation punctuation
-#     ("Rejected: dupe", "[Rejected] ...").
+#     column. Later columns are therefore judged permissively: a standalone
+#     marker ANYWHERE in them is a verdict ("No — rejected for reuse").
+#   * The FIRST cell and a BULLET are free prose with no status column, so only
+#     an EXPLICIT annotation counts there: a directive that is never ordinary
+#     prose ("do not harvest", "private-only"), a marker followed by real
+#     annotation punctuation ("Rejected: dupe", "[Rejected] ..."), or a cell
+#     that is NOTHING BUT the marker ("Rejected", "**REJECTED**").
+#
+# The first cell is checked too. Restricting the check to cells[1:] (fix round 1,
+# 2026-07-25) was more permissive than the bug it replaced: a verdict written in
+# column one, or a marker later inside a status cell, harvested straight through
+# into a PUBLIC brain. A missed marker leaks; an over-eager one only costs a row
+# that `DROPPED` reports out loud, so this side fails closed.
 #
 # `(?![-\w])` keeps the marker a standalone word, so the compound
-# "Reject-first workflow ..." is not treated as a rejection.
+# "Reject-first workflow ..." is not treated as a rejection, and "Rejects are
+# logged" / "rejecting a plan" stay ordinary prose.
 _MARKER = (r"(?:rejected|rejection|reject|private[\s-]?only|"
            r"do[\s-]?not[\s-]?harvest)")
 
 # For table cells past the first: marker at the start, anything after it.
 REJECT_CELL = re.compile(r"^[\W_]*" + _MARKER + r"(?![-\w])", re.I)
 
-# Directives that are never ordinary prose — safe to honour anywhere.
-REJECT_DIRECTIVE = re.compile(
-    r"^[\W_]*(?:private[\s-]?only|do[\s-]?not[\s-]?harvest)(?![-\w])", re.I)
+# Same marker anywhere inside a status/verdict column, not just at its start:
+# "Not approved, rejected" and "No — private-only" are verdicts too.
+REJECT_CELL_ANY = re.compile(r"(?<![-\w])" + _MARKER + r"(?![-\w])", re.I)
 
-# For free-text bullets: require explicit annotation punctuation after the
-# marker, so an ordinary sentence like "Rejection criteria belong in the
-# rubric" is kept while "Rejected: dupe" is dropped.
+# Directives that are never ordinary prose — honoured anywhere in the text.
+REJECT_DIRECTIVE = re.compile(
+    r"(?<![-\w])(?:private[\s-]?only|do[\s-]?not[\s-]?harvest)(?![-\w])", re.I)
+
+# For free prose (a bullet, or a table's lesson cell): require explicit
+# annotation punctuation after the marker, so an ordinary sentence like
+# "Rejection criteria belong in the rubric" is kept while "Rejected: dupe",
+# "Rejected — dupe" and "Rejected, dupe" are dropped. The comma and semicolon
+# were missing, so "Rejected, this holds a private token" harvested through.
 REJECT_BULLET = re.compile(
-    r"^[\W_]*" + _MARKER + r"(?![-\w])[\s*_`]*[:\]\)\-–—]", re.I)
+    r"^[\W_]*" + _MARKER + r"(?![-\w])[\s*_`]*[:;,\[\(\]\)\-–—]", re.I)
+
+# Prose that is NOTHING BUT the marker is a verdict, not a sentence.
+REJECT_ONLY = re.compile(r"^[\W_]*" + _MARKER + r"[\W_]*$", re.I)
 
 
 def _is_reject_bullet(text):
-    return bool(REJECT_DIRECTIVE.match(text) or REJECT_BULLET.match(text))
+    """Free-prose rule: bullets and a table row's lesson cell."""
+    return bool(REJECT_DIRECTIVE.search(text)
+                or REJECT_BULLET.match(text)
+                or REJECT_ONLY.match(text))
+
+
+def _is_reject_verdict(cell):
+    """Status-column rule: a standalone marker anywhere in the cell."""
+    return bool(REJECT_CELL_ANY.search(cell))
 
 
 # Kept as an alias so existing callers/tests that reference REJECT_ROW keep
-# working; it is the TABLE-cell rule.
+# working; it is the start-anchored TABLE-cell rule.
 REJECT_ROW = REJECT_CELL
 
 # Rows skipped because a cell carried a rejection/private marker. Reported at
@@ -153,15 +178,18 @@ def bullets_by_section(md):
             if (not first or set(first) <= {"-", ":", " "}  # separator row
                     or first.lower() in ("lesson", "preference", "pattern", "safeguard")):
                 continue
-            # cells[1:] only: cells[0] IS the lesson text, so matching a
-            # marker there dropped real lessons (adversarial verify 2026-07-25).
-            if any(REJECT_CELL.match(c) for c in cells[1:]):
+            # cells[0] IS the lesson, so it gets the free-prose rule (matching
+            # a bare marker there dropped real lessons -- adversarial verify
+            # 2026-07-25); cells[1:] are status columns and get the permissive
+            # verdict rule. Skipping cells[0] entirely let "| Rejected: holds a
+            # private token | ... |" harvest through.
+            if _is_reject_bullet(first) or any(_is_reject_verdict(c) for c in cells[1:]):
                 # Record it. Silent filtering is why the old over-broad pattern
                 # went unnoticed: a harvest that drops rows must say how many.
                 DROPPED.append(line.strip()[:120])
                 continue
             text = re.sub(r"\*\*(.+?)\*\*", r"\1", first).strip()
-            extra = next((c for c in cells[1:] if c and not REJECT_CELL.match(c)), "")
+            extra = next((c for c in cells[1:] if c and not _is_reject_verdict(c)), "")
             if text:
                 yield cur, (text + (f" — {extra}" if extra else ""))[:400]
 

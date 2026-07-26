@@ -78,8 +78,10 @@ def main():
             _brain = None
         finally:
             sys.path.pop(0)
-    if _brain is not None and hasattr(_brain, "record_secret_hit"):
-        field = _brain.record_secret_hit(record)
+    _gate = getattr(_brain, "record_secret_path", None) or getattr(
+        _brain, "record_secret_hit", None)
+    if _gate is not None and getattr(_brain, "SECRET_SCAN_EXHAUSTIVE", False):
+        field = _gate(record)
         if field:
             print(
                 f"REFUSED: field '{field}' looks like it contains a secret. "
@@ -87,6 +89,15 @@ def main():
                 "brain and must never carry credentials.",
                 file=sys.stderr,
             )
+            sys.exit(2)
+        if not isinstance(record, dict):
+            # shared-brain.jsonl is one JSON OBJECT per line: central_brain.py
+            # and mneme_adapter.py both call .get() on every line they read.
+            # A bare string/list/number used to be appended anyway (and, before
+            # 2026-07-26, skipped the secret gate outright because
+            # record_secret_hit early-returned None for a non-dict).
+            print("REFUSED: shared-brain.jsonl takes one JSON OBJECT per line; "
+                  f"got a bare {type(record).__name__}.", file=sys.stderr)
             sys.exit(2)
     else:
         # Fail closed on ALL failure shapes, including the addon simply not
@@ -99,7 +110,12 @@ def main():
                if not os.path.isdir(_brain_dir) else
                "could not be imported" if _brain is None
                else "has no record_secret_hit(); it may be a different "
-                    "module named 'brain' that shadowed it on sys.path")
+                    "module named 'brain' that shadowed it on sys.path"
+               if _gate is None
+               else "does not advertise SECRET_SCAN_EXHAUSTIVE, so it screens "
+                    "an allowlist of field names instead of the whole payload "
+                    "and would pass a secret hidden in any other field "
+                    "(audit finding, 2026-07-26)")
         print(f"REFUSED: the brain privacy gate {why}; refusing to append "
               "unscreened. Check addons/full-engine/brain/brain.py.",
               file=sys.stderr)
@@ -112,7 +128,13 @@ def main():
         sys.exit(1)
     try:
         with open(SHARED_BRAIN, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
+            # Write the object that was SCANNED, not the raw input text. JSON
+            # allows duplicate keys and json.loads keeps only the last, so
+            # `{"text":"<secret>","text":"clean"}` was screened as clean while
+            # the verbatim line carrying the secret went into the brain
+            # (audit finding, 2026-07-26). Re-serializing makes
+            # scanned-bytes == written-bytes.
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
     finally:

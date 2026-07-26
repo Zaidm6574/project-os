@@ -79,10 +79,24 @@ SECRET_PATTERNS = [
     re.compile(r"(?i)(api[_-]?key|secret|password|passwd|token|bearer)\s*[:=]\s*\S{6,}"),
 ]
 
-# Every field of a record that can carry text a human pasted. The audit found
-# only `text` was scanned, so a secret in `tags` or `source` synced through the
-# approved-summary path untouched.
+# Historical allowlist of the fields a human was expected to paste text into.
+# KEPT FOR REFERENCE ONLY -- record_secret_hit() no longer consults it. The
+# 2026-07-26 audit found the allowlist WAS the hole: a credential in any field
+# outside these eight (a nested dict, `metadata`, `author`, `url`, a custom key)
+# was written through unscanned, as was a non-dict payload (a bare JSON string
+# or list). The gate is now exhaustive by construction instead: it walks the
+# WHOLE payload. Do not reintroduce a field allowlist here.
 SCANNED_FIELDS = ("text", "summary", "note", "content", "tags", "source", "id", "title")
+
+# Depth cap for the exhaustive walk. Nothing any writer produces nests this
+# deep, so a payload that exceeds it is REFUSED rather than truncated --
+# truncating would hand back the bypass (bury the key 200 levels down).
+MAX_SCAN_DEPTH = 64
+
+# Marker other writers (scripts/brain_append.py) assert on, so importing an
+# old or shadowing `brain` module that only scans an allowlist fails closed
+# instead of silently screening eight fields.
+SECRET_SCAN_EXHAUSTIVE = True
 
 
 def _safe_path(path: str) -> str:
@@ -122,31 +136,116 @@ def _looks_like_secret(text: str) -> bool:
     return any(pattern.search(text) for pattern in SECRET_PATTERNS)
 
 
-def _iter_scannable(value):
-    """Yield every string reachable inside a record value (lists/dicts included)."""
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for v in value.values():
-            yield from _iter_scannable(v)
-    elif isinstance(value, (list, tuple, set)):
-        for v in value:
-            yield from _iter_scannable(v)
+class _Unscannable(Exception):
+    """A payload holds a value the secret scan cannot read -- refuse it.
 
-
-def record_secret_hit(record: dict) -> str | None:
-    """Return the offending field name when any scanned field holds a secret.
-
-    Scans SCANNED_FIELDS rather than `text` alone -- a secret pasted into a tag
-    or a source label is still a secret, and the approved-summary sync path
-    copies those fields verbatim.
+    Fail closed: an unreadable value is treated exactly like a detected secret,
+    because "we could not look" must never be spelled "it is clean".
     """
-    if not isinstance(record, dict):
+
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+        self.path = path
+
+
+# Scalars that cannot carry a credential shape, so they need no scan. bool is an
+# int subclass, so it is covered; str/bytes are handled before this check.
+_SAFE_SCALARS = (int, float, complex, type(None))
+
+_PAYLOAD_ROOT = "<payload>"
+
+
+def _child_path(path: str, key: str) -> str:
+    return path + "." + key if path else key
+
+
+def _iter_scannable_items(value, root: str = ""):
+    """Yield ``(path, text)`` for EVERY string reachable inside ``value``.
+
+    Exhaustive by construction rather than by an allowlist of field names
+    (audit 2026-07-26). Covered: strings at any depth, dict KEYS as well as
+    values, list/tuple/set/frozenset elements, bytes (decoded), and a non-dict
+    top-level payload such as a bare JSON string or list. Anything whose type
+    cannot be read raises _Unscannable so the caller refuses it.
+
+    Iterative (explicit stack) so a hostile nesting depth cannot raise
+    RecursionError inside the privacy gate, and `seen` keeps a self-referential
+    or heavily shared structure from looping or blowing up exponentially --
+    every container is still walked once, so nothing goes unscanned.
+    """
+    stack = [(root, value, 0)]
+    seen = set()
+    while stack:
+        path, node, depth = stack.pop()
+        if depth > MAX_SCAN_DEPTH:
+            raise _Unscannable(path or _PAYLOAD_ROOT)
+        if isinstance(node, str):
+            yield path or _PAYLOAD_ROOT, node
+        elif isinstance(node, (bytes, bytearray)):
+            yield path or _PAYLOAD_ROOT, node.decode("utf-8", "replace")
+        elif isinstance(node, _SAFE_SCALARS):
+            continue
+        elif isinstance(node, dict):
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            for key, sub in node.items():
+                if isinstance(key, str):
+                    kpath = _child_path(path, key)
+                    yield kpath, key
+                elif isinstance(key, _SAFE_SCALARS):
+                    kpath = _child_path(path, repr(key))
+                else:
+                    raise _Unscannable(_child_path(path, "<key>"))
+                stack.append((kpath, sub, depth + 1))
+        elif isinstance(node, (list, tuple, set, frozenset)):
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            for i, sub in enumerate(node):
+                stack.append(("%s[%d]" % (path or _PAYLOAD_ROOT, i), sub, depth + 1))
+        else:
+            raise _Unscannable(path or _PAYLOAD_ROOT)
+
+
+def _iter_scannable(value):
+    """Yield every string reachable inside a value (kept for callers/back-compat)."""
+    for _path, chunk in _iter_scannable_items(value):
+        yield chunk
+
+
+def record_secret_hit(record) -> "str | None":
+    """Return the offending top-level field name when a payload holds a secret.
+
+    The 2026-07-25 version scanned a fixed SCANNED_FIELDS allowlist and
+    early-returned None for a non-dict payload, so a credential in any other
+    key -- or in a bare JSON string -- was written through unscanned. It now
+    scans the whole payload (see _iter_scannable_items) and fails closed on a
+    value it cannot read.
+
+    Returns the TOP-LEVEL name so long-standing callers keep getting a field
+    name; use record_secret_path() for the full dotted path to the offender.
+    """
+    path = record_secret_path(record)
+    if path is None:
         return None
-    for field in SCANNED_FIELDS:
-        for chunk in _iter_scannable(record.get(field)):
+    head = re.split(r"[.\[]", path, maxsplit=1)[0]
+    return head or path
+
+
+def record_secret_path(record) -> "str | None":
+    """Like record_secret_hit(), but returns the full path to the offender.
+
+    e.g. "metadata.author.note" or "tags[2]" -- what a human needs in order to
+    know WHICH value to redact, which a bare field name cannot express once the
+    scan goes all the way down.
+    """
+    try:
+        for path, chunk in _iter_scannable_items(record):
             if _looks_like_secret(chunk):
-                return field
+                return path
+    except _Unscannable as exc:
+        return exc.path
     return None
 
 
@@ -157,7 +256,7 @@ def gate_record(record: dict, *, where: str) -> dict:
     `import --into`, and scripts/brain_append.py did not -- so the refusal was
     trivially bypassed by using a different verb. One gate, all writers.
     """
-    field = record_secret_hit(record)
+    field = record_secret_path(record)
     if field:
         sys.exit(
             f"refuse: {where} record field '{field}' looks like it contains a "
@@ -170,9 +269,11 @@ def gate_record(record: dict, *, where: str) -> dict:
 def gate_records(records, *, where: str):
     """Gate a batch, reporting the index of the first offender."""
     for i, record in enumerate(records):
-        field = record_secret_hit(record)
+        field = record_secret_path(record)
         if field:
-            rid = record.get("id", f"#{i}")
+            # a non-dict record has no .get; the gate must still report it
+            # rather than dying with an AttributeError inside the refusal path.
+            rid = record.get("id", f"#{i}") if isinstance(record, dict) else f"#{i}"
             sys.exit(
                 f"refuse: {where} record {rid} field '{field}' looks like it "
                 "contains a secret. Redact it and retry."

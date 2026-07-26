@@ -33,6 +33,28 @@ ROOT = Path(__file__).resolve().parents[1]
 ENGINE_MEMORY = ROOT / "addons" / "full-engine" / "memory"
 BRAIN_DIR = ROOT / "addons" / "full-engine" / "brain"
 
+# osvec_adapter.py is an OPTIONAL add-on that imports numpy at module scope and
+# uses it on its core add/search path, so it cannot be exercised on a
+# stdlib-only interpreter. CI runs python 3.9/3.10/3.x with no pip install step,
+# where importing it raises ModuleNotFoundError. Per the house rule in
+# .github/workflows/test.yml, a below-floor dependency SKIPS with a reason --
+# it never fails, and it never gets papered over by making the add-on's numpy
+# import lazy (numpy is genuinely required there, not optional).
+try:
+    import numpy  # noqa: F401  (probe only)
+    HAVE_NUMPY = True
+except ImportError:  # pragma: no cover - depends on the interpreter
+    HAVE_NUMPY = False
+
+NO_NUMPY_REASON = (
+    "numpy is not installed on this interpreter, and "
+    "addons/full-engine/memory/osvec_adapter.py imports numpy at module scope "
+    "(it is required, not optional -- the add/search path calls np.float32), "
+    "so the vector-memory secret gate cannot be loaded here. "
+    "Install numpy to run this check."
+)
+needs_numpy = unittest.skipUnless(HAVE_NUMPY, NO_NUMPY_REASON)
+
 
 def load(name: str, path: Path):
     spec = importlib.util.spec_from_file_location(name, path)
@@ -145,25 +167,118 @@ class HarvestDropsRowsNotWords(unittest.TestCase):
             with self.subTest(cell=cell):
                 self.assertIsNone(self.h.REJECT_CELL.match(cell))
 
-    def test_the_lesson_cell_itself_is_never_marker_matched(self):
-        """cells[0] holds the lesson; a verdict lives in a LATER column.
+    def setUp(self):
+        # DROPPED is module state; each behavioural test inspects its own rows.
+        del self.h.DROPPED[:]
 
-        Matching markers against cells[0] is what made every text-only regex
-        drop real lessons (adversarial verify 2026-07-25).
-        """
-        src = (ROOT / "scripts" / "harvest.py").read_text(encoding="utf-8")
-        body = src.split("def bullets_by_section", 1)[1]
-        self.assertIn(
-            "cells[1:]", body,
-            "the table branch still marker-matches the lesson cell itself",
+    def _harvest(self, md):
+        """Real parse of a real 19-memory-harvest.md body -> harvested texts."""
+        return [text for _typ, text in self.h.bullets_by_section(md)]
+
+    def _lessons_table(self, *rows):
+        return (
+            "## Lessons\n\n"
+            "| Lesson | Evidence | Future Safeguard | Approved For Reuse? |\n"
+            "|---|---|---|---|\n"
+            + "".join(rows)
         )
+
+    def test_a_lesson_cell_that_discusses_rejection_is_still_harvested(self):
+        """cells[0] holds the LESSON, so verdict matching must not apply there.
+
+        Applying the status-column rule to the lesson cell is what made every
+        text-only regex drop real lessons (adversarial verify 2026-07-25). This
+        asserts on the harvested OUTPUT, not on the source text: the previous
+        version of this test only checked that the string "cells[1:]" appeared
+        somewhere in bullets_by_section, which an unrelated pre-existing line
+        already satisfied, so the fix could be reverted entirely and it passed.
+        """
+        md = self._lessons_table(
+            "| Evaluator must reject on missing evidence | wave 2 | add a gate | Approved |\n",
+            "| Rejection criteria belong in the rubric | wave 3 | write them down | Yes |\n",
+            "| Reject-first workflow works well when scoping | wave 4 | keep it | Yes |\n",
+        )
+        got = self._harvest(md)
+        self.assertEqual(len(got), 3, f"a real lesson was dropped: {got}")
+        self.assertTrue(got[0].startswith("Evaluator must reject on missing evidence"))
+        self.assertEqual(self.h.DROPPED, [], "nothing here is a verdict")
+
+    def test_a_verdict_in_the_first_cell_still_drops_the_row(self):
+        """Checking only cells[1:] let a column-one verdict harvest through.
+
+        harvest feeds a PUBLIC brain, so a missed marker is a content leak.
+        """
+        md = self._lessons_table(
+            "| Rejected: holds a private access token | wave 2 | none | |\n",
+            "| Rejected | this row holds a private token | none | |\n",
+            "| **Private-only** | internal client note | none | |\n",
+        )
+        got = self._harvest(md)
+        self.assertEqual(got, [], f"a rejected row harvested through: {got}")
+        self.assertEqual(len(self.h.DROPPED), 3, self.h.DROPPED)
+
+    def test_a_marker_later_inside_a_status_cell_drops_the_row(self):
+        """Anchoring the status rule at the cell start let verdicts through."""
+        for verdict in ("No — rejected for reuse", "not approved, rejected",
+                        "Yes but private-only", "keep internal; do not harvest"):
+            with self.subTest(verdict=verdict):
+                del self.h.DROPPED[:]
+                md = self._lessons_table(
+                    "| A lesson that must not reach the public brain | wave 2 "
+                    f"| none | {verdict} |\n"
+                )
+                self.assertEqual(
+                    self._harvest(md), [],
+                    f"row harvested through despite verdict {verdict!r}",
+                )
+                self.assertEqual(len(self.h.DROPPED), 1)
+
+    def test_a_bullet_rejection_annotated_with_a_comma_is_dropped(self):
+        """`,` was missing from the annotation punctuation class."""
+        bullet = "Rejected, this contains a private token, do not keep"
+        self.assertTrue(
+            self.h._is_reject_bullet(bullet),
+            "a comma-annotated rejection was treated as ordinary prose",
+        )
+        got = self._harvest("## Lessons\n\n- " + bullet + "\n")
+        self.assertEqual(got, [], f"a rejected bullet harvested through: {got}")
+        self.assertEqual(len(self.h.DROPPED), 1)
+
+    def test_a_bare_marker_bullet_is_dropped(self):
+        """Prose that is nothing but the marker is a verdict, not a sentence."""
+        for bullet in ("Rejected", "**REJECTED**", "rejected."):
+            with self.subTest(bullet=bullet):
+                del self.h.DROPPED[:]
+                self.assertEqual(
+                    self._harvest("## Lessons\n\n- " + bullet + "\n"), [],
+                    f"bare verdict harvested through: {bullet!r}",
+                )
+
+    def test_a_directive_anywhere_in_a_bullet_is_honoured(self):
+        """"do not harvest" / "private-only" are never ordinary prose."""
+        bullet = "Client onboarding checklist, private-only, keep it internal"
+        got = self._harvest("## Lessons\n\n- " + bullet + "\n")
+        self.assertEqual(got, [], f"a private-only bullet harvested through: {got}")
+
+    def test_ordinary_bullets_and_rows_still_harvest(self):
+        """The filter must not eat the ordinary case (this is the whole point)."""
+        md = (
+            "## Lessons\n\n- Verify a fix by reverting it and watching the test fail\n"
+            + self._lessons_table(
+                "| Read the record, not a projection of it | wave 1 | print whole rows | Approved |\n"
+            )
+        )
+        got = self._harvest(md)
+        self.assertEqual(len(got), 2, got)
+        self.assertIn("Read the record, not a projection of it — wave 1", got[1])
+        self.assertEqual(self.h.DROPPED, [])
 
     def test_dropped_rows_are_recorded_for_reporting(self):
         """Silent filtering is why the over-broad pattern went unnoticed."""
-        self.assertTrue(
-            hasattr(self.h, "DROPPED"),
-            "harvest no longer tracks what it filtered out",
-        )
+        row = "| secret client detail | wave 2 | none | Rejected |\n"
+        self.assertEqual(self._harvest(self._lessons_table(row)), [])
+        self.assertEqual(len(self.h.DROPPED), 1, "the dropped row was not reported")
+        self.assertIn("secret client detail", self.h.DROPPED[0])
 
 
 class SecretPatternsStayInSync(unittest.TestCase):
@@ -185,6 +300,7 @@ class SecretPatternsStayInSync(unittest.TestCase):
             "memory would accept keys the brain refuses",
         )
 
+    @needs_numpy
     def test_osvec_detects_modern_key_formats(self):
         osvec = load("osvec_fix", ENGINE_MEMORY / "osvec_adapter.py")
         for name, secret in {
@@ -201,6 +317,7 @@ class SecretPatternsStayInSync(unittest.TestCase):
                     f"{name} was NOT detected by vector memory",
                 )
 
+    @needs_numpy
     def test_osvec_does_not_false_positive_on_ordinary_text(self):
         osvec = load("osvec_fp", ENGINE_MEMORY / "osvec_adapter.py")
         for text in (
@@ -215,8 +332,11 @@ class SecretPatternsStayInSync(unittest.TestCase):
                 )
 
     def test_osvec_scans_tags_and_source_not_only_text(self):
-        """The exact hole brain.py had: a secret in a non-body field."""
-        osvec = load("osvec_fields", ENGINE_MEMORY / "osvec_adapter.py")
+        """The exact hole brain.py had: a secret in a non-body field.
+
+        The source-level half needs no numpy, so it runs everywhere; only the
+        live `looks_like_secret` call has to skip on a stdlib-only interpreter.
+        """
         secret = "sk-ant-api03-" + "A" * 40
         src = (ENGINE_MEMORY / "osvec_adapter.py").read_text(encoding="utf-8")
         body = src.split("def add(", 1)[1].split("\n    def ", 1)[0]
@@ -226,6 +346,9 @@ class SecretPatternsStayInSync(unittest.TestCase):
                     field, body.split("secret pattern")[0],
                     f"add() does not scan '{field}' for secrets",
                 )
+        if not HAVE_NUMPY:
+            self.skipTest(NO_NUMPY_REASON)
+        osvec = load("osvec_fields", ENGINE_MEMORY / "osvec_adapter.py")
         self.assertIsNotNone(osvec.looks_like_secret(secret))
 
 
@@ -419,6 +542,7 @@ class Round2AdversarialBypasses(unittest.TestCase):
                     f"annotated rejection harvested through as a lesson: {cell!r}",
                 )
 
+    @needs_numpy
     def test_bare_modern_credentials_are_detected(self):
         """Pasted with no `KEY=` label — the realistic accidental-leak shape."""
         osvec = load("osvec_r2", ENGINE_MEMORY / "osvec_adapter.py")
