@@ -65,14 +65,43 @@ SIDECAR_PATH = os.path.join(STORE_DIR, "project.sidecar.json")
 # --------------------------------------------------------------------------- #
 # Secret scanning - never let credentials into memory
 # --------------------------------------------------------------------------- #
+# MUST stay byte-identical to SECRET_PATTERNS in brain/brain.py. Vector memory
+# and the brain are two doors into the same store, and this copy had drifted to
+# a 7-pattern list whose `sk-[A-Za-z0-9]{16,}` could not cross a hyphen or an
+# underscore -- so sk-ant-, sk-proj-, and every modern key format walked in
+# through the door the brain had already locked. The secret-pattern parity test
+# fails if these lists ever diverge again (audit 2026-07-25).
 _SECRET_PATTERNS = [
-    r"sk-[A-Za-z0-9]{16,}",                       # OpenAI-style
-    r"AKIA[0-9A-Z]{16}",                          # AWS access key id
-    r"ghp_[A-Za-z0-9]{20,}",                      # GitHub PAT
-    r"xox[baprs]-[A-Za-z0-9-]{10,}",              # Slack
-    r"AIza[0-9A-Za-z_\-]{20,}",                   # Google API key
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----",        # PEM private key
-    r"(?i)(api[_-]?key|secret|password|passwd|token)\s*[:=]\s*\S{6,}",
+    r"(?<![A-Za-z0-9_])sk-[A-Za-z0-9_\-]{16,}",
+    r"(?<![A-Za-z0-9_])sk_(live|test)_[A-Za-z0-9]{16,}",
+    r"(?<![A-Za-z0-9_])rk_(live|test)_[A-Za-z0-9]{16,}",
+    r"AKIA[0-9A-Z]{16}",
+    r"ASIA[0-9A-Z]{16}",
+    r"(?<![A-Za-z0-9_])ghp_[A-Za-z0-9]{20,}",
+    r"(?<![A-Za-z0-9_])gho_[A-Za-z0-9]{20,}",
+    r"(?<![A-Za-z0-9_])ghs_[A-Za-z0-9]{20,}",
+    r"github_pat_[A-Za-z0-9_]{20,}",
+    r"(?<![A-Za-z0-9_])AIza[0-9A-Za-z_\-]{20,}",
+    r"(?<![A-Za-z0-9_])ya29\.[A-Za-z0-9_\-]{20,}",
+    r"(?<![A-Za-z0-9_])xox[baprs]-[A-Za-z0-9\-]{10,}",
+    r"(?<![A-Za-z0-9_])figd_[A-Za-z0-9_\-]{20,}",
+    r"SG\.[A-Za-z0-9_\-]{20,}",
+    r"\bAC[0-9a-fA-F]{32}\b",
+    r"\bSK[0-9a-fA-F]{32}\b",
+    r"(?<![A-Za-z0-9_])glpat-[A-Za-z0-9_\-]{16,}",
+    r"(?<![A-Za-z0-9_])dop_v1_[A-Za-z0-9]{32,}",
+    r"(?<![A-Za-z0-9_])npm_[A-Za-z0-9]{30,}",
+    r"(?<![A-Za-z0-9_])hf_[A-Za-z0-9]{30,}",
+    r"(?<![A-Za-z0-9_])ntn_[A-Za-z0-9]{40,}",
+    r"(?<![A-Za-z0-9_])lin_api_[A-Za-z0-9]{30,}",
+    r"(?<![A-Za-z0-9_])vercel_[A-Za-z0-9]{20,}",
+    r"(?i)https://[0-9a-f]{32}@[\w.\-]+/\d+",
+    r"(?i)AccountKey\s*=\s*[A-Za-z0-9+/]{40,}={0,2}",
+    r"https://hooks\.slack\.com/services/T[A-Za-z0-9/]{20,}",
+    r"eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.",
+    r"(?i)\b(postgres(ql)?|mysql|mongodb(\+srv)?|redis|amqp)://[^\s:@/]+:[^\s@/]+@",
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    r"(?i)(api[_-]?key|secret|password|passwd|token|bearer)\s*[:=]\s*\S{6,}",
 ]
 _SECRET_RE = [re.compile(p) for p in _SECRET_PATTERNS]
 
@@ -231,12 +260,21 @@ class ProjectMemory:
     # ---- write ----
     def add(self, text, memory_type, source_file="", memory_id=None, tags=None,
             run_slug=None):
-        secret = looks_like_secret(text)
-        if secret:
-            raise ValueError(
-                f"Refusing to store memory: it matches a secret pattern ({secret}). "
-                "Never put API keys/passwords in OSVec."
-            )
+        # Scan EVERY field a human can paste into, not just `text`. brain.py had
+        # the identical hole: a secret in `tags` or `source` synced untouched
+        # because only the body was checked (audit 2026-07-25).
+        for field, value in (("text", text), ("source_file", source_file),
+                             ("memory_id", memory_id), ("tags", tags)):
+            for chunk in (value if isinstance(value, (list, tuple)) else [value]):
+                if not isinstance(chunk, str):
+                    continue
+                secret = looks_like_secret(chunk)
+                if secret:
+                    raise ValueError(
+                        f"Refusing to store memory: field '{field}' matches a "
+                        f"secret pattern ({secret}). "
+                        "Never put API keys/passwords in OSVec."
+                    )
         if memory_type not in self.VALID_TYPES:
             raise ValueError(f"memory_type must be one of {sorted(self.VALID_TYPES)}")
         memory_id = memory_id or f"{memory_type}-{int(time.time()*1000)}"

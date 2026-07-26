@@ -169,7 +169,13 @@ def compute_goal_anchor(plan):
         for rec in plan.get("instructions", [])
         if isinstance(rec, dict) and rec.get("trust") == "authoritative")
     payload = json.dumps({
-        "v": "goal-anchor/1",
+        "v": "goal-anchor/2",
+        # `schema` MUST be inside the digest. goal-anchor/1 omitted it, so
+        # rewriting "plan/v2" -> "plan/v1" left the anchor matching while
+        # turning OFF every plan/v2 hardening check (instruction provenance,
+        # the authoritative-instruction requirement, and anchor verification
+        # itself). The downgrade was free (audit 2026-07-25).
+        "schema": plan.get("schema", ""),
         "id": plan.get("id", ""),
         "created": plan.get("created", ""),
         "goal": plan.get("goal", ""),
@@ -255,6 +261,41 @@ def validate(plan):
     if plan["status"] not in STATUSES:
         probs.append(f"bad status: {plan['status']}")
     hardened = plan.get("schema") == HARDENED_SCHEMA
+    # Downgrade guard, independent of the digest: a plan that carries hardened
+    # fields but declares a weaker schema is a plan/v2 with its checks switched
+    # off. Refuse it outright rather than validating it as a v1 (audit
+    # 2026-07-25).
+    if not hardened and ("goal_anchor" in plan or "instructions" in plan):
+        probs.append(
+            "schema downgrade: plan declares %r but carries plan/v2 fields "
+            "(%s). Restore schema=%s or remove those fields."
+            % (plan.get("schema"),
+               ", ".join(sorted(k for k in ("goal_anchor", "instructions") if k in plan)),
+               HARDENED_SCHEMA)
+        )
+        return probs
+
+    # Post-approval downgrade guard. The field-presence check above cannot see a
+    # plan that had goal_anchor AND instructions stripped together -- that is
+    # byte-indistinguishable from a plan that was never hardened. But `approve`
+    # pins the schema the human signed off on, so any later change to `schema`
+    # IS visible. Once a plan has left `planned`, that pin must exist and match:
+    # to downgrade you would have to reset status and go back through the human
+    # gate (adversarial verify 2026-07-25).
+    if plan.get("approved_at"):
+        approved_schema = plan.get("approved_schema")
+        if approved_schema is None:
+            probs.append(
+                "plan records approved_at but no approved_schema pin; the "
+                "approval record was edited. Re-run `approve` to re-establish "
+                "the human gate."
+            )
+        elif approved_schema != plan.get("schema"):
+            probs.append(
+                "schema changed after approval: approved as %r, now declares %r. "
+                "This disables the plan/v2 checks the human approved."
+                % (approved_schema, plan.get("schema"))
+            )
     instruction_refs = set()
     if hardened or "instructions" in plan:
         instruction_refs = _validate_instructions(plan, probs)
@@ -534,6 +575,13 @@ def main():
                 sys.exit(1)
             plan["status"] = "approved"
             plan["approved_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+            # Pin the schema the HUMAN actually approved. Stripping goal_anchor
+            # and instructions together while setting schema back to plan/v1
+            # makes a hardened plan indistinguishable from a native v1 -- the
+            # artifact alone cannot tell. Recording what was approved makes the
+            # downgrade detectable at compile time (adversarial verify
+            # 2026-07-25).
+            plan["approved_schema"] = plan.get("schema")
         plan = locked_update(pid, _approve)
         print(f"{plan['id']} approved — compile when ready")
         sys.exit(0)

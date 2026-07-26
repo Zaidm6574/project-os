@@ -114,11 +114,21 @@ def bootstrap(target: Path, force: bool, dry_run: bool = False) -> list[str]:
     # Vector-memory + graph adapters are code, not personal data — the installer
     # must deliver what the README promises. The core adapters ship from the
     # repo's own memory/; the full-engine helpers fill in anything missing.
+    delivered = set()
     for adapter in ("mneme_adapter.py", "build_graph.py"):
         src = TEMPLATE_ROOT / "memory" / adapter
         if src.is_file():
             results.append(copy_file(src, target / "memory" / adapter, force, dry_run=dry_run))
+            delivered.add(adapter)
     for helper in ("build_graph.py", "osvec_adapter.py"):
+        # Only FILL IN what memory/ did not already deliver. build_graph.py was
+        # listed in BOTH loops, so the second copy overwrote the first: with
+        # --force the older full-engine helper replaced the canonical
+        # memory/build_graph.py and backed the good file up as though it were a
+        # user edit. The comment above always said "fill in anything missing" --
+        # the code did not (audit 2026-07-25).
+        if helper in delivered:
+            continue
         src = FULL_ENGINE_MEMORY / helper
         if src.exists():
             results.append(copy_file(src, target / "memory" / helper, force, dry_run=dry_run))

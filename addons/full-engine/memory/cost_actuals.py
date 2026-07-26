@@ -159,8 +159,29 @@ def _parse_usage(files, main_file):
     return main_totals, sub_totals
 
 
+def unpriced_tiers(totals, prices):
+    """Tiers that consumed tokens but have no entry in the price table.
+
+    Added 2026-07-25. Previously an unknown model tier fell back to
+    {"in": 0.0, "out": 0.0}, so its spend was reported as a confident $0.00 and
+    presented as *measured*. Cost actuals are doctrine-bound to be measured and
+    never hand-entered, which makes a silent zero worse than a loud refusal.
+    """
+    missing = []
+    for tier, counts in totals.items():
+        if tier in prices:
+            continue
+        if any(counts.get(k, 0) for k in ("input", "output", "cache_creation", "cache_read")):
+            missing.append(tier)
+    return sorted(missing)
+
+
 def _compute_cost(totals, prices):
-    """Return {tier: cost_dollars} from a totals dict."""
+    """Return {tier: cost_dollars} from a totals dict.
+
+    An unpriced tier yields 0.0 here; callers MUST consult unpriced_tiers() and
+    refuse to present the result as a measured total. See that function.
+    """
     result = {}
     for tier, counts in totals.items():
         parts = _compute_cost_parts(counts, prices.get(tier, {"in": 0.0, "out": 0.0}))
@@ -502,12 +523,19 @@ def _update_markers(dest, table_md):
 # ---------------------------------------------------------------------------
 
 def run(transcript_path, prices, write, target_path):
-    """Parse transcript, print actuals, optionally update the markdown file."""
+    """Parse transcript, print actuals, optionally update the markdown file.
+
+    Returns a process exit code. Non-zero when a model consumed tokens that the
+    price table cannot price: --write then REFUSES rather than recording a
+    knowingly-incomplete number as a measured actual.
+    """
     files      = _collect_jsonl_files(transcript_path)
     main_t, sub_t = _parse_usage(files, transcript_path)
     main_costs = _compute_cost(main_t, prices)
     sub_costs  = _compute_cost(sub_t,  prices)
     table_md   = _build_table(main_costs, sub_costs, main_t, sub_t, prices)
+
+    missing = sorted(set(unpriced_tiers(main_t, prices)) | set(unpriced_tiers(sub_t, prices)))
 
     block = (
         "## Actuals (estimate vs measured)\n\n"
@@ -517,12 +545,33 @@ def run(transcript_path, prices, write, target_path):
     )
     print(block)
 
+    if missing:
+        sys.stderr.write(
+            "\nUNPRICED MODELS: %s\n"
+            "These consumed tokens but are absent from the price table, so the\n"
+            "total above UNDERSTATES real spend. Add them via --prices JSON (or\n"
+            "to DEFAULT_PRICES) and re-run.\n" % ", ".join(missing)
+        )
+
     if write:
+        if missing:
+            sys.stderr.write(
+                "REFUSING --write: cost actuals must be measured, not partial.\n"
+                "Nothing was written to the ACTUALS block.\n"
+            )
+            return 2
         if target_path is None:
             here = pathlib.Path(__file__).parent
             target_path = here.parent / "blackboard" / "09-cost-estimate.md"
         _update_markers(target_path, table_md)
         print("\nUpdated %s" % target_path, file=sys.stderr)
+
+    # A read-only run is a REPORT: unpriced tiers are printed loudly above, but
+    # the report itself succeeded, so exit 0. Only --write refuses (returns 2
+    # earlier), because that is the path that would record a knowingly-partial
+    # number as a measured actual. Returning 2 from a plain report broke `set -e`
+    # deliver steps that only wanted the table (audit 2026-07-25).
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -838,7 +887,7 @@ def main():
         transcript_path = _find_latest_jsonl()
 
     target_path = pathlib.Path(args.target) if args.target else None
-    run(transcript_path, prices, args.write, target_path)
+    sys.exit(run(transcript_path, prices, args.write, target_path))
 
 
 if __name__ == "__main__":

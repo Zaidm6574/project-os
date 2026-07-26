@@ -47,11 +47,50 @@ def main():
         sys.exit(2)
 
     try:
-        json.loads(line)
+        record = json.loads(line)
     except json.JSONDecodeError as e:
         print(f"REFUSED: not valid JSON ({e}) — shared-brain.jsonl takes one JSON object per line",
               file=sys.stderr)
         sys.exit(2)
+
+    # THE privacy gate (audit 2026-07-25). This is the doctrine-mandated
+    # cross-runtime write path and it had ZERO secret screening, so anything
+    # `brain.py save-chat` refuses could be appended here instead — and
+    # `central_brain.py pull` then redistributed it to other projects.
+    # One gate, all writers: reuse brain.py's rather than forking the patterns.
+    _brain_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "addons", "full-engine", "brain")
+    if os.path.isdir(_brain_dir):
+        sys.path.insert(0, _brain_dir)
+        try:
+            import brain as _brain  # noqa: E402
+        except Exception:
+            _brain = None
+        finally:
+            sys.path.pop(0)
+        if _brain is not None and hasattr(_brain, "record_secret_hit"):
+            field = _brain.record_secret_hit(record)
+            if field:
+                print(
+                    f"REFUSED: field '{field}' looks like it contains a secret. "
+                    "Redact it and retry — the shared brain syncs to the central "
+                    "brain and must never carry credentials.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+        else:
+            # Fail closed on BOTH failure shapes. The first version had an
+            # `elif _brain is None`, so an importable-but-wrong brain module
+            # (missing record_secret_hit, or a different `brain` already in
+            # sys.modules) matched neither branch and appended with no scan at
+            # all (line-comb finding, 2026-07-25).
+            why = ("could not be imported" if _brain is None
+                   else "has no record_secret_hit(); it may be a different "
+                        "module named 'brain' that shadowed it on sys.path")
+            print(f"REFUSED: the brain privacy gate {why}; refusing to append "
+                  "unscreened. Check addons/full-engine/brain/brain.py.",
+                  file=sys.stderr)
+            sys.exit(2)
 
     _bp = os.path.dirname(os.path.abspath(SHARED_BRAIN))
     os.makedirs(_bp, exist_ok=True)

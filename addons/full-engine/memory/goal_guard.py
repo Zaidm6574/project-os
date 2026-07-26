@@ -19,19 +19,90 @@ import re
 import sys
 
 
+class GoalAnchorMissing(Exception):
+    """The goal file has no usable '## Canonical Goal' heading.
+
+    This must never degrade to hashing the empty string. With no anchor EVERY
+    goal hashes identically, so once a roster records that hash the guard reports
+    MATCH forever regardless of how the goal is rewritten -- drift becomes
+    undetectable. A guard that cannot find what it guards must refuse, not answer.
+    """
+
+
+_PLACEHOLDER_GOALS = (
+    "replace this line",
+    "todo: write the one-sentence canonical goal",
+    "tbd",
+    "one sentence",
+)
+
+
+def _is_placeholder(line):
+    """True when the 'goal' is still template text nobody replaced.
+
+    A placeholder hashes to a stable value across EVERY scaffolded run, which
+    is functionally identical to the empty-string hash this guard already
+    refuses: record it once in a roster and the guard reports MATCH forever.
+    """
+    low = line.strip().strip("*`_").casefold()
+    return any(low.startswith(p) or low == p for p in _PLACEHOLDER_GOALS)
+
+
 def canonical_goal(goal_md_text):
-    """First real line after the '## Canonical Goal' heading (no comments/blanks)."""
+    """First real line after the '## Canonical Goal' heading (no comments/blanks).
+
+    Raises GoalAnchorMissing when the heading is absent, or present with no goal
+    line beneath it. Fail closed -- see the exception's docstring.
+    """
     grab = False
+    in_comment = False
     for line in goal_md_text.splitlines():
         s = line.strip()
         if s.startswith("## Canonical Goal"):
             grab = True
             continue
-        if grab:
-            if not s or s.startswith("<!--") or s.startswith("#"):
-                continue
-            return s
-    return ""
+        if not grab:
+            continue
+
+        # Track HTML comment BLOCKS, not just lines that start with '<!--'.
+        # The old check skipped only the opening line, so with the multi-line
+        # explanatory comment this template ships, line 2 of the comment was
+        # returned AS THE GOAL -- every project hashed that same sentence, and
+        # editing the real goal did not change the hash at all. Exactly the
+        # drift-blindness this guard exists to prevent, verified end-to-end
+        # through the documented install flow (2026-07-25).
+        if in_comment:
+            if "-->" in s:
+                in_comment = False
+                rest = s.split("-->", 1)[1].strip()
+                if rest and not rest.startswith("#"):
+                    return rest
+            continue
+        if s.startswith("<!--"):
+            if "-->" not in s:
+                in_comment = True
+            continue
+
+        if not s or s.startswith("#"):
+            continue
+        if _is_placeholder(s):
+            raise GoalAnchorMissing(
+                "the goal under '## Canonical Goal' is still the template "
+                "placeholder (%r). Every run that leaves it hashes identically, "
+                "so drift cannot be detected. Write the real one-sentence goal."
+                % s[:60]
+            )
+        return s
+    if grab:
+        raise GoalAnchorMissing(
+            "'## Canonical Goal' heading present but no goal line beneath it. "
+            "Write the one-sentence canonical goal under that heading."
+        )
+    raise GoalAnchorMissing(
+        "no '## Canonical Goal' heading in the goal file. Without it every goal "
+        "hashes identically and drift cannot be detected. Add that heading with "
+        "the one-sentence canonical goal beneath it."
+    )
 
 
 def goal_hash(goal_line):
@@ -54,8 +125,65 @@ def _read(path):
         return fh.read()
 
 
+def migrate(goal_path, apply=False):
+    """Add a '## Canonical Goal' heading to a goal file that predates it.
+
+    The fail-closed change landed with no migration path, so every goal file
+    written before it became uncheckable (exit 2) until hand-edited -- which in
+    practice means the guard gets skipped rather than fixed. This makes the
+    upgrade mechanical. Seeds the goal line from the first real line under
+    '## Summary' when there is one, else leaves a clearly-marked placeholder.
+    """
+    text = _read(goal_path)
+    if "## Canonical Goal" in text:
+        print("already anchored: %s" % goal_path)
+        return 0
+
+    seed = ""
+    grab = False
+    for line in text.splitlines():
+        s = line.strip()
+        if s.lower().startswith("## summary"):
+            grab = True
+            continue
+        if grab:
+            if not s or s.startswith("<!--") or s.startswith("#"):
+                continue
+            seed = s
+            break
+    placeholder = seed or "TODO: write the one-sentence canonical goal."
+
+    block = (
+        "## Canonical Goal\n\n"
+        "<!-- ONE sentence, hashed by goal_guard.py and recorded in\n"
+        "     21-agent-roster.md. Do not delete this heading. -->\n\n"
+        "%s\n\n" % placeholder
+    )
+    lines = text.splitlines(keepends=True)
+    insert_at = 1 if lines and lines[0].startswith("# ") else 0
+    if insert_at == 1 and len(lines) > 1 and not lines[1].strip():
+        insert_at = 2
+    updated = "".join(lines[:insert_at]) + ("\n" if insert_at else "") + block + "".join(lines[insert_at:])
+
+    if not apply:
+        print("WOULD MIGRATE: %s" % goal_path)
+        print("  seeded goal: %r%s" % (placeholder, "" if seed else "  (PLACEHOLDER -- edit it)"))
+        return 0
+    with open(goal_path, "w", encoding="utf-8") as fh:
+        fh.write(updated)
+    print("migrated: %s" % goal_path)
+    if not seed:
+        print("  WARNING: placeholder goal written -- edit it before trusting the hash")
+    return 0
+
+
 def compare(goal_path, roster_path):
-    line = canonical_goal(_read(goal_path))
+    try:
+        line = canonical_goal(_read(goal_path))
+    except GoalAnchorMissing as exc:
+        # Exit 2 (not 1): this is "cannot check", which is distinct from DRIFT.
+        print("UNANCHORED: %s (%s)" % (exc, goal_path))
+        return 2
     want = goal_hash(line)
     have = recorded_hash(_read(roster_path))
     if have and have == want:
@@ -106,13 +234,25 @@ def main():
     ap.add_argument("roster", nargs="?", help="path to 21-agent-roster.md")
     ap.add_argument("--hash", dest="hash_only", metavar="GOAL_MD",
                     help="print the computed goal hash for GOAL_MD and exit")
+    ap.add_argument("--migrate", metavar="GOAL_MD",
+                    help="add a '## Canonical Goal' heading to a pre-fix goal file")
+    ap.add_argument("--apply", action="store_true",
+                    help="with --migrate: write the change (default is a dry run)")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
 
+    if args.migrate:
+        sys.exit(migrate(args.migrate, apply=args.apply))
     if args.selftest:
         sys.exit(selftest())
     if args.hash_only:
-        print(goal_hash(canonical_goal(_read(args.hash_only))))
+        try:
+            print(goal_hash(canonical_goal(_read(args.hash_only))))
+        except GoalAnchorMissing as exc:
+            # Never emit a hash we cannot stand behind -- recording the
+            # empty-goal hash in a roster is what permanently blinds the guard.
+            sys.stderr.write("UNANCHORED: %s\n" % exc)
+            sys.exit(2)
         sys.exit(0)
     if not args.goal or not args.roster:
         ap.error("need <goal_md> <roster_md> (or --hash GOAL_MD / --selftest)")

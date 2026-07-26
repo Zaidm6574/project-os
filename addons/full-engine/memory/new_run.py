@@ -18,10 +18,49 @@ import argparse
 import os
 import shutil
 import sys
+import tempfile
 import datetime
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BLACKBOARD = os.path.join(ROOT, "blackboard")
+def _find_root(start):
+    """Walk up from `start` to the first dir holding a blackboard source.
+
+    `ROOT = dirname(dirname(__file__))` was wrong for the full-engine addon: it
+    resolved to `addons/full-engine/`, which has no `blackboard/`, so
+    `new_run.py` and `adopt_project.py` died with FileNotFoundError before doing
+    anything. Walking up finds the repo root whether this file is vendored at
+    `memory/` or at `addons/full-engine/memory/` (audit 2026-07-25).
+    """
+    d = os.path.dirname(os.path.abspath(start))
+    while True:
+        for candidate in ("blackboard", "blackboard-template"):
+            if os.path.isdir(os.path.join(d, candidate)):
+                return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            # No blackboard anywhere above us. Fall back to the historical
+            # guess so the error names a real path instead of "/".
+            return os.path.dirname(os.path.dirname(os.path.abspath(start)))
+        d = parent
+
+
+ROOT = _find_root(__file__)
+
+
+def _blackboard_dir():
+    """The template to scaffold runs from, preferring a working `blackboard/`.
+
+    `blackboard/` is gitignored, so a fresh clone of the public repo has only
+    `blackboard-template/`. Without this fallback the very first `new_run.py`
+    invocation after cloning crashed — the scaffolder was broken out of the box
+    (audit 2026-07-25).
+    """
+    live = os.path.join(ROOT, "blackboard")
+    if os.path.isdir(live):
+        return live
+    return os.path.join(ROOT, "blackboard-template")
+
+
+BLACKBOARD = _blackboard_dir()
 RUNS = os.path.join(ROOT, "runs")
 INDEX = os.path.join(RUNS, "INDEX.md")
 
@@ -32,19 +71,45 @@ TIER_FILES = {
 }
 
 
+def template_sources():
+    """Dirs holding numbered blackboard files, in increasing priority.
+
+    The full-engine addon keeps `21-agent-roster.md` in `blackboard-addons/`,
+    not in the blackboard schema. `goal_guard.py` compares a goal against the
+    `Goal hash:` recorded in that roster, so a scaffolded run that never
+    received the file had nothing for the drift guard to read -- the guard
+    shipped with no counterpart in any run it was meant to guard
+    (audit 2026-07-25).
+    """
+    dirs = [BLACKBOARD]
+    addons = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "blackboard-addons")
+    if os.path.isdir(addons):
+        dirs.append(addons)
+    return dirs
+
+
 def numbered_templates(tier):
-    """Return blackboard numbered .md files to copy for a tier."""
+    """Return {filename: source_path} for a tier, addons overriding the base."""
     wanted = TIER_FILES.get(tier, None)
-    out = []
-    for name in sorted(os.listdir(BLACKBOARD)):
-        if not name.endswith(".md"):
-            continue
-        prefix = name[:2]
-        if not prefix.isdigit():
-            continue
-        if wanted is None or prefix in wanted:
-            out.append(name)
-    return out
+    if not os.path.isdir(BLACKBOARD):
+        raise SystemExit(
+            "new_run: no blackboard template found.\n"
+            "  looked for: %s/blackboard/ and %s/blackboard-template/\n"
+            "Copy blackboard-template/ to blackboard/ (or re-run the installer)."
+            % (ROOT, ROOT)
+        )
+    out = {}
+    for src in template_sources():
+        for name in sorted(os.listdir(src)):
+            if not name.endswith(".md"):
+                continue
+            prefix = name[:2]
+            if not prefix.isdigit():
+                continue
+            if wanted is None or prefix in wanted:
+                out[name] = os.path.join(src, name)
+    return dict(sorted(out.items()))
 
 
 SOLO_PACKETS_WAIVER = (
@@ -64,8 +129,8 @@ def scaffold(slug, tier="full"):
         sys.stderr.write("runs/%s/ already exists — refusing to overwrite.\n" % slug)
         return 1
     os.makedirs(dest)
-    for name in numbered_templates(tier):
-        shutil.copy2(os.path.join(BLACKBOARD, name), os.path.join(dest, name))
+    for name, src in numbered_templates(tier).items():
+        shutil.copy2(src, os.path.join(dest, name))
     if tier == "solo":
         # Solo == no subagents, so there is no empty packets/ to expect. Drop an
         # explicit waiver the validator recognizes instead of a hollow dir.
@@ -86,14 +151,28 @@ def _read_goal(goal_path):
     except OSError:
         return goal, tier
     grab_goal = False
+    in_comment = False
     for line in lines:
         s = line.strip()
         if s.startswith("## Canonical Goal"):
             grab_goal = True
             continue
-        if grab_goal and s and not s.startswith("<!--") and not s.startswith("#"):
-            goal = s
-            grab_goal = False
+        # Track comment BLOCKS. Skipping only lines that START with '<!--' made
+        # line 2 of the template's multi-line comment show up as the goal in
+        # INDEX.md -- the same bug goal_guard.canonical_goal had
+        # (audit 2026-07-25).
+        if grab_goal:
+            if in_comment:
+                if "-->" in s:
+                    in_comment = False
+                continue
+            if s.startswith("<!--"):
+                if "-->" not in s:
+                    in_comment = True
+                continue
+            if s and not s.startswith("#"):
+                goal = s
+                grab_goal = False
         low = s.lower()
         if low.startswith("tier:") or "chosen by" in low and "tier" in low:
             tier = s.split(":", 1)[-1].strip() or tier
@@ -102,6 +181,7 @@ def _read_goal(goal_path):
 
 def regenerate_index():
     rows = []
+    skipped = []
     if os.path.isdir(RUNS):
         for slug in sorted(os.listdir(RUNS)):
             d = os.path.join(RUNS, slug)
@@ -109,6 +189,10 @@ def regenerate_index():
                 continue
             goal_path = os.path.join(d, "00-project-goal.md")
             if not os.path.exists(goal_path):
+                # Record it. A run directory that vanishes from the derived
+                # index with no warning looks like it was never there -- the
+                # index silently under-reported real work (audit 2026-07-25).
+                skipped.append(slug)
                 continue
             goal, tier = _read_goal(goal_path)
             updated = datetime.date.fromtimestamp(
@@ -129,11 +213,56 @@ def regenerate_index():
         lines.append("| %s | %s | %s | %s | %s |" % (slug, goal_cell, tier, status, updated))
     if not rows:
         lines.append("| _(none yet)_ | — | — | — | — |")
+    if skipped:
+        lines += [
+            "",
+            "## Not indexed (no `00-project-goal.md`)",
+            "",
+            "> These run directories exist but have no goal file, so they cannot be",
+            "> summarized here. Add `00-project-goal.md` to each, or delete it.",
+            "",
+        ] + ["- `%s`" % s for s in skipped]
     with open(INDEX, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
+    return skipped
+
+
+class isolated_root:
+    """Point the module's paths at a throwaway tree for the duration.
+
+    The selftests used to scaffold into the REAL `runs/` and rewrite the real
+    `runs/INDEX.md`. Two suites running at once collided ("already exists --
+    refusing to overwrite"), which made the suite intermittently red, and a
+    crash mid-selftest left debris in a user's live runs directory. A selftest
+    must not touch live state (audit 2026-07-25).
+    """
+
+    def __enter__(self):
+        global ROOT, RUNS, INDEX, BLACKBOARD
+        self._saved = (ROOT, RUNS, INDEX, BLACKBOARD)
+        self._tmp = tempfile.mkdtemp(prefix="new-run-selftest-")
+        src = BLACKBOARD
+        ROOT = self._tmp
+        RUNS = os.path.join(self._tmp, "runs")
+        INDEX = os.path.join(RUNS, "INDEX.md")
+        BLACKBOARD = os.path.join(self._tmp, "blackboard")
+        os.makedirs(RUNS, exist_ok=True)
+        shutil.copytree(src, BLACKBOARD)
+        return self._tmp
+
+    def __exit__(self, *exc):
+        global ROOT, RUNS, INDEX, BLACKBOARD
+        ROOT, RUNS, INDEX, BLACKBOARD = self._saved
+        shutil.rmtree(self._tmp, ignore_errors=True)
+        return False
 
 
 def selftest():
+    with isolated_root():
+        return _selftest_body()
+
+
+def _selftest_body():
     slug = "_selftest_tmp_run"
     dest = os.path.join(RUNS, slug)
     if os.path.exists(dest):

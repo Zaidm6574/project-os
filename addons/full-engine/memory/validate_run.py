@@ -24,6 +24,7 @@ Standard library only. No network access.
 import argparse
 import json
 import os
+import re
 import sys
 
 MARK_START = "<!-- ACTUALS:START -->"
@@ -60,10 +61,31 @@ def _dod_no_tbd(goal_text):
 
 
 def _tier_locked(goal_text):
+    """True only when a real `Locked:` field says so.
+
+    This used to be `"locked" in low and "tier" in low`, which passes on any
+    prose containing both words anywhere in the file -- "the door is locked"
+    plus "beta tier" satisfied a run-closure gate. Read the field the roster
+    actually defines (`Locked: yes`) instead of scanning for vocabulary
+    (audit 2026-07-25).
+    """
     if goal_text is None:
         return False
-    low = goal_text.lower()
-    return "locked" in low and "tier" in low
+    # Collect EVERY Locked: field; do not return on the first. A goal doc that
+    # records rejected options ("### Option B (rejected) / Locked: yes") ABOVE
+    # the real "## Current Execution Level / Locked: no" made first-match-wins
+    # report a locked tier that was not locked (adversarial verify 2026-07-25).
+    values = []
+    for line in goal_text.splitlines():
+        m = re.match(r"\s*(?:[-*]\s*)?\**\s*Locked\s*\**\s*:\s*(.+?)\s*$", line, re.I)
+        if m:
+            values.append(m.group(1).strip().strip("*`").lower())
+    if not values:
+        return False
+    affirmative = {"yes", "y", "true", "locked", "1"}
+    # Fail closed: one non-affirmative value anywhere means the tier is not
+    # cleanly locked, whatever another section of the same document claims.
+    return all(v in affirmative for v in values)
 
 
 def _actuals_populated(cost_text):
@@ -100,13 +122,65 @@ def _has_packets(run_dir):
     return False
 
 
+BULLET_ROW = re.compile(r"^\s*[-*]\s+\S")
+TABLE_SEPARATOR = re.compile(r"^\s*\|[\s:|-]*\|?\s*$")
+
+
+def _manifest_entry_count(body):
+    """Count real manifest entries: bullets, and table rows past the header.
+
+    A single regex was not enough. `| path | what |` followed by the alignment
+    separator `| :--- | ---: |` and NO data rows still matched, because the
+    HEADER row itself looks like a row -- an empty manifest passed the gate
+    (adversarial verify 2026-07-25). Tables need explicit header/separator
+    handling, so count instead of pattern-match.
+    """
+    entries = 0
+    seen_table_header = False
+    for line in body.splitlines():
+        s = line.strip()
+        if BULLET_ROW.match(s):
+            entries += 1
+            continue
+        if not s.startswith("|"):
+            continue
+        if TABLE_SEPARATOR.match(s):
+            continue
+        if not seen_table_header:
+            seen_table_header = True  # first non-separator table row is the header
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if any(c and c not in ("—", "-", "n/a", "tbd") for c in cells):
+            entries += 1
+    return entries
+
+
+NO_MANIFEST = re.compile(
+    r"\b(no|none|not|never|without|missing|absent|omitted|skipped|n/?a)\b"
+    r"[^.\n]{0,40}\bmanifest\b"
+    r"|\bmanifest\b[^.\n]{0,40}\b(was not|were not|isn't|is not|wasn't|not produced|"
+    r"not written|omitted|skipped|deferred|pending|tbd|n/?a)\b",
+    re.I,
+)
+
+
 def _has_manifest(run_dir):
-    candidates = ["13-delivery-report.md", "14-artifact-manifest.md"]
-    if os.path.isdir(run_dir):
-        candidates += [n for n in os.listdir(run_dir) if n.endswith(".md")]
-    for name in candidates:
+    """A manifest must have entries -- not merely the word 'manifest'.
+
+    This used to return True if any .md in the run contained the substring
+    "manifest", so a delivery report reading "No artifact manifest was produced"
+    CLOSED the run it should have blocked. Require the manifest file itself and
+    at least one list/table row, and refuse when the text explicitly denies one
+    (audit 2026-07-25).
+    """
+    for name in ("14-artifact-manifest.md", "13-delivery-report.md"):
         t = _read(os.path.join(run_dir, name))
-        if t and "manifest" in t.lower():
+        if not t or "manifest" not in t.lower():
+            continue
+        if NO_MANIFEST.search(t):
+            continue
+        body = t.lower().split("manifest", 1)[1]
+        if _manifest_entry_count(body) > 0:
             return True
     return False
 
@@ -232,8 +306,13 @@ def _good_run(d, with_memory=True):
            "## Actuals\n%s\n| Model | Est $ | Measured $ | Variance |\n"
            "|---|---|---|---|\n| main loop (opus) | — | $0.0175 | — |\n%s\n"
            % (MARK_START, MARK_END))
+    # The manifest needs a real ROW. This fixture used to be a bare table
+    # header (`| path | what | where |` and nothing under it), which the old
+    # substring check happily accepted -- the module's own example of a "good
+    # run" modelled an EMPTY manifest as closable (audit 2026-07-25).
     _write(os.path.join(d, "13-delivery-report.md"),
-           "## Artifact Manifest\n| path | what | where |\n\n"
+           "## Artifact Manifest\n| path | what | where |\n|---|---|---|\n"
+           "| site/index.html | landing page | runs/selftest/ |\n\n"
            "Lessons exported to brain/shared-brain.jsonl; "
            "GraphOS rebuilt at graphify-out/graph.json.\n")
     if with_memory:

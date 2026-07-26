@@ -41,7 +41,28 @@ SECTION_TYPES = {  # 19-memory-harvest.md heading prefix -> shared-brain type
     "safeguard": "safeguard",
     "next-kickoff safeguard": "safeguard",
 }
-REJECT_ROW = re.compile(r"\breject|private[- ]only\b", re.I)
+# A row is skipped only when a cell IS a rejection/private marker -- not when a
+# lesson happens to use the word. The old pattern was
+# `\breject|private[- ]only\b`, whose alternation binds as (`\breject`) OR
+# (`private[- ]only\b`), so the left branch matched any word starting with
+# "reject". A genuine lesson like "Evaluator must reject on missing evidence"
+# was silently dropped from every harvest, with no count reported
+# (audit 2026-07-25).
+# Anchored at the START of the cell but NOT at the end: a status cell reads
+# "Rejected" but also "Rejected (see note)" / "REJECTED — superseded", and a
+# fully-anchored pattern let every annotated rejection harvest through as an
+# approved lesson (adversarial verify 2026-07-25). Starting-anchored still
+# spares a real lesson like "Evaluator must reject on missing evidence",
+# because that cell starts with "Evaluator".
+REJECT_ROW = re.compile(
+    r"^[\W_]*(reject(?:ed|ion)?|private[\s-]?only|do[\s-]?not[\s-]?harvest)"
+    r"[\s*_`]*(?:$|[(\[\-–—:;,].*)",
+    re.I,
+)
+
+# Rows skipped because a cell carried a rejection/private marker. Reported at
+# the end of a harvest so the filter is auditable instead of invisible.
+DROPPED = []
 
 
 def norm(t):
@@ -96,12 +117,18 @@ def bullets_by_section(md):
         if line.strip().startswith("|"):
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
             first = cells[0] if cells else ""
+            # Check CELLS, not the raw line: a status cell of "Rejected" skips
+            # the row, but the same word inside the lesson text does not.
             if (not first or set(first) <= {"-", ":", " "}  # separator row
-                    or first.lower() in ("lesson", "preference", "pattern", "safeguard")
-                    or REJECT_ROW.search(line)):
+                    or first.lower() in ("lesson", "preference", "pattern", "safeguard")):
+                continue
+            if any(REJECT_ROW.match(c) for c in cells):
+                # Record it. Silent filtering is why the old over-broad pattern
+                # went unnoticed: a harvest that drops rows must say how many.
+                DROPPED.append(line.strip()[:120])
                 continue
             text = re.sub(r"\*\*(.+?)\*\*", r"\1", first).strip()
-            extra = next((c for c in cells[1:] if c and not REJECT_ROW.search(c)), "")
+            extra = next((c for c in cells[1:] if c and not REJECT_ROW.match(c)), "")
             if text:
                 yield cur, (text + (f" — {extra}" if extra else ""))[:400]
 
@@ -180,6 +207,12 @@ def cmd_scan(run):
         for o in fresh:
             f.write(json.dumps(o, ensure_ascii=False) + "\n")
     print(f"{slug}: staged {len(fresh)} new (skipped {skipped} dupes) -> {out}")
+    if DROPPED:
+        print(f"  filtered {len(DROPPED)} row(s) marked rejected/private-only:")
+        for row in DROPPED[:5]:
+            print(f"    - {row}")
+        if len(DROPPED) > 5:
+            print(f"    ... and {len(DROPPED) - 5} more")
     print(f"review the file, then: python3 scripts/harvest.py apply {out}")
     return 0
 

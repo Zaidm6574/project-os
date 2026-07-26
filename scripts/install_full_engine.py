@@ -69,6 +69,7 @@ def install_full_engine(
     target: Path,
     force: bool = False,
     claude: bool = False,
+    codex: bool = False,
     central_brain: Path | None = None,
     project_id: str | None = None,
     dry_run: bool = False,
@@ -124,6 +125,19 @@ def install_full_engine(
     else:
         results.append("skipped .claude agents/commands; pass --claude to install them")
 
+    # Symmetric Codex slot. The workflows are already runtime-neutral in
+    # prompts/workflows/ (installed unconditionally), so this adapter only buys
+    # DISCOVERABILITY: without it a Codex session never learns the workflows
+    # exist. Path verified against codex-cli 0.144.1 — .agents/skills/<name>/
+    # SKILL.md is auto-loaded, and .agents/ is the vendor-neutral spelling.
+    if codex:
+        results.extend(
+            copy_tree(ADDON_ROOT / "staged" / "codex-skills",
+                      target / ".agents" / "skills", force, dry_run=dry_run)
+        )
+    else:
+        results.append("skipped .agents/skills; pass --codex to install them")
+
     if central_brain is not None:
         central_path = central_brain.expanduser().resolve()
         if dry_run:
@@ -170,6 +184,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Show what would be copied without writing files.")
     parser.add_argument("--starter-planned", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--claude", action="store_true", help="Also install Claude Code agents and slash commands.")
+    parser.add_argument("--codex", action="store_true", help="Also install Codex project-local skills into .agents/skills/.")
     parser.add_argument(
         "--central-brain",
         default=None,
@@ -183,6 +198,7 @@ def main() -> int:
             args.target,
             force=args.force,
             claude=args.claude,
+            codex=args.codex,
             central_brain=Path(args.central_brain) if args.central_brain else None,
             project_id=args.project_id,
             dry_run=args.dry_run,

@@ -98,6 +98,28 @@ def render_frontmatter(pairs: list) -> str:
 # Load / render
 # --------------------------------------------------------------------------
 
+SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
+
+def safe_workflow_name(raw: str, source: Path) -> str:
+    """Validate a workflow name before it is used to build a file path.
+
+    `name` is read from a workflow file's frontmatter and was interpolated
+    straight into `staged/commands/{name}.md` and `staged/codex-skills/{name}/`.
+    A workflow declaring `name: ../../../../tmp/x` therefore made `sync` write
+    real files outside the repo -- a generator that trusts its own inputs
+    (audit 2026-07-25). Names are slugs; anything else is refused.
+    """
+    name = (raw or "").strip()
+    if not SAFE_NAME.match(name) or name in (".", ".."):
+        raise SystemExit(
+            "sync_runtime_assets: unsafe workflow name %r in %s\n"
+            "Names must match %s (lowercase slug, no path separators)."
+            % (raw, source, SAFE_NAME.pattern)
+        )
+    return name
+
+
 def load_workflows(root: Path) -> list:
     canon = Path(root) / "prompts" / "workflows"
     workflows = []
@@ -106,7 +128,7 @@ def load_workflows(root: Path) -> list:
             continue
         meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
         workflows.append(Workflow(
-            name=meta.get("name", path.stem),
+            name=safe_workflow_name(meta.get("name", path.stem), path),
             description=meta.get("description", ""),
             argument_hint=meta.get("argument-hint", ""),
             capabilities=meta.get("capabilities", []) or [],
@@ -163,6 +185,27 @@ def render_claude_command(wf: Workflow) -> str:
         "\n" + capability_note(wf)
 
 
+def render_codex_skill(wf: Workflow) -> str:
+    """Codex project-local skill adapter.
+
+    Verified empirically against codex-cli 0.144.1 (marker-file probe): both
+    `.codex/skills/<name>/SKILL.md` and `.agents/skills/<name>/SKILL.md` are
+    auto-loaded. We target `.agents/` because it is the vendor-neutral path of
+    the AGENTS.md convention this repo already follows, so a future runtime
+    adopting that standard picks these up for free.
+
+    Codex expands the SAME `$ARGUMENTS` token as Claude, so the body needs no
+    separate substitution pass.
+    """
+    pairs = [("name", wf.name), ("description", wf.description)]
+    if wf.argument_hint:
+        pairs.append(("argument-hint", wf.argument_hint))
+    body = wf.body.replace("{{ARGUMENTS}}", "$ARGUMENTS")
+    marker = GENERATED_MARKER.format(name=wf.name)
+    return render_frontmatter(pairs) + "\n" + marker + "\n" + body.rstrip("\n") + \
+        "\n" + capability_note(wf)
+
+
 def render_index(workflows: list) -> str:
     lines = [
         "# Project OS workflows — universal index",
@@ -195,11 +238,44 @@ def render_index(workflows: list) -> str:
 # --------------------------------------------------------------------------
 
 def _targets(root: Path, workflows: list) -> list:
-    commands = Path(root) / "addons" / "full-engine" / "staged" / "commands"
-    out = [(commands / f"{wf.name}.md", render_claude_command(wf)) for wf in workflows]
+    staged = Path(root) / "addons" / "full-engine" / "staged"
+    out = [(staged / "commands" / f"{wf.name}.md", render_claude_command(wf))
+           for wf in workflows]
+    out += [(staged / "codex-skills" / wf.name / "SKILL.md", render_codex_skill(wf))
+            for wf in workflows]
     out.append((Path(root) / "prompts" / "workflows" / "INDEX.md",
                 render_index(workflows)))
     return out
+
+
+def _refuse_symlinked_target(path: Path, root: Path) -> None:
+    """Never write through a symlink, and never write outside the repo.
+
+    Sanitizing the NAME was not enough: with a perfectly legitimate name, a
+    symlink pre-planted at the destination redirected the generated file
+    anywhere on disk, because write_text() follows symlinks (adversarial verify
+    2026-07-25). Check the leaf and every parent we would traverse.
+    """
+    if path.is_symlink():
+        raise SystemExit(
+            "sync_runtime_assets: refusing to write through a symlink: %s" % path
+        )
+    root = root.resolve()
+    for parent in list(path.parents):
+        if parent == root or root not in parent.parents and parent != root:
+            if not str(parent).startswith(str(root)):
+                break
+        if parent.is_symlink():
+            raise SystemExit(
+                "sync_runtime_assets: refusing to write under a symlinked "
+                "directory: %s" % parent
+            )
+    resolved_parent = path.parent.resolve()
+    if root not in resolved_parent.parents and resolved_parent != root:
+        raise SystemExit(
+            "sync_runtime_assets: target escapes the repo: %s -> %s"
+            % (path, resolved_parent)
+        )
 
 
 def sync(root: Path) -> list:
@@ -207,6 +283,7 @@ def sync(root: Path) -> list:
     written = []
     for path, content in _targets(Path(root), workflows):
         path.parent.mkdir(parents=True, exist_ok=True)
+        _refuse_symlinked_target(path, Path(root))
         if not path.is_file() or path.read_text(encoding="utf-8") != content:
             path.write_text(content, encoding="utf-8")
             written.append(str(path.relative_to(Path(root))))

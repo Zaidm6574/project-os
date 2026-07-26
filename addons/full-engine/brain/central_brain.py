@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import tempfile
 from pathlib import Path
 
@@ -35,15 +36,15 @@ PROJECT_BRAIN = Path("brain") / "shared-brain.jsonl"
 CENTRAL_FILE = "shared-brain.jsonl"
 README = "README.md"
 
-SECRET_PATTERNS = [
-    re.compile(r"sk-[A-Za-z0-9]{16,}"),
-    re.compile(r"AKIA[0-9A-Z]{16}"),
-    re.compile(r"ghp_[A-Za-z0-9]{20,}"),
-    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
-    re.compile(r"AIza[0-9A-Za-z_\-]{20,}"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-    re.compile(r"(?i)(api[_-]?key|secret|password|passwd|token)\s*[:=]\s*\S{6,}"),
-]
+# Single source of truth for secret shapes: brain.py in this same directory.
+# Keeping a second copy here is how the two drifted (cross-check 2026-07-25):
+# brain.py was widened to 23 patterns while this file stayed on 7.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# SCANNED_FIELDS is deliberately NOT imported: record_secret_hit() already
+# walks every scannable field, and importing an unused name here made this
+# module look like it did its own field-level scan when it did not.
+from brain import SECRET_PATTERNS, record_secret_hit  # noqa: E402
+sys.path.pop(0)
 
 
 def looks_like_secret(text: str) -> bool:
@@ -166,7 +167,7 @@ def lessons_for_central(project: Path, pid: str) -> tuple[list[dict], int]:
             skipped += 1
             continue
         text = str(record.get("text", "")).strip()
-        if not text or looks_like_secret(text):
+        if not text or looks_like_secret(text) or record_secret_hit(record):
             skipped += 1
             continue
         origin_id = str(record.get("id") or record.get("memory_id") or "")
@@ -217,7 +218,7 @@ def pull(path: Path, project: Path, explicit_project_id: str | None = None) -> t
             skipped += 1
             continue
         text = str(record.get("text", "")).strip()
-        if not text or looks_like_secret(text):
+        if not text or looks_like_secret(text) or record_secret_hit(record):
             skipped += 1
             continue
         tags = list(record.get("tags") or [])

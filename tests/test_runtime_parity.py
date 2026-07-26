@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SYNC = ROOT / "scripts" / "sync_runtime_assets.py"
 CANON = ROOT / "prompts" / "workflows"
 CLAUDE_COMMANDS = ROOT / "addons" / "full-engine" / "staged" / "commands"
+CODEX_SKILLS = ROOT / "addons" / "full-engine" / "staged" / "codex-skills"
 INDEX = CANON / "INDEX.md"
 
 
@@ -103,6 +104,30 @@ class TestGeneratedAdapters(unittest.TestCase):
         sync = load_sync()
         drift = sync.check(ROOT)
         self.assertEqual(drift, [], "generated assets are stale; run sync_runtime_assets.py")
+
+    def test_every_canonical_workflow_has_a_codex_skill(self):
+        """Codex reads the canonical file fine, so this is a DISCOVERABILITY
+        adapter, not a capability one — without it a Codex session never learns
+        the workflows exist, which is the actual 'feels behind' complaint.
+
+        Path verified empirically against codex-cli 0.144.1 with a marker-file
+        probe: .agents/skills/<name>/SKILL.md is auto-loaded at startup."""
+        canon = {p.stem for p in CANON.glob("*.md")} - {"INDEX"}
+        skills = {p.parent.name for p in CODEX_SKILLS.glob("*/SKILL.md")}
+        self.assertEqual(canon - skills, set(),
+                         "canonical workflow with no Codex skill adapter")
+        self.assertEqual(skills - canon, set(),
+                         "Codex skill with no canonical source")
+
+    def test_codex_skills_carry_the_argument_token_codex_actually_expands(self):
+        sync = load_sync()
+        for wf in sync.load_workflows(ROOT):
+            if "{{ARGUMENTS}}" not in wf.body:
+                continue
+            rendered = sync.render_codex_skill(wf)
+            with self.subTest(workflow=wf.name):
+                self.assertIn("$ARGUMENTS", rendered)
+                self.assertNotIn("{{ARGUMENTS}}", rendered)
 
     def test_index_lists_every_workflow_for_non_claude_runtimes(self):
         self.assertTrue(INDEX.is_file(), "prompts/workflows/INDEX.md must exist")

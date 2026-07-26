@@ -1,15 +1,27 @@
 # Private memory and imports
+#
+# NOTE ON ANCHORING: a pattern containing a slash is anchored to THIS directory.
+# `memory/store/` matches <root>/memory/store/ ONLY — it does not match
+# addons/full-engine/memory/store/, which is where the full-engine code actually
+# writes. Every rule protecting a path the code can create is therefore written
+# with a leading `**/` so it matches at ANY depth. tests/test_private_paths_ignored.py
+# derives the path list from the code's own constants and fails if this drifts.
 private-memory/
 private-imports/
 local-memory/
 vector-index/
 vector-store/
+**/memory/store/
 memory/store/
 .turbovec/
 knowledge-graph/
 graphify-out/
+**/shared-brain.jsonl
 brain/shared-brain.jsonl
+**/*.sidecar.json
+**/store/*.tvim
 central-brain/
+**/central-brain/
 .project-os-central-brain/
 private-screenshots/
 private-exports/

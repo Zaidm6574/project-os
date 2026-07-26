@@ -2,7 +2,7 @@
 set -eu
 
 show_usage() {
-  printf '%s\n' "Usage: ./install.sh /path/to/target-project [--force] [--dry-run] [--check-tools] [--full-engine] [--claude-engine] [--central-brain PATH] [--project-id ID]"
+  printf '%s\n' "Usage: ./install.sh /path/to/target-project [--force] [--dry-run] [--check-tools] [--full-engine] [--claude-engine] [--codex-engine] [--central-brain PATH] [--project-id ID]"
   printf '%s\n' ""
   printf '%s\n' "Examples:"
   printf '%s\n' "  ./install.sh ../my-new-project"
@@ -10,6 +10,7 @@ show_usage() {
   printf '%s\n' "  ./install.sh . --force"
   printf '%s\n' "  ./install.sh ../my-new-project --check-tools"
   printf '%s\n' "  ./install.sh ../my-new-project --full-engine --claude-engine"
+  printf '%s\n' "  ./install.sh ../my-new-project --full-engine --codex-engine"
   printf '%s\n' "  ./install.sh ../my-new-project --full-engine --central-brain ~/.project-os/central-brain --project-id my-project"
 }
 
@@ -25,6 +26,7 @@ DRY_RUN=0
 CHECK_TOOLS=0
 FULL_ENGINE=0
 CLAUDE_ENGINE=0
+CODEX_ENGINE=0
 CENTRAL_BRAIN=""
 PROJECT_ID=""
 
@@ -45,6 +47,10 @@ while [ "$#" -gt 0 ]; do
     --claude-engine)
       FULL_ENGINE=1
       CLAUDE_ENGINE=1
+      ;;
+    --codex-engine)
+      FULL_ENGINE=1
+      CODEX_ENGINE=1
       ;;
     --central-brain)
       if [ "${2:-}" = "" ]; then
@@ -133,6 +139,9 @@ if [ "$FULL_ENGINE" = "1" ]; then
   fi
   if [ "$CLAUDE_ENGINE" = "1" ]; then
     set -- "$@" --claude
+  fi
+  if [ "$CODEX_ENGINE" = "1" ]; then
+    set -- "$@" --codex
   fi
   if [ "$CENTRAL_BRAIN" != "" ]; then
     set -- "$@" --central-brain "$CENTRAL_BRAIN"

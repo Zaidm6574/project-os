@@ -38,15 +38,51 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 BRAIN_FILE = os.path.join(HERE, "shared-brain.jsonl")
+# Secret shapes. The 2026-07-25 audit found the original `sk-[A-Za-z0-9]{16,}`
+# could not cross a hyphen or underscore, so every modern key format passed:
+# sk-ant-…, sk-proj-…, sk_live_… (Stripe), xoxb-… (Slack), figd_…, SG.… ,
+# Twilio AC…, JWTs, and postgres:// DSNs with inline credentials.
 SECRET_PATTERNS = [
-    re.compile(r"sk-[A-Za-z0-9]{16,}"),
-    re.compile(r"AKIA[0-9A-Z]{16}"),
-    re.compile(r"ghp_[A-Za-z0-9]{20,}"),
+    re.compile(r"(?<![A-Za-z0-9_])sk-[A-Za-z0-9_\-]{16,}"),            # OpenAI/Anthropic incl. sk-ant-, sk-proj-
+    re.compile(r"(?<![A-Za-z0-9_])sk_(live|test)_[A-Za-z0-9]{16,}"),   # Stripe
+    re.compile(r"(?<![A-Za-z0-9_])rk_(live|test)_[A-Za-z0-9]{16,}"),   # Stripe restricted
+    re.compile(r"AKIA[0-9A-Z]{16}"),                  # AWS access key id
+    re.compile(r"ASIA[0-9A-Z]{16}"),                  # AWS session key
+    re.compile(r"(?<![A-Za-z0-9_])ghp_[A-Za-z0-9]{20,}"),
+    re.compile(r"(?<![A-Za-z0-9_])gho_[A-Za-z0-9]{20,}"),
+    re.compile(r"(?<![A-Za-z0-9_])ghs_[A-Za-z0-9]{20,}"),
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
-    re.compile(r"AIza[0-9A-Za-z_\-]{20,}"),
+    re.compile(r"(?<![A-Za-z0-9_])AIza[0-9A-Za-z_\-]{20,}"),           # Google
+    re.compile(r"(?<![A-Za-z0-9_])ya29\.[A-Za-z0-9_\-]{20,}"),         # Google OAuth
+    re.compile(r"(?<![A-Za-z0-9_])xox[baprs]-[A-Za-z0-9\-]{10,}"),     # Slack
+    re.compile(r"(?<![A-Za-z0-9_])figd_[A-Za-z0-9_\-]{20,}"),          # Figma PAT
+    re.compile(r"SG\.[A-Za-z0-9_\-]{20,}"),           # SendGrid
+    re.compile(r"\bAC[0-9a-fA-F]{32}\b"),             # Twilio account SID
+    re.compile(r"\bSK[0-9a-fA-F]{32}\b"),             # Twilio API key
+    re.compile(r"(?<![A-Za-z0-9_])glpat-[A-Za-z0-9_\-]{16,}"),         # GitLab
+    re.compile(r"(?<![A-Za-z0-9_])dop_v1_[A-Za-z0-9]{32,}"),           # DigitalOcean
+    re.compile(r"(?<![A-Za-z0-9_])npm_[A-Za-z0-9]{30,}"),
+    # Added 2026-07-25: an adversarial pass found these pass the gate when
+    # pasted BARE, i.e. dropped into a lesson's prose with no `KEY=` label for
+    # the keyword catch-all to anchor on -- which is exactly how an accidental
+    # paste looks.
+    re.compile(r"(?<![A-Za-z0-9_])hf_[A-Za-z0-9]{30,}"),               # HuggingFace
+    re.compile(r"(?<![A-Za-z0-9_])ntn_[A-Za-z0-9]{40,}"),              # Notion
+    re.compile(r"(?<![A-Za-z0-9_])lin_api_[A-Za-z0-9]{30,}"),          # Linear
+    re.compile(r"(?<![A-Za-z0-9_])vercel_[A-Za-z0-9]{20,}"),           # Vercel
+    re.compile(r"(?i)https://[0-9a-f]{32}@[\w.\-]+/\d+"),              # Sentry DSN
+    re.compile(r"(?i)AccountKey\s*=\s*[A-Za-z0-9+/]{40,}={0,2}"),      # Azure storage
+    re.compile(r"https://hooks\.slack\.com/services/T[A-Za-z0-9/]{20,}"),
+    re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\."),  # JWT
+    re.compile(r"(?i)\b(postgres(ql)?|mysql|mongodb(\+srv)?|redis|amqp)://[^\s:@/]+:[^\s@/]+@"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-    re.compile(r"(?i)(api[_-]?key|secret|password|passwd|token)\s*[:=]\s*\S{6,}"),
+    re.compile(r"(?i)(api[_-]?key|secret|password|passwd|token|bearer)\s*[:=]\s*\S{6,}"),
 ]
+
+# Every field of a record that can carry text a human pasted. The audit found
+# only `text` was scanned, so a secret in `tags` or `source` synced through the
+# approved-summary path untouched.
+SCANNED_FIELDS = ("text", "summary", "note", "content", "tags", "source", "id", "title")
 
 
 def _safe_path(path: str) -> str:
@@ -76,6 +112,64 @@ def _existing_ids(path):
 
 def _looks_like_secret(text: str) -> bool:
     return any(pattern.search(text) for pattern in SECRET_PATTERNS)
+
+
+def _iter_scannable(value):
+    """Yield every string reachable inside a record value (lists/dicts included)."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _iter_scannable(v)
+    elif isinstance(value, (list, tuple, set)):
+        for v in value:
+            yield from _iter_scannable(v)
+
+
+def record_secret_hit(record: dict) -> str | None:
+    """Return the offending field name when any scanned field holds a secret.
+
+    Scans SCANNED_FIELDS rather than `text` alone -- a secret pasted into a tag
+    or a source label is still a secret, and the approved-summary sync path
+    copies those fields verbatim.
+    """
+    if not isinstance(record, dict):
+        return None
+    for field in SCANNED_FIELDS:
+        for chunk in _iter_scannable(record.get(field)):
+            if _looks_like_secret(chunk):
+                return field
+    return None
+
+
+def gate_record(record: dict, *, where: str) -> dict:
+    """THE privacy gate. Every brain write path must call this.
+
+    The 2026-07-25 audit found `save-chat` scanned for secrets while `export`,
+    `import --into`, and scripts/brain_append.py did not -- so the refusal was
+    trivially bypassed by using a different verb. One gate, all writers.
+    """
+    field = record_secret_hit(record)
+    if field:
+        sys.exit(
+            f"refuse: {where} record field '{field}' looks like it contains a "
+            "secret. Redact it and retry; the shared brain syncs to the central "
+            "brain and must never carry credentials."
+        )
+    return record
+
+
+def gate_records(records, *, where: str):
+    """Gate a batch, reporting the index of the first offender."""
+    for i, record in enumerate(records):
+        field = record_secret_hit(record)
+        if field:
+            rid = record.get("id", f"#{i}")
+            sys.exit(
+                f"refuse: {where} record {rid} field '{field}' looks like it "
+                "contains a secret. Redact it and retry."
+            )
+    return records
 
 
 def _now():
@@ -169,6 +263,9 @@ def cmd_export(args):
         lessons = _lessons_from_adapter()
         if lessons is None:
             sys.exit("refuse: osvec_adapter not importable; pass --from FILE")
+    # THE gate. export used to append with no secret scan at all, so a record
+    # save-chat refuses could be smuggled in via `export --from` (audit 07-25).
+    gate_records(lessons, where="export")
     have = _existing_ids(BRAIN_FILE)
     added = 0
     with open(BRAIN_FILE, "a") as f:
@@ -187,6 +284,9 @@ def cmd_import(args):
     # resolves outside the project (independent review finding, 2026-07-17)
     lessons = _read_jsonl(_safe_path(BRAIN_FILE))
     if args.into:
+        # `--into` EXPORTS brain contents to another file, so it is a write path
+        # and must clear the same gate. Printing to stdout below is not a write.
+        gate_records(lessons, where="import --into")
         full = _safe_path(args.into)
         with open(full, "w") as f:
             for l in lessons:
@@ -218,6 +318,12 @@ def cmd_save_chat(args):
         "raw_chat": args.mode == "raw",
         "approved": args.mode == "summary",
     }
+
+    # THE gate. save-chat had its own text-only check, so a secret pasted into
+    # --tag or --source reached the brain untouched even after export/import
+    # were gated (cross-check finding, 2026-07-25). Gate the assembled RECORD,
+    # not just the chat text.
+    gate_record(record, where="save-chat")
 
     have = _existing_ids(BRAIN_FILE)
     if rid in have:
