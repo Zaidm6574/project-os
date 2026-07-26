@@ -307,6 +307,16 @@ def main():
             parent = os.path.dirname(os.path.abspath(target))
             os.makedirs(parent, exist_ok=True)
             with open(target, "a", encoding="utf-8") as f:
+                # Never weld onto a crash-truncated last line. This is the
+                # generic append the module docstring advertises, and it is
+                # named in brain_append.py's own heal as a cause of the
+                # truncation it repairs -- yet it reproduced the defect
+                # itself (adversarial verify 2026-07-26).
+                if f.tell():
+                    with open(target, "rb") as probe:
+                        probe.seek(-1, os.SEEK_END)
+                        if probe.read(1) != b"\n":
+                            f.write("\n")
                 f.write(line + "\n")
                 f.flush()
                 os.fsync(f.fileno())

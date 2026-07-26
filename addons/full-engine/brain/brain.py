@@ -132,6 +132,32 @@ def _existing_ids(path):
     return {r.get("id") for r in _read_jsonl(path)}
 
 
+def _heal_truncated_tail(handle, path):
+    """Never weld a new record onto a crash-truncated last line.
+
+    If a previous write died between the buffered write and the flush
+    (SIGKILL, full disk, an interrupted `bb_lock append`), the last line is a
+    partial JSON fragment with no newline. Appending to it produces ONE
+    unparseable line, destroying both the truncated record AND the one being
+    saved now -- and every reader skips unparseable lines silently
+    (_read_jsonl, central_brain.read_jsonl, mneme_adapter._gather), so the
+    loss is invisible forever while the command prints success and exits 0.
+    Start a new line instead: the damaged fragment stays damaged, but it
+    stays ALONE.
+
+    scripts/brain_append.py got this heal in d71aeca; the three sibling
+    writers to the same file did not, which is the repo's signature
+    "fixed one of N call sites" pattern (adversarial verify 2026-07-26).
+    save-chat is the worst case -- unlike central-brain push/pull there is no
+    upstream copy to re-sync from, so the lesson is gone for good.
+    """
+    if handle.tell():
+        with open(path, "rb") as probe:
+            probe.seek(-1, os.SEEK_END)
+            if probe.read(1) != b"\n":
+                handle.write("\n")
+
+
 def _looks_like_secret(text: str) -> bool:
     return any(pattern.search(text) for pattern in SECRET_PATTERNS)
 
@@ -378,6 +404,7 @@ def cmd_export(args):
     have = _existing_ids(BRAIN_FILE)
     added = 0
     with open(BRAIN_FILE, "a") as f:
+        _heal_truncated_tail(f, BRAIN_FILE)
         for l in lessons:
             if not l.get("id") or l["id"] in have:
                 continue
@@ -439,6 +466,7 @@ def cmd_save_chat(args):
         print(f"save-chat: kept existing {rid}")
         return 0
     with open(BRAIN_FILE, "a", encoding="utf-8") as f:
+        _heal_truncated_tail(f, BRAIN_FILE)
         f.write(json.dumps(record, sort_keys=True) + "\n")
     print(f"save-chat: appended {rid} to {os.path.relpath(BRAIN_FILE, ROOT)}")
     return 0

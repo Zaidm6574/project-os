@@ -103,6 +103,17 @@ def append_new(path: Path, records: list[dict]) -> int:
     existing = {record.get("id") for record in read_jsonl(path)}
     added = 0
     with path.open("a", encoding="utf-8") as handle:
+        # Never weld onto a crash-truncated last line: appending to a partial
+        # JSON fragment makes ONE unparseable line, destroying the damaged
+        # record AND the one being written, while read_jsonl skips it silently
+        # and this function reports success. scripts/brain_append.py was healed
+        # in d71aeca; this writer -- which serves BOTH push and pull, i.e. the
+        # CROSS-PROJECT brain -- was not (adversarial verify 2026-07-26).
+        if handle.tell():
+            with path.open("rb") as probe:
+                probe.seek(-1, os.SEEK_END)
+                if probe.read(1) != b"\n":
+                    handle.write("\n")
         for record in records:
             rid = record.get("id")
             if not rid or rid in existing:
