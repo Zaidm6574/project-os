@@ -318,6 +318,149 @@ class HarvestDropsRowsNotWords(unittest.TestCase):
         self.assertIn("secret client detail", self.h.DROPPED[0])
 
 
+# --------------------------------------------------------------------------- #
+# Running osvec_adapter's secret gate on a stdlib-only interpreter
+# --------------------------------------------------------------------------- #
+# osvec_adapter.py needs numpy, so every behavioural test of its secret gate is
+# @needs_numpy and SKIPS on all three CI legs (3.9/3.10/3.x, no pip install).
+# That left the AST test as the only thing guarding the gate on the CI floor,
+# and an AST test reads the loop HEADER: replacing the loop body's
+# `secret = looks_like_secret(chunk)` with `secret = None` kills the gate dead
+# and CI stays green (audit 2026-07-26).
+#
+# The scan runs at the TOP of add(), before any vector math, so numpy is not
+# actually needed to reach it -- only to import the module and construct the
+# store. These two sources put a deliberately incompetent numpy on sys.path[0]
+# of a subprocess: enough to import osvec_adapter and build a ProjectMemory,
+# and no more. The first genuine vector operation (np.linalg.norm, reached from
+# HashingEmbedder.embed) raises _PAST_THE_GATE instead of computing anything.
+# So the subprocess can tell the two outcomes apart by behaviour:
+#
+#   secret field  -> ValueError naming the field   (the gate fired)
+#   clean record  -> RuntimeError(_PAST_THE_GATE)  (the gate let it through)
+#
+# Neutering the gate turns the first into the second; making it refuse
+# everything turns the second into the first. Both fail.
+_PAST_THE_GATE = "OSVEC-STUB-REACHED-VECTOR-MATH"
+
+_NUMPY_STUB_SRC = '''\
+"""Not numpy. Just enough of it to reach osvec_adapter.add()'s secret scan."""
+
+IS_OSVEC_TEST_STUB = True
+PAST_THE_GATE = %r
+
+
+class _Dtype(object):
+    def __init__(self, name):
+        self.name = name
+
+    def __call__(self, value):
+        return value
+
+
+float32 = _Dtype("float32")
+float64 = _Dtype("float64")
+uint64 = _Dtype("uint64")
+
+
+class ndarray(object):
+    """Sparse dict of cells. Supports only what HashingEmbedder.embed does."""
+
+    def __init__(self, shape):
+        self.shape = shape
+        self._cells = {}
+
+    def __getitem__(self, key):
+        if isinstance(key, tuple):
+            return self._cells.get(key, 0.0)
+        return _Row()
+
+    def __setitem__(self, key, value):
+        if isinstance(key, tuple):
+            self._cells[key] = value
+            return
+        raise RuntimeError(PAST_THE_GATE)
+
+
+class _Row(object):
+    pass
+
+
+class _Linalg(object):
+    def norm(self, row):
+        raise RuntimeError(PAST_THE_GATE)
+
+
+linalg = _Linalg()
+
+
+def zeros(shape, dtype=None):
+    return ndarray(shape)
+
+
+def _refuse(*_args, **_kwargs):
+    raise RuntimeError(PAST_THE_GATE)
+
+
+array = asarray = vstack = delete = savez = load = argsort = _refuse
+''' % (_PAST_THE_GATE,)
+
+# Driver for that subprocess. Reports one JSON record per attempt so the parent
+# asserts on OUTCOMES, never on the child's own opinion of pass/fail.
+_OSVEC_PROBE_SRC = '''\
+import importlib.util
+import json
+import os
+import sys
+
+adapter_path, store_dir, fields_json = sys.argv[1:4]
+
+import numpy as _np
+if not getattr(_np, "IS_OSVEC_TEST_STUB", False):
+    print(json.dumps({"__error__": "the real numpy shadowed the stub"}))
+    raise SystemExit(0)
+
+spec = importlib.util.spec_from_file_location("osvec_under_stub", adapter_path)
+osvec = importlib.util.module_from_spec(spec)
+sys.modules["osvec_under_stub"] = osvec
+spec.loader.exec_module(osvec)
+# Point every store path at the throwaway dir BEFORE any ProjectMemory exists;
+# its __init__ mkdirs STORE_DIR.
+osvec.STORE_DIR = store_dir
+osvec.INDEX_PATH = os.path.join(store_dir, "project.tvim")
+osvec.SIDECAR_PATH = os.path.join(store_dir, "project.sidecar.json")
+
+SECRET = "sk-ant-api03-" + "A" * 40
+BASE = {"text": "Prefer the Solo tier before escalating", "memory_type": "lesson"}
+results = {}
+
+
+def attempt(label, kwargs):
+    mem = None
+    try:
+        mem = osvec.ProjectMemory()
+        mem.add(**kwargs)
+    except BaseException as exc:  # noqa: BLE001 - classification is the point
+        kind, detail = type(exc).__name__, str(exc)
+    else:
+        kind, detail = "STORED", ""
+    results[label] = {
+        "kind": kind,
+        "detail": detail,
+        "indexed": (len(mem.index) if mem is not None else -1),
+        "sidecar": (len(mem.sidecar) if mem is not None else -1),
+    }
+
+
+for field in json.loads(fields_json):
+    kwargs = dict(BASE)
+    kwargs[field] = [SECRET] if field == "tags" else SECRET
+    attempt(field, kwargs)
+attempt("__clean__", dict(BASE))
+print(json.dumps(results))
+'''
+
+
 class SecretPatternsStayInSync(unittest.TestCase):
     """Two doors into one store must use the same lock."""
 
@@ -442,6 +585,111 @@ class SecretPatternsStayInSync(unittest.TestCase):
             stray, [],
             "the scan names %s, which add() no longer accepts" % stray,
         )
+
+    def _probe_add_under_a_numpy_stub(self, fields):
+        """Actually call add() for each field, on any interpreter.
+
+        Returns the child's {field: {kind, detail, indexed, sidecar}} map.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Path(tmp)
+            store = sandbox / "store"
+            store.mkdir()
+            # sys.path[0] is the SCRIPT's directory, so dropping numpy.py next
+            # to the probe shadows a real installed numpy too -- this test then
+            # behaves identically on a numpy interpreter and on the CI floor.
+            (sandbox / "numpy.py").write_text(_NUMPY_STUB_SRC, encoding="utf-8")
+            probe = sandbox / "osvec_probe.py"
+            probe.write_text(_OSVEC_PROBE_SRC, encoding="utf-8")
+            env = dict(os.environ)
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+            # sys.path[0] alone would do it, but PYTHONSAFEPATH=1 in the
+            # caller's environment suppresses that entry -- then the REAL numpy
+            # would win and the probe would test nothing. Belt and braces.
+            env.pop("PYTHONSAFEPATH", None)
+            env["PYTHONPATH"] = str(sandbox)
+            proc = subprocess.run(
+                [sys.executable, str(probe),
+                 str(ENGINE_MEMORY / "osvec_adapter.py"), str(store),
+                 json.dumps(list(fields))],
+                capture_output=True, text=True, env=env, cwd=str(sandbox),
+            )
+            self.assertEqual(
+                proc.returncode, 0,
+                "the stubbed-numpy probe crashed:\n%s" % proc.stderr,
+            )
+            tail = proc.stdout.strip().splitlines()
+            self.assertTrue(tail, "the probe printed nothing:\n%s" % proc.stderr)
+            results = json.loads(tail[-1])
+            self.assertNotIn("__error__", results, results.get("__error__"))
+            # Nothing may be written outside the throwaway store.
+            self.assertEqual(
+                sorted(p.name for p in sandbox.iterdir()),
+                ["numpy.py", "osvec_probe.py", "store"],
+            )
+            return results
+
+    def test_osvec_secret_gate_is_exercised_without_numpy(self):
+        """The stdlib half must RUN the gate, not merely parse it.
+
+        The AST test above proves the scan loop names every free-text
+        parameter; it cannot prove the loop body does anything. Replacing
+        `secret = looks_like_secret(chunk)` with `secret = None` leaves the
+        loop header -- and therefore that test -- untouched, while any key
+        pasted into text/source_file/memory_id/tags/run_slug is stored
+        verbatim in the plaintext side-car. Every behavioural test of that gate
+        is @needs_numpy, so on the CI floor (3.9/3.10/3.x, no pip install)
+        nothing caught it: 364 tests, OK (audit 2026-07-26).
+
+        This test drives add() for real on ANY interpreter, using a throwaway
+        numpy stub that is competent enough to build a ProjectMemory and
+        nothing else. The field list comes from add()'s own signature, so a new
+        free-text parameter that skips the scan fails here too.
+        """
+        params, _ = self._scanned_fields_of_add(ENGINE_MEMORY / "osvec_adapter.py")
+        fields = [p for p in params if p not in self.NOT_FREE_TEXT]
+        self.assertTrue(fields, "add() lost all of its free-text parameters")
+
+        results = self._probe_add_under_a_numpy_stub(fields)
+
+        # The control comes first: if the stub were too weak to reach the gate
+        # at all, every field would "fail closed" for the wrong reason.
+        clean = results.get("__clean__")
+        self.assertIsNotNone(clean, results)
+        self.assertEqual(
+            clean["kind"], "RuntimeError",
+            "a CLEAN record did not get past the secret scan (%r: %s) -- the "
+            "gate refuses everything, or the numpy stub is too weak to reach "
+            "it" % (clean["kind"], clean["detail"]),
+        )
+        self.assertIn(
+            _PAST_THE_GATE, clean["detail"],
+            "a clean record died before reaching vector math: %s" % clean["detail"],
+        )
+
+        for field in fields:
+            with self.subTest(field=field):
+                got = results.get(field)
+                self.assertIsNotNone(got, results)
+                self.assertEqual(
+                    got["kind"], "ValueError",
+                    "a secret pasted into '%s' was not refused (%s: %s)"
+                    % (field, got["kind"], got["detail"]),
+                )
+                self.assertIn(
+                    "secret pattern", got["detail"],
+                    "'%s' raised for some other reason: %s"
+                    % (field, got["detail"]),
+                )
+                self.assertIn(
+                    field, got["detail"],
+                    "the refusal for '%s' names a different field: %s"
+                    % (field, got["detail"]),
+                )
+                self.assertEqual(
+                    (got["indexed"], got["sidecar"]), (0, 0),
+                    "a secret in '%s' still reached the index/side-car" % field,
+                )
 
     @needs_numpy
     def test_osvec_add_rejects_a_memory_type_outside_the_closed_set(self):

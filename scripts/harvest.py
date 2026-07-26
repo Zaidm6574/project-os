@@ -92,18 +92,29 @@ REJECT_BULLET = re.compile(
 # Prose that is NOTHING BUT the marker is a verdict, not a sentence.
 REJECT_ONLY = re.compile(r"^[\W_]*" + _MARKER + r"[\W_]*$", re.I)
 
-# A verdict does not always reach for punctuation. "Rejected pending review" and
-# "Rejected dupe of lesson 12" are verdicts written in plain words, and the
-# punctuation-only rule above silently harvested them. These continuation words
-# only ever introduce a verdict's REASON, never a sentence about rejection as a
-# subject, so requiring the marker to be standalone and immediately followed by
-# one of them keeps "Rejection criteria belong in the rubric" (criteria is not a
-# continuation word) and "Reject-first workflow" (the marker is not standalone).
+# A verdict does not always reach for punctuation. "Rejected pending review",
+# "Rejected dupe of lesson 12" and "Rejected because it holds a client token"
+# are verdicts written in plain words, and the punctuation-only rule above
+# silently harvested them. The list must include the causal words too
+# ("because/as/for/due/since"), which are the commonest way a reason is
+# introduced and the exact miss that motivated this redesign (see the history
+# note near the top) — content is often rejected precisely BECAUSE it is
+# private, so this direction has to fail closed.
 _CONTINUATION = (r"(?:pending|awaiting|by|per|see|note|dupe|duplicate|"
-                 r"superseded|stale|obsolete|wontfix)")
+                 r"superseded|stale|obsolete|wontfix|"
+                 r"because|as|for|due|since)")
+# The marker here is deliberately NARROWER than _MARKER: only the past
+# participle and the noun. The bare imperative verb is not a verdict, and
+# ordinary safeguard bullets are written that way -- "Reject stale locks before
+# retrying", "Reject duplicate submissions at intake", "Reject by default and
+# allowlist explicitly" all collide with the continuation words above and were
+# being dropped as verdicts (audit 2026-07-26). Verdicts use "Rejected"/
+# "Rejection"; nothing is lost, because "private-only" and "do not harvest"
+# are still honoured anywhere by REJECT_DIRECTIVE.
+_VERDICT_MARKER = r"(?:rejected|rejection)"
 REJECT_BULLET_CONTINUED = re.compile(
-    r"^[\W_]*" + _MARKER + r"(?![-\w])[\s*_`]+" + _CONTINUATION + r"(?![-\w])",
-    re.I)
+    r"^[\W_]*" + _VERDICT_MARKER + r"(?![-\w])[\s*_`]+" + _CONTINUATION
+    + r"(?![-\w])", re.I)
 
 
 def _is_reject_bullet(text):
@@ -251,9 +262,28 @@ def cmd_status():
     return 1 if u else 0
 
 
+def _report_dropped():
+    """Print the rejected/private-only audit trail. Called on EVERY scan path.
+
+    This used to live inside the "staged something fresh" branch only, so a
+    scan whose rows were ALL filtered printed nothing about the filtering --
+    the one case where silent filtering matters most. It is also the
+    load-bearing mitigation for the deliberately permissive status-column rule.
+    """
+    if not DROPPED:
+        return
+    print(f"  filtered {len(DROPPED)} row(s) marked rejected/private-only:")
+    for row in DROPPED[:5]:
+        print(f"    - {row}")
+    if len(DROPPED) > 5:
+        print(f"    ... and {len(DROPPED) - 5} more")
+
+
 def cmd_scan(run):
     d = run_dir(run)
     slug = os.path.basename(d)
+    # DROPPED is module state; a scan reports only its OWN filtered rows.
+    del DROPPED[:]
     harvest_md = read(os.path.join(d, "19-memory-harvest.md"))
     cands = list(bullets_by_section(harvest_md)) if harvest_md else \
         list(eval_log_candidates(read(os.path.join(d, "12-evaluation-log.md"))))
@@ -270,9 +300,19 @@ def cmd_scan(run):
             "tags": [typ, "harvest"], "text": text, "ts": today, "type": typ,
         })
     if not fresh:
-        why = f"all {skipped} already in the brain" if cands else \
-            "no harvest sources found (no 19-memory-harvest.md sections, no eval-log hits)"
+        # "no harvest sources found" was printed even when sources existed and
+        # every row was filtered out -- a false report of the one outcome an
+        # operator most needs to see (audit 2026-07-26).
+        if cands:
+            why = f"all {skipped} already in the brain"
+        elif DROPPED:
+            why = (f"all {len(DROPPED)} row(s) filtered as "
+                   f"rejected/private-only")
+        else:
+            why = ("no harvest sources found (no 19-memory-harvest.md "
+                   "sections, no eval-log hits)")
         print(f"{slug}: {why} — nothing to stage")
+        _report_dropped()
         # nothing new is still a completed harvest
         open(os.path.join(d, MARKER), "w", encoding="utf-8").write(today + "\n")
         return 0
@@ -282,12 +322,7 @@ def cmd_scan(run):
         for o in fresh:
             f.write(json.dumps(o, ensure_ascii=False) + "\n")
     print(f"{slug}: staged {len(fresh)} new (skipped {skipped} dupes) -> {out}")
-    if DROPPED:
-        print(f"  filtered {len(DROPPED)} row(s) marked rejected/private-only:")
-        for row in DROPPED[:5]:
-            print(f"    - {row}")
-        if len(DROPPED) > 5:
-            print(f"    ... and {len(DROPPED) - 5} more")
+    _report_dropped()
     print(f"review the file, then: python3 scripts/harvest.py apply {out}")
     return 0
 
