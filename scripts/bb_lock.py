@@ -131,6 +131,13 @@ def release(target, agent="unknown", force=False, token=None):
     # None: a caller that omits agent entirely used to sail through the
     # tokenless-legacy-lock ownership guard below, since `agent is not None`
     # was False and the whole check short-circuited (2026-07-25).
+    # A caller that forwards an optional variable can also pass agent=None
+    # EXPLICITLY, which reopened the same bypass, so an absent agent is
+    # normalized to the untrusted default here rather than skipping the
+    # guard (2026-07-26). Behaviour pinned by
+    # tests/test_bb_lock_ownership_regression.py.
+    if agent is None:
+        agent = "unknown"
     lp = lock_path(target)
     expected = token or _HELD_TOKENS.get(lp)
     with _guard(lp):
@@ -147,7 +154,7 @@ def release(target, agent="unknown", force=False, token=None):
             print(f"held by {info.get('agent')} (pid {info.get('pid')}); ownership token required",
                   file=sys.stderr)
             return False
-        if current is None and not force and agent is not None \
+        if current is None and not force \
                 and info.get("agent") not in (agent, "unknown"):
             print(f"held by {info.get('agent')} (pid {info.get('pid')}); use --force to override",
                   file=sys.stderr)

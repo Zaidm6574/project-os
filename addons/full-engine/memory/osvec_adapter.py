@@ -364,8 +364,19 @@ class ProjectMemory:
         # Scan EVERY field a human can paste into, not just `text`. brain.py had
         # the identical hole: a secret in `tags` or `source` synced untouched
         # because only the body was checked (audit 2026-07-25).
+        #
+        # `run_slug` says "EVERY field" and means it: it is CLI-exposed as
+        # --run-slug, it is folded into `memory_id` a few lines below, and
+        # save() persists it to the side-car on disk -- so a key pasted there
+        # leaked exactly like the `tags` hole above. It was the one free-text
+        # parameter this loop still missed (adversarial verify 2026-07-26).
+        # `memory_type` is deliberately absent: it is not free text, it is
+        # rejected below unless it is a member of the closed VALID_TYPES set.
+        # test_osvec_scan_covers_every_free_text_parameter_of_add fails if a
+        # future parameter is added without being scanned or justified here.
         for field, value in (("text", text), ("source_file", source_file),
-                             ("memory_id", memory_id), ("tags", tags)):
+                             ("memory_id", memory_id), ("tags", tags),
+                             ("run_slug", run_slug)):
             for chunk in (value if isinstance(value, (list, tuple)) else [value]):
                 if not isinstance(chunk, str):
                     continue

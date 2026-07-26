@@ -18,6 +18,7 @@ Grouped by the root cause the comb kept finding:
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -62,6 +63,42 @@ def load(name: str, path: Path):
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _osvec_on_a_throwaway_store(name: str, tmp: str):
+    """Load osvec_adapter with its store paths pointed at `tmp`.
+
+    ProjectMemory() mkdirs STORE_DIR in __init__, so this must happen BEFORE
+    any store is constructed -- otherwise the test would touch the caller's
+    real vector memory under addons/full-engine/memory/store/.
+    """
+    osvec = load(name, ENGINE_MEMORY / "osvec_adapter.py")
+    osvec.STORE_DIR = tmp
+    osvec.INDEX_PATH = os.path.join(tmp, "project.tvim")
+    osvec.SIDECAR_PATH = os.path.join(tmp, "project.sidecar.json")
+    return osvec
+
+
+class _MangledWriter:
+    """A write handle that corrupts what actually lands on disk.
+
+    Stands in for a short write / truncated filesystem, so a writer's
+    self-verification can be proved to read the FILE and not its own string.
+    """
+
+    def __init__(self, fh, mangle):
+        self._fh = fh
+        self._mangle = mangle
+
+    def write(self, data):
+        return self._fh.write(self._mangle(data))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._fh.close()
+        return False
 
 
 class ValidatorReadsFieldsNotProse(unittest.TestCase):
@@ -331,25 +368,155 @@ class SecretPatternsStayInSync(unittest.TestCase):
                     osvec.looks_like_secret(text), f"false positive on {text!r}"
                 )
 
-    def test_osvec_scans_tags_and_source_not_only_text(self):
+    # `memory_type` is the ONE parameter of add() that is exempt from the secret
+    # scan, and only because it is not free text: add() rejects any value
+    # outside the closed VALID_TYPES set, so nothing pasteable survives to be
+    # stored. test_osvec_add_rejects_a_memory_type_outside_the_closed_set is
+    # what makes that exemption true rather than asserted.
+    NOT_FREE_TEXT = {"self", "memory_type"}
+
+    @staticmethod
+    def _scanned_fields_of_add(path: Path):
+        """The field names add()'s secret scan actually iterates over.
+
+        Read from the AST, not a substring: the point of this test is that a
+        parameter NAME appearing in the source proves nothing (the function
+        signature already contains every one of them). This returns the string
+        literals in the `for field, value in ((...), ...)` header, so deleting
+        or narrowing the loop shrinks the set instead of leaving it intact.
+        """
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        store = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name == "ProjectMemory":
+                store = node
+                break
+        assert store is not None, "osvec_adapter has no ProjectMemory any more"
+        add = None
+        for node in store.body:
+            if isinstance(node, ast.FunctionDef) and node.name == "add":
+                add = node
+                break
+        assert add is not None, "ProjectMemory has no add() any more"
+        params = [a.arg for a in list(add.args.posonlyargs) + list(add.args.args)
+                  + list(add.args.kwonlyargs)]
+        scanned = set()
+        for node in ast.walk(add):
+            if not isinstance(node, ast.For):
+                continue
+            if not isinstance(node.iter, (ast.Tuple, ast.List)):
+                continue
+            for pair in node.iter.elts:
+                if not isinstance(pair, (ast.Tuple, ast.List)) or not pair.elts:
+                    continue
+                head = pair.elts[0]
+                if isinstance(head, ast.Constant) and isinstance(head.value, str):
+                    scanned.add(head.value)
+        return params, scanned
+
+    def test_osvec_scan_covers_every_free_text_parameter_of_add(self):
+        """Nothing a caller can paste into may skip the secret scan.
+
+        This is the stdlib-only half of the vector-memory gate: CI installs no
+        numpy on any leg, so the behavioural tests below all skip there and
+        this is the only check that runs. It is a two-copies-must-agree test
+        (signature vs scan tuple), not a proxy -- deleting the loop empties
+        `scanned`, narrowing it to `text` drops three names, and adding a new
+        parameter without scanning it fails too. `run_slug` was exactly that
+        miss: CLI-exposed, folded into memory_id, persisted to the side-car,
+        and unscanned (adversarial verify 2026-07-26).
+        """
+        params, scanned = self._scanned_fields_of_add(
+            ENGINE_MEMORY / "osvec_adapter.py"
+        )
+        expected = [p for p in params if p not in self.NOT_FREE_TEXT]
+        self.assertTrue(expected, "add() lost all of its free-text parameters")
+        missing = sorted(set(expected) - scanned)
+        self.assertEqual(
+            missing, [],
+            "osvec_adapter.add() accepts %s but never scans %s for secrets -- "
+            "a key pasted there is stored verbatim" % (expected, missing),
+        )
+        stray = sorted(scanned - set(params))
+        self.assertEqual(
+            stray, [],
+            "the scan names %s, which add() no longer accepts" % stray,
+        )
+
+    @needs_numpy
+    def test_osvec_add_rejects_a_memory_type_outside_the_closed_set(self):
+        """Justifies memory_type's exemption from the secret scan above."""
+        with tempfile.TemporaryDirectory() as tmp:
+            osvec = _osvec_on_a_throwaway_store("osvec_type", tmp)
+            mem = osvec.ProjectMemory()
+            with self.assertRaises(ValueError):
+                mem.add("clean text", "sk-ant-api03-" + "A" * 40)
+            self.assertEqual(len(mem.index), 0)
+            self.assertEqual(mem.sidecar, {})
+
+    @needs_numpy
+    def test_osvec_add_refuses_a_secret_in_any_field_not_only_text(self):
         """The exact hole brain.py had: a secret in a non-body field.
 
-        The source-level half needs no numpy, so it runs everywhere; only the
-        live `looks_like_secret` call has to skip on a stdlib-only interpreter.
+        This drives add() itself. The previous version of this test grepped
+        add()'s source for the field NAMES, which the function SIGNATURE
+        already satisfies -- deleting the whole scan loop kept it green
+        (audit 2026-07-26).
         """
         secret = "sk-ant-api03-" + "A" * 40
-        src = (ENGINE_MEMORY / "osvec_adapter.py").read_text(encoding="utf-8")
-        body = src.split("def add(", 1)[1].split("\n    def ", 1)[0]
-        for field in ("source_file", "memory_id", "tags"):
-            with self.subTest(field=field):
-                self.assertIn(
-                    field, body.split("secret pattern")[0],
-                    f"add() does not scan '{field}' for secrets",
-                )
-        if not HAVE_NUMPY:
-            self.skipTest(NO_NUMPY_REASON)
-        osvec = load("osvec_fields", ENGINE_MEMORY / "osvec_adapter.py")
-        self.assertIsNotNone(osvec.looks_like_secret(secret))
+        cases = (
+            ("text", {"text": secret}),
+            ("source_file", {"source_file": secret}),
+            ("memory_id", {"memory_id": secret}),
+            ("tags", {"tags": ["harmless", secret]}),
+            # CLI-exposed as --run-slug, folded into memory_id, and persisted
+            # to the side-car by save(): it leaked exactly like `tags` did
+            # (adversarial verify 2026-07-26).
+            ("run_slug", {"run_slug": secret}),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            osvec = _osvec_on_a_throwaway_store("osvec_fields", tmp)
+            for field, overrides in cases:
+                with self.subTest(field=field):
+                    mem = osvec.ProjectMemory()
+                    kwargs = {
+                        "text": "Prefer the Solo tier before escalating",
+                        "memory_type": "lesson",
+                    }
+                    kwargs.update(overrides)
+                    with self.assertRaises(ValueError) as ctx:
+                        mem.add(**kwargs)
+                    self.assertIn(
+                        field, str(ctx.exception),
+                        f"add() stored a secret pasted into '{field}'",
+                    )
+                    self.assertEqual(
+                        len(mem.index), 0,
+                        f"a secret in '{field}' still reached the vector index",
+                    )
+                    self.assertEqual(
+                        mem.sidecar, {},
+                        f"a secret in '{field}' still reached the side-car",
+                    )
+
+    @needs_numpy
+    def test_osvec_add_still_accepts_an_ordinary_record(self):
+        """The field scan must not turn into a blanket refusal."""
+        with tempfile.TemporaryDirectory() as tmp:
+            osvec = _osvec_on_a_throwaway_store("osvec_clean", tmp)
+            mem = osvec.ProjectMemory()
+            rec = mem.add(
+                "Prefer the Solo tier before escalating to a full swarm",
+                "user-preference",
+                source_file="blackboard/01-user-memory.md",
+                memory_id="pref-001",
+                tags=["tier", "solo"],
+                run_slug="run-alpha",
+            )
+        self.assertEqual(rec.memory_id, "run-alpha/pref-001")
+        self.assertEqual(rec.run_slug, "run-alpha")
+        self.assertEqual(rec.tags, ["tier", "solo"])
+        self.assertEqual(len(mem.index), 1)
 
 
 class GeneratorsDistrustTheirOwnInputs(unittest.TestCase):
@@ -742,14 +909,88 @@ class Round2AdversarialBypasses(unittest.TestCase):
             goal, _tier = new_run._read_goal(str(p))
         self.assertEqual(goal, "Build a credit-card tracker that flags overspend.")
 
+    PLACEHOLDER = "Replace this line with the one-sentence canonical goal."
+    GOAL_TEMPLATE = (
+        "# Project Goal\n\n## Canonical Goal\n\n"
+        "<!-- ONE sentence. This exact line is hashed by goal_guard.py. -->\n\n"
+        + PLACEHOLDER + "\n\n"
+        "## Success Criteria\n\n- [ ] TBD\n"
+    )
+    GOAL = "Track widgets locally"
+
+    def _write_stub(self, tmp, mangle=None):
+        """Run adopt's goal-stub writer in `tmp`, optionally corrupting the write.
+
+        Returns the on-disk text. Raises whatever _write_goal_stub raises.
+        """
+        adopt = load("adopt_disk", ENGINE_MEMORY / "adopt_project.py")
+        run_dir = os.path.join(tmp, "run")
+        os.makedirs(run_dir, exist_ok=True)
+        goal_path = os.path.join(run_dir, "00-project-goal.md")
+        with open(goal_path, "w", encoding="utf-8") as fh:
+            fh.write(self.GOAL_TEMPLATE)
+        if mangle is not None:
+            real_open = open
+
+            def patched_open(path, mode="r", *args, **kwargs):
+                fh = real_open(path, mode, *args, **kwargs)
+                if "w" in mode or "a" in mode:
+                    return _MangledWriter(fh, mangle)
+                return fh
+
+            adopt.open = patched_open
+        try:
+            adopt._write_goal_stub(run_dir, self.GOAL, "README.md", tmp)
+        finally:
+            if mangle is not None:
+                del adopt.open
+        with open(goal_path, encoding="utf-8") as fh:
+            return fh.read()
+
     def test_adopt_verifies_the_file_on_disk_not_its_own_string(self):
-        src = (ENGINE_MEMORY / "adopt_project.py").read_text(encoding="utf-8")
-        verify_block = src.split("Verify the write", 1)[1].split("def ", 1)[0]
-        self.assertIn(
-            "fh.read()", verify_block,
-            "the write-verification still re-parses the in-memory string, so a "
-            "corrupted disk write would report success",
-        )
+        """A short/corrupted write must not report a successful adoption.
+
+        The previous version of this test only grepped the verify block for
+        'fh.read()'. Re-parsing the in-memory string kept that substring on a
+        now-dead line, so the defect it names came back green (audit
+        2026-07-26). These cases drive the writer instead.
+        """
+        goal = self.GOAL
+        PLACEHOLDER = self.PLACEHOLDER
+        cases = {
+            # A truncated write: goal_guard cannot parse a goal at all.
+            "short write": lambda data: data[:40],
+            # A corrupted write: parses fine, but says something else.
+            "wrong goal": lambda data: data.replace(
+                goal, "A goal nobody inferred"
+            ),
+            # The goal sentence is STILL IN THE FILE, just not under the
+            # '## Canonical Goal' anchor goal_guard reads -- what a regressed
+            # _replace_canonical_goal that appends instead of replaces would
+            # produce. Only a verify that re-runs the real parser catches this;
+            # a cruder `if goal not in on_disk` check reports success and kept
+            # all 46 tests of this module green (adversarial verify
+            # 2026-07-26).
+            "goal moved out of the anchor": lambda data: data.replace(
+                goal + "\n", PLACEHOLDER + "\n", 1
+            ) + "\n<!-- stray copy -->\n" + goal + "\n",
+        }
+        for label, mangle in cases.items():
+            with self.subTest(case=label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    with self.assertRaises(SystemExit) as ctx:
+                        self._write_stub(tmp, mangle)
+                self.assertIn(
+                    "adopt:", str(ctx.exception),
+                    "adopt reported success over a bad disk write",
+                )
+
+    def test_adopt_accepts_a_write_that_actually_landed(self):
+        """The disk check must not reject a correct write."""
+        goal_guard = load("gg_disk", ENGINE_MEMORY / "goal_guard.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            on_disk = self._write_stub(tmp)
+        self.assertEqual(goal_guard.canonical_goal(on_disk), self.GOAL)
 
 
 if __name__ == "__main__":
