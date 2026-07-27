@@ -7,6 +7,9 @@ import argparse
 import importlib.util
 import os
 import shutil
+import stat
+import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -465,13 +468,100 @@ def apply_report(existing: str, report: str) -> str:
     return "\n".join(merged).rstrip("\n") + "\n"
 
 
+def _atomic_write_text(dest: Path, text: str) -> None:
+    """Replace ``dest`` with ``text`` in one atomic step, or leave it untouched.
+
+    2026-07-27: this writer used ``Path.write_text``, which opens the
+    destination with mode "w" and truncates the operator's only copy of
+    blackboard/17-capability-preflight.md BEFORE a single new byte exists.
+    That is the worst possible place for this defect: apply_report()'s whole
+    reason to exist is to preserve the hand-written prose outside its markers,
+    and a truncation destroys exactly that. Reproduced end-to-end against the
+    shipped CLI -- a 412-byte preflight with prose above and below the machine
+    block, one interrupted run, and the file was left at 600 bytes of a
+    half-written report: the prose below the block gone, and a
+    `optional-tool-check:begin` marker with no matching `:end`, so the next run
+    could no longer locate its own block either.
+
+    Same defect and same remedy as scripts/brain_archive.py's _atomic_rewrite
+    and scripts/evolution.py's _atomic_write_text, which this follows
+    deliberately rather than inventing a fourth pattern:
+
+    * tempfile.mkstemp() in the DESTINATION's directory. The property doing the
+      work is O_CREAT|O_EXCL, not the unpredictable name: it refuses any
+      pre-existing path, symlink included, so a link pre-planted at a guessable
+      staging name cannot redirect the write. Same directory keeps os.replace()
+      a rename within one filesystem, which is what makes it atomic.
+    * flush + os.fsync before the rename, so a crash cannot leave the renamed
+      file holding data the kernel never committed.
+    * dest is NOT resolved with realpath(). Resolving it re-follows a symlink
+      at write time and hands the guard straight back to whoever planted the
+      link (adversary 2026-07-26 on brain_archive). os.replace() does not
+      follow a symlink -- it replaces the link itself.
+    * mkstemp always creates 0600 regardless of umask, and rename carries the
+      temp file's mode onto the destination, so a naive temp-file rewrite
+      REPLACES the destination's permissions with the writer's. Stat the
+      destination first and reproduce exactly what was there -- never widen,
+      never narrow. chown must run BEFORE chmod: POSIX has a non-root chown()
+      clear setuid/setgid even when it is a same-owner no-op, which would undo
+      the mode just restored. Only a file that does not exist yet gets to be
+      chosen, and there we choose 0600 rather than the umask default -- a
+      preflight report names the tooling and paths of the operator's machine.
+    * any exception unlinks the staged file, so a failed write leaves neither a
+      damaged destination nor litter in blackboard/.
+    """
+    path = os.path.abspath(str(dest))
+    try:
+        dest_stat: os.stat_result | None = os.stat(path)
+    except OSError:
+        dest_stat = None
+
+    fd, tmp_name = tempfile.mkstemp(
+        dir=os.path.dirname(path) or ".",
+        prefix=os.path.basename(path) + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if dest_stat is not None:
+            wanted_mode = stat.S_IMODE(dest_stat.st_mode)
+            if hasattr(os, "chown"):
+                # Best-effort: only root can hand a file to another uid, and a
+                # non-root run that merely has write access must still get the
+                # atomic write.
+                try:
+                    os.chown(tmp_name, dest_stat.st_uid, dest_stat.st_gid)
+                except OSError:
+                    pass
+            # Not best-effort: swallowing this would silently re-introduce the
+            # permission change this branch exists to prevent.
+            os.chmod(tmp_name, wanted_mode)
+            final_mode = stat.S_IMODE(os.stat(tmp_name).st_mode)
+            if final_mode != wanted_mode:
+                # chmod() may drop setuid/setgid without privilege. We cannot
+                # restore those, but we refuse to change the mode *quietly*.
+                print("WARNING: could not preserve mode %s on %s; wrote it as %s"
+                      % (oct(wanted_mode), path, oct(final_mode)),
+                      file=sys.stderr)
+        else:
+            os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
 def write_report(target: Path) -> Path:
     target = target.expanduser().resolve()
     preflight = target / "blackboard" / "17-capability-preflight.md"
     preflight.parent.mkdir(parents=True, exist_ok=True)
     report = build_report(target)
     existing = preflight.read_text(encoding="utf-8") if preflight.exists() else ""
-    preflight.write_text(apply_report(existing, report), encoding="utf-8")
+    _atomic_write_text(preflight, apply_report(existing, report))
     return preflight
 
 

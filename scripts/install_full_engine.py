@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import shlex
 import sys
 from pathlib import Path
@@ -16,6 +17,36 @@ GENERATED_DIRS = {"__pycache__", "store", "out", "graphify-out", ".turbovec"}
 GENERATED_SUFFIXES = (".pyc", ".tvim", ".sidecar.json", ".manifest.json",
                       ".db", ".db.tmp", ".db-wal", ".db-shm", ".db-journal",
                       ".db.tmp-wal", ".db.tmp-shm", ".db.tmp-journal")
+
+
+def _create_private(path) -> bool:
+    """Create `path` as an empty 0600 file, or leave an existing one untouched.
+
+    The shared brain holds lesson text harvested from every project, and every
+    record is credential-scanned before it is allowed in, so it must not be
+    born at the umask default (0644 on a stock umask 022 account).
+    scripts/brain_archive.py already creates this same data with
+    os.open(..., O_CREAT|O_EXCL, 0o600) and gives the reasoning in
+    _mode_or_private(); this is that pattern, kept byte-identical in every
+    module that can bring a brain file into existence -- scripts/brain_append.py,
+    scripts/install_full_engine.py, addons/full-engine/brain/brain.py and
+    addons/full-engine/brain/central_brain.py. Path.touch(), Path.write_text()
+    and open(path, "a") all create at 0666 & ~umask instead, and this repo has
+    already shipped a guard applied to one of two installers, so a sync test
+    pins these copies together.
+
+    O_EXCL is what makes it safe to call unconditionally: it fails with EEXIST
+    when the path already exists -- including when the path is a symlink, even
+    a dangling one -- so an operator who deliberately chose 0640 keeps 0640,
+    and nothing is ever created through a pre-planted name. Returns True only
+    when this call is the one that created the file.
+    """
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return False
+    os.close(fd)
+    return True
 
 
 def nonempty_path(value: str) -> Path:
@@ -178,9 +209,14 @@ def install_full_engine(
     elif not shared_brain.exists():
         if dry_run:
             results.append(f"would write {shared_brain}")
-        else:
-            shared_brain.write_text("", encoding="utf-8")
+        elif _create_private(shared_brain):
             results.append(f"wrote {shared_brain}")
+        else:
+            # exists() said no, O_EXCL said yes: a dangling symlink at the
+            # name, or a concurrent installer that won the race. Either way
+            # this call did not create the file, so it must not write through
+            # whatever is there or claim it wrote it.
+            results.append(f"kept existing {shared_brain}")
     else:
         results.append(f"kept existing {shared_brain}")
 
@@ -283,13 +319,25 @@ def main() -> int:
         print("Project OS full engine add-on install complete.")
     for result in results:
         print(f"- {result}")
+    # 2026-07-27: this returned a hardcoded 0 even after RECORDING refusals
+    # that pointed OUT of the target -- a symlinked memory/ produced 13
+    # "REFUSED" lines and exit 0, while scripts/setup_project_os.py returned 1
+    # on the identical input. install.sh drives BOTH installers against the
+    # same --target under `set -eu`, so this hardcoded 0 was the only reason
+    # `./install.sh <target> --full-engine` reported overall SUCCESS with
+    # roughly a third of the add-on never installed.
+    # Delegating to the sibling's report_refusals keeps ONE definition of the
+    # rule (nonzero iff a refusal escaped the target; a link that stays inside
+    # the target is reported and skipped, not fatal) -- the same reason _guard
+    # imports that module rather than forking it.
+    exit_code = _SETUP.report_refusals(REFUSALS)
     print()
     print("Next:")
     print("1. Run: python3 memory/new_run.py demo --tier solo")
     print("2. Run: python3 memory/score_rubric.py --selftest")
     print("3. Optional central brain: python3 brain/central_brain.py sync --path <central-brain> --project . --project-id <project-id>")
     print("4. If you passed --claude, restart Claude Code or reload the project.")
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

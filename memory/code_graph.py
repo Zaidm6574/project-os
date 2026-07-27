@@ -84,11 +84,44 @@ class _Module:
         self.import_modules = {}  # local alias -> module name
 
 
-def _scan_module(rel, full):
+def _parse_failure(exc):
+    """One line naming WHERE a module stopped parsing."""
+    lineno = getattr(exc, "lineno", None)
+    if lineno:
+        return "line %d: %s" % (lineno, getattr(exc, "msg", None) or exc)
+    return str(exc) or exc.__class__.__name__
+
+
+def _scan_module(rel, full, unparsed=None):
+    """Parse one module, or record WHY it could not be parsed.
+
+    Returning None on its own was a silent drop with teeth (audit 2026-07-27):
+    build() still fingerprints the file into graph["files"], so
+    freshness_problems() sees a hash that matches and `check` answers
+    "CODE-GRAPH: FRESH (all indexed file hashes match current source)" over a
+    graph that is missing an entire module. `orient` then reports
+    "SYMBOL ABSENT" for a symbol sitting on disk, and — worse for a tool whose
+    whole promise is fail-closed evidence — reports an EMPTY caller list for a
+    function the unparsed module calls.
+
+    Skipping is still the right behaviour: one syntax error (a Python 2 file, a
+    half-finished edit, a deliberately broken fixture) must not deny orientation
+    over the rest of the tree, and a fresh clone that happens to contain one
+    must still build. So this stays non-fatal and `build` stays exit 0 — the
+    defect is the SILENCE. Pass `unparsed` (rel -> reason) to collect what was
+    dropped, the way central_brain.read_jsonl's `unparsable` names its dropped
+    line numbers; the two-argument call still returns None unchanged.
+
+    ValueError joins SyntaxError because ast.parse raises it, not SyntaxError,
+    for a source file containing a NUL byte — which used to abort the entire
+    build with a raw traceback instead of skipping one file.
+    """
     try:
         with open(full, encoding="utf-8", errors="replace") as f:
             tree = ast.parse(f.read())
-    except SyntaxError:
+    except (SyntaxError, ValueError) as exc:
+        if unparsed is not None:
+            unparsed[rel] = _parse_failure(exc)
         return None
     mod = _Module(rel, _module_name(rel), tree, _is_test_module(rel))
     for node in tree.body:
@@ -184,12 +217,23 @@ def _local_names(func_node):
 def build(root, out=None):
     root = os.path.abspath(root)
     out = out or os.path.join(root, DEFAULT_OUT)
-    files, modules = {}, {}
+    files, modules, unparsed = {}, {}, {}
     for rel, full in _iter_py_files(root):
         files[rel] = _sha256_file(full)
-        mod = _scan_module(rel, full)
+        mod = _scan_module(rel, full, unparsed)
         if mod is not None:
             modules[mod.name] = mod
+    # A fingerprinted-but-unindexed file is a hole in the evidence this tool
+    # exists to provide, so name every one on stderr (stdout stays the
+    # machine-ish summary line). Nothing is printed when there are none: a
+    # warning that fires on a healthy tree is one nobody reads.
+    for rel in sorted(unparsed):
+        print(f"[code-graph] WARNING: {rel} did not parse ({unparsed[rel]}) — "
+              f"its symbols are NOT in the graph", file=sys.stderr)
+    if unparsed:
+        print(f"[code-graph] WARNING: {len(unparsed)} file(s) are fingerprinted "
+              f"but NOT indexed; callers/callees of anything they touch are "
+              f"incomplete until they parse", file=sys.stderr)
 
     nodes, edges, seen_edges = [], [], set()
     known_ids = set()
@@ -268,7 +312,7 @@ def build(root, out=None):
                     add_edge(caller_id, target, "tests", mod.rel, lineno, method)
 
     graph = {"schema": SCHEMA, "root": root, "files": files,
-             "nodes": nodes, "edges": edges}
+             "unparsed": unparsed, "nodes": nodes, "edges": edges}
     with open(out, "w", encoding="utf-8") as f:
         json.dump(graph, f, indent=2)
     return graph
@@ -297,6 +341,21 @@ def load_graph(path):
     if graph.get("schema") != SCHEMA:
         return None
     return graph
+
+
+def _unparsed_note(graph, prefix="CODE-GRAPH: "):
+    """The 'this graph has holes' caveat, or '' when it has none.
+
+    Read with .get() so a graph.json written before this field existed still
+    loads and orients instead of raising KeyError.
+    """
+    unparsed = graph.get("unparsed") or {}
+    if not unparsed:
+        return ""
+    listing = ", ".join(sorted(unparsed)[:5])
+    more = f" (+{len(unparsed) - 5} more)" if len(unparsed) > 5 else ""
+    return (f"\n{prefix}INCOMPLETE — {len(unparsed)} file(s) did not parse and "
+            f"are NOT in this graph: {listing}{more}")
 
 
 def freshness_problems(root, graph):
@@ -343,7 +402,10 @@ def orient(symbol, root, graph_path, depth=2):
 
     by_id = {n["id"]: n for n in graph["nodes"]}
     if symbol not in by_id:
-        return 3, f"CODE-GRAPH: SYMBOL ABSENT — {symbol}\n{FALLBACK}"
+        # "ABSENT" and "in a file that never parsed" are different facts, and
+        # only one of them is about the symbol. Say which.
+        return 3, (f"CODE-GRAPH: SYMBOL ABSENT — {symbol}"
+                   f"{_unparsed_note(graph)}\n{FALLBACK}")
 
     fwd, rev = {}, {}
     for e in graph["edges"]:
@@ -398,6 +460,10 @@ def orient(symbol, root, graph_path, depth=2):
         "tests": tests,
         "unknowns": unknowns,
         "truncated": up_trunc or down_trunc,
+        # An empty caller list means "no callers IN THIS GRAPH". Ship the list
+        # of files the graph never indexed so the reader can tell that from
+        # "nothing calls this".
+        "unparsed": sorted(graph.get("unparsed") or {}),
     }
     return 0, packet
 
@@ -422,9 +488,12 @@ def main(argv=None):
     default_graph = os.path.join(os.path.abspath(args.root), DEFAULT_OUT)
     if args.cmd == "build":
         graph = build(args.root, args.out)
+        unparsed = graph.get("unparsed") or {}
+        holes = (f", {len(unparsed)} NOT parsed ({', '.join(sorted(unparsed)[:3])})"
+                 if unparsed else "")
         print(f"[code-graph] wrote {args.out or default_graph} "
               f"({len(graph['nodes'])} nodes, {len(graph['edges'])} edges, "
-              f"{len(graph['files'])} files fingerprinted)")
+              f"{len(graph['files'])} files fingerprinted{holes})")
         return 0
     if args.cmd == "check":
         graph = load_graph(args.graph or default_graph)
@@ -436,7 +505,12 @@ def main(argv=None):
                 print(f"  - {p}")
             print(FALLBACK)
             return 1
-        print("CODE-GRAPH: FRESH (all indexed file hashes match current source)")
+        # FRESH is a statement about hashes, so it stays exit 0 and stays
+        # worded that way — but "all indexed" quietly excludes files that never
+        # parsed, so say how many of those there are instead of letting FRESH
+        # be read as COMPLETE.
+        print("CODE-GRAPH: FRESH (all indexed file hashes match current source)"
+              + _unparsed_note(graph))
         return 0
     code, result = orient(args.symbol, args.root,
                           args.graph or default_graph, args.depth)
@@ -456,6 +530,10 @@ def main(argv=None):
                   f"{len(result['unknowns'])}")
         if result["truncated"]:
             print(f"  truncated: expansion cut at depth {result['depth']}")
+        if result["unparsed"]:
+            print(f"  INCOMPLETE: {len(result['unparsed'])} file(s) are not in "
+                  f"the graph ({', '.join(result['unparsed'][:3])}); a caller "
+                  f"there would not appear above")
     return 0
 
 

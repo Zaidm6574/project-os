@@ -12,10 +12,13 @@ These run from the project root and, apart from `osvec_adapter.py`, are
 stdlib-only. The installer copies all of them into an installed project; the
 optional full-engine add-on adds more alongside them.
 
-- `mneme_adapter.py` — the memory index. `build` embeds the shared brain and
-  memory files, `query "..."` searches them. Uses nomic-embed-text via a local
-  Ollama when one is running, and a lexical embedder otherwise; it refuses to
-  query an index built with the other embedder.
+- `mneme_adapter.py` — the memory index. `build` embeds the shared brain
+  (`shared-brain.jsonl` plus its `shared-brain-archive.jsonl` tier) and the
+  canonical-goal section of every `runs/*/00-project-goal.md`; `query "..."`
+  searches them. It does **not** index the markdown in this folder — the notes
+  and rules below are for you to read, not for the index. Uses nomic-embed-text
+  via a local Ollama when one is running, and a lexical embedder otherwise; it
+  refuses to query an index built with the other embedder.
 - `code_graph.py` — a graph of the CURRENT SOURCE CODE (modules, functions,
   classes, tests and the imports/calls/defines edges between them), each node
   fingerprinted with sha256 so staleness is provable. `build` writes
@@ -24,8 +27,9 @@ optional full-engine add-on adds more alongside them.
   narrating an architecture it cannot support. Use it to orient before
   explaining code you have not read.
 - `build_graph.py` — a graph of blackboard/run *relationships* (not code),
-  written to `graphify-out/graph.json`. Run it with `--root blackboard` or
-  `--root runs/<slug>`.
+  written to `graphify-out/graph.json` with a Mermaid `graph TD` view of the
+  same nodes and edges alongside it at `graphify-out/graph.mmd`. Run it with
+  `--root blackboard` or `--root runs/<slug>`.
 - `osvec_adapter.py` — the full-engine vector store (`memory/store/`). Unlike
   the rest of this folder it needs numpy, so `python3 memory/osvec_adapter.py
   selftest` is the only thing that proves it works; a capability report saying

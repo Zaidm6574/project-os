@@ -136,7 +136,14 @@ def _brain_text(o):
 
 
 def _gather():
-    """Collect (id, source, text) tuples from lessons + run goals/decisions.
+    """Collect (id, source, text) tuples from lessons + run goals.
+
+    Sources are exactly the three in _scanned_sources(): the shared brain, its
+    archive tier, and each run's 00-project-goal.md. Nothing else -- not
+    03-decisions.md (which this docstring used to claim) and nothing in
+    memory/. Keep both this list and memory/README.md's mneme bullet honest;
+    tests/test_docs_graph_mermaid_20260727.py pins the README against
+    _scanned_sources() at runtime.
 
     The archive file is indexed too: archiving an entry moves it out of the
     active brain (smaller, sharper flat file) without losing semantic recall.

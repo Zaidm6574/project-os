@@ -50,6 +50,88 @@ def wait_for_lock(lock_dir, timeout=3):
     raise AssertionError("lockfile was not created")
 
 
+# A child that announces its own pid before blocking. Waiting on this marker
+# is an OBSERVABLE proof that `run` finished acquire() (guard released, lease
+# fully written) and reached _run_with_renewal — unlike the lockfile appearing,
+# which happens mid-critical-section inside acquire().
+CHILD_ANNOUNCE = (
+    "import os, pathlib, time; "
+    "pathlib.Path({marker!r}).write_text(str(os.getpid())); "
+    "{body}"
+)
+
+
+def wait_for_child_pid(marker, timeout=15):
+    """Block until the child has published a complete pid, and return it."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            text = Path(marker).read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            text = ""
+        if text.isdigit():
+            return int(text)
+        time.sleep(0.01)
+    raise AssertionError("child command never announced its pid")
+
+
+def revoke_lease(lockfile, agent="new"):
+    """Put the lease into the exact state a reap+re-acquire leaves behind.
+
+    Done while holding the SAME ``<lock>.guard`` flock bb_lock serializes every
+    transition with, so no renew() can interleave with the rewrite. Returns the
+    new owner's fencing token. This is a state transition, not a sleep: once it
+    returns, every renew() by the previous owner must fail forever, so the
+    outcome under test cannot depend on scheduling.
+    """
+    lockfile = Path(lockfile)
+    stolen = "b" * 32
+    guard = Path(str(lockfile) + ".guard")
+    with guard.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            lockfile.write_text(
+                json.dumps({
+                    "path": str(lockfile),
+                    "agent": agent,
+                    "pid": os.getpid(),
+                    "ts": time.time(),
+                    "token": stolen,
+                }),
+                encoding="utf-8",
+            )
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    return stolen
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def wait_until_dead(pid, timeout=30):
+    """Poll until pid is gone. Generous bound: only the outcome is asserted."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not pid_alive(pid):
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def kill_pid(pid):
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, TypeError):
+        pass
+
+
 class TestBBLockHardening(unittest.TestCase):
     def test_run_renews_lease_while_long_command_is_alive(self):
         with tempfile.TemporaryDirectory() as td:
@@ -108,9 +190,128 @@ class TestBBLockHardening(unittest.TestCase):
             self.assertEqual(by_token.returncode, 0, by_token.stderr)
 
     def test_lost_lease_terminates_running_command(self):
-        # a holder whose lease was reaped and re-acquired must stop its
-        # child command instead of running alongside the new owner
-        # (2026-07-17)
+        # A holder whose lease was reaped and re-acquired must stop its child
+        # command instead of running alongside the new owner (2026-07-17).
+        #
+        # Deterministic by construction (2026-07-27). The previous version
+        # SIGSTOPped the holder and slept past the TTL so a real second
+        # acquire could steal the lease. That was timing-dependent in a way no
+        # longer sleep could fix: `run` takes the <lock>.guard flock inside
+        # acquire() AND again on every renewal tick, so SIGSTOP regularly
+        # froze the holder while it OWNED the guard -- the thief could then
+        # never take the guard, timed out against --wait, and the test failed
+        # with "FAILED: locked by ? (pid ?)". Measured 1/40 under load (a
+        # direct probe caught the stopped holder owning the guard in 2 of ~30
+        # runs), and it had already turned one real mutation escape into a
+        # false "caught".
+        #
+        # So the transition is now DRIVEN, not awaited: synchronise on the
+        # child's own pid marker (proof acquire() finished), then revoke the
+        # lease under the guard. The end-to-end reap+steal path stays covered
+        # by test_stress_reap_and_steal_terminates_running_command below.
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "shared.md"
+            lock_dir = Path(td) / "locks"
+            marker = Path(td) / "child.pid"
+            env = {"BB_LOCK_DIR": str(lock_dir), "BB_LOCK_STALE": "0.3"}
+            holder = popen_lock(
+                "run", target, "--agent", "old", "--wait", "5", "--",
+                sys.executable, "-c",
+                CHILD_ANNOUNCE.format(marker=str(marker),
+                                      body="time.sleep(300)"),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            child_pid = None
+            try:
+                lockfile = wait_for_lock(lock_dir)
+                child_pid = wait_for_child_pid(marker)
+                stolen = revoke_lease(lockfile)
+                # Checked BEFORE the holder's exit status, and checked on the
+                # child's real pid: a holder that merely reports "lease lost"
+                # while its child keeps running is the defect, not the fix.
+                self.assertTrue(
+                    wait_until_dead(child_pid),
+                    "child command kept running alongside the new owner after "
+                    "the lease was revoked (pid %s)" % child_pid,
+                )
+                out, err = holder.communicate(timeout=30)
+                self.assertEqual(holder.returncode, 1, out + err)
+                self.assertIn("lease lost", err)
+                # and the dispossessed holder must not delete the new owner's
+                # lease on its way out
+                self.assertTrue(lockfile.exists(),
+                                "holder deleted the new owner's lease")
+                self.assertEqual(
+                    json.loads(lockfile.read_text(encoding="utf-8")).get("token"),
+                    stolen,
+                )
+            finally:
+                # the child inherits the holder's pipes, so it has to die too
+                # or communicate() would block on a still-open stdout
+                kill_pid(child_pid)
+                if holder.poll() is None:
+                    holder.kill()
+                    holder.communicate(timeout=10)
+
+    def test_live_lease_lets_command_run_to_completion(self):
+        # mirror direction: renewal must NOT kill a child whose lease is
+        # healthy, and `run` must propagate the child's real exit status.
+        # Without this, "terminate on lost lease" could be satisfied by
+        # terminating unconditionally.
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "shared.md"
+            lock_dir = Path(td) / "locks"
+            marker = Path(td) / "child.pid"
+            done = Path(td) / "child.done"
+            env = {"BB_LOCK_DIR": str(lock_dir), "BB_LOCK_STALE": "0.3"}
+            body = (
+                "time.sleep(0.9); "
+                f"pathlib.Path({str(done)!r}).write_text('done'); "
+                "raise SystemExit(7)"
+            )
+            holder = popen_lock(
+                "run", target, "--agent", "steady", "--wait", "5", "--",
+                sys.executable, "-c",
+                CHILD_ANNOUNCE.format(marker=str(marker), body=body),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            child_pid = None
+            out = err = ""
+            timed_out = False
+            try:
+                wait_for_lock(lock_dir)
+                child_pid = wait_for_child_pid(marker)
+                try:
+                    out, err = holder.communicate(timeout=60)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+            finally:
+                if holder.poll() is None:
+                    holder.kill()
+                    kill_pid(child_pid)
+                    holder.communicate(timeout=10)
+            self.assertFalse(timed_out, "holder never finished its child command")
+            # the child outlives several renewal ticks (TTL 0.3s => renew
+            # every 0.1s), so only working renewal gets it to the finish line
+            self.assertNotIn("lease lost", err)
+            self.assertTrue(done.exists(), "child was killed mid-run: " + out + err)
+            self.assertEqual(holder.returncode, 7, out + err)
+
+    @unittest.skipUnless(
+        os.environ.get("BB_LOCK_STRESS") == "1",
+        "opt-in stress probe: SIGSTOP can freeze the holder while it owns the "
+        "lock guard, which wedges the thief's acquire for the whole --wait "
+        "window (~2-6% under load). Deterministic coverage of the same "
+        "behaviour lives in test_lost_lease_terminates_running_command; run "
+        "with BB_LOCK_STRESS=1 to exercise the real reap+re-acquire path.",
+    )
+    def test_stress_reap_and_steal_terminates_running_command(self):
         with tempfile.TemporaryDirectory() as td:
             target = Path(td) / "shared.md"
             lock_dir = Path(td) / "locks"

@@ -100,6 +100,36 @@ _PLACEHOLDER_VALUE = re.compile(
     r"[\W_]*$", re.I)
 
 
+def _create_private(path) -> bool:
+    """Create `path` as an empty 0600 file, or leave an existing one untouched.
+
+    The shared brain holds lesson text harvested from every project, and every
+    record is credential-scanned before it is allowed in, so it must not be
+    born at the umask default (0644 on a stock umask 022 account).
+    scripts/brain_archive.py already creates this same data with
+    os.open(..., O_CREAT|O_EXCL, 0o600) and gives the reasoning in
+    _mode_or_private(); this is that pattern, kept byte-identical in every
+    module that can bring a brain file into existence -- scripts/brain_append.py,
+    scripts/install_full_engine.py, addons/full-engine/brain/brain.py and
+    addons/full-engine/brain/central_brain.py. Path.touch(), Path.write_text()
+    and open(path, "a") all create at 0666 & ~umask instead, and this repo has
+    already shipped a guard applied to one of two installers, so a sync test
+    pins these copies together.
+
+    O_EXCL is what makes it safe to call unconditionally: it fails with EEXIST
+    when the path already exists -- including when the path is a symlink, even
+    a dangling one -- so an operator who deliberately chose 0640 keeps 0640,
+    and nothing is ever created through a pre-planted name. Returns True only
+    when this call is the one that created the file.
+    """
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return False
+    os.close(fd)
+    return True
+
+
 def _could_be_credential(value):
     """Could this VALUE be the secret a keyword pattern is hunting for?
 
@@ -521,6 +551,38 @@ def _lessons_from_file(path):
     return out
 
 
+def _refuse_idless(lessons, origin):
+    """Refuse an export whose lessons cannot be identified. Nothing is written.
+
+    export deduplicates by id, so a lesson with no id (or an id that is an
+    empty string) could never be written at all -- it was skipped by the very
+    same `continue` that skips an already-present lesson, and the command then
+    printed "export: N new lesson(s) appended" and exited 0. A lesson vanished
+    and every surface said success (audit 2026-07-27).
+
+    Refusing, rather than appending it id-less, matches the non-object refusal
+    in _lessons_from_file() directly above: a malformed record is the user's
+    data, and this file is the one place that can still tell them. The check
+    runs BEFORE the append handle is opened, so a source with one bad record
+    does not half-commit its good ones -- the same "parse everything before
+    writing anything" rule scripts/harvest.py::cmd_apply learned on 2026-07-25.
+    """
+    missing = [i for i, l in enumerate(lessons)
+               if not str(l.get("id") or "").strip()]
+    if not missing:
+        return
+    shown = ", ".join("#%d" % i for i in missing[:10])
+    more = " +%d more" % (len(missing) - 10) if len(missing) > 10 else ""
+    first = str(lessons[missing[0]].get("text", ""))[:60]
+    sys.exit(
+        f"refuse: {len(missing)} of {len(lessons)} lesson record(s) from "
+        f"'{origin}' have no 'id' (0-based lesson {shown}{more}; first begins "
+        f'"{first}"). export deduplicates by id, so an id-less lesson would be '
+        "dropped in silence. Give each lesson an \"id\" (or \"memory_id\") and "
+        "re-run -- nothing was written."
+    )
+
+
 def cmd_export(args):
     _safe_path(BRAIN_FILE)
     if args.from_file:
@@ -532,17 +594,32 @@ def cmd_export(args):
     # THE gate. export used to append with no secret scan at all, so a record
     # save-chat refuses could be smuggled in via `export --from` (audit 07-25).
     gate_records(lessons, where="export")
+    _refuse_idless(lessons, args.from_file or "osvec_adapter")
     have = _existing_ids(BRAIN_FILE)
-    added = 0
+    added = skipped = 0
+    # open("a") CREATES at 0666 & ~umask; these records just cleared the
+    # credential gate above and must not be born world-readable.
+    _create_private(BRAIN_FILE)
     with open(BRAIN_FILE, "a") as f:
         _heal_truncated_tail(f, BRAIN_FILE)
         for l in lessons:
-            if not l.get("id") or l["id"] in have:
+            # `not l.get("id")` used to sit in this same condition, so a lesson
+            # with NO id was dropped by the identical `continue` that dedupes a
+            # lesson already in the brain -- one is a no-op, the other is a lost
+            # lesson, and both printed "export: N new lesson(s) appended" and
+            # exited 0 (audit 2026-07-27). _refuse_idless above now stops that
+            # export before a single byte is written; only real dedupe is left
+            # here, and it is COUNTED so "0 new" can be told apart from
+            # "0 read".
+            if l["id"] in have:
+                skipped += 1
                 continue
             f.write(json.dumps(l) + "\n")
             have.add(l["id"])
             added += 1
-    print(f"export: {added} new lesson(s) appended to {os.path.relpath(BRAIN_FILE, ROOT)}")
+    note = f" ({skipped} already present)" if skipped else ""
+    print(f"export: {added} new lesson(s) appended to "
+          f"{os.path.relpath(BRAIN_FILE, ROOT)}{note}")
     return 0
 
 
@@ -596,6 +673,8 @@ def cmd_save_chat(args):
     if rid in have:
         print(f"save-chat: kept existing {rid}")
         return 0
+    # Same as cmd_export: the append must not be what creates a 0644 brain.
+    _create_private(BRAIN_FILE)
     with open(BRAIN_FILE, "a", encoding="utf-8") as f:
         _heal_truncated_tail(f, BRAIN_FILE)
         f.write(json.dumps(record, sort_keys=True) + "\n")

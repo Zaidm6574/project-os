@@ -15,8 +15,11 @@ Standard library only. No network access.
 """
 import argparse
 import hashlib
+import os
 import re
+import stat
 import sys
+import tempfile
 
 
 class GoalAnchorMissing(Exception):
@@ -125,6 +128,88 @@ def _read(path):
         return fh.read()
 
 
+def _atomic_write_text(dest, text):
+    """Replace `dest` with `text` in one atomic step, or leave it untouched.
+
+    2026-07-27: migrate() wrote the goal back with `open(path, "w")`, which
+    truncates the run's only 00-project-goal.md BEFORE a single new byte
+    exists. Reproduced end-to-end against the shipped CLI: a 184-byte goal file
+    with a '## Summary' section and the operator's notes, one `--migrate
+    --apply` interrupted mid-write, and the file was left at 120 bytes holding
+    a heading and half of a template comment -- the goal sentence the migration
+    had just seeded itself from was gone, along with every note under it.
+
+    Same defect and same remedy as scripts/brain_archive.py's _atomic_rewrite
+    and scripts/evolution.py's _atomic_write_text, which this follows
+    deliberately rather than inventing another pattern:
+
+    * tempfile.mkstemp() in the DESTINATION's directory. The property doing the
+      work is O_CREAT|O_EXCL, not the unpredictable name: it refuses any
+      pre-existing path, symlink included, so a link pre-planted at a guessable
+      staging name cannot redirect the write. Same directory keeps os.replace()
+      a rename within one filesystem, which is what makes it atomic.
+    * flush + os.fsync before the rename, so a crash cannot leave the renamed
+      file holding data the kernel never committed.
+    * dest is NOT resolved with realpath(). Resolving it re-follows a symlink
+      at write time and hands the guard straight back to whoever planted the
+      link (adversary 2026-07-26 on brain_archive). os.replace() does not
+      follow a symlink -- it replaces the link itself.
+    * mkstemp always creates 0600 regardless of umask, and rename carries the
+      temp file's mode onto the destination, so a naive temp-file rewrite
+      REPLACES the goal file's permissions with the writer's. Stat the
+      destination first and reproduce exactly what was there -- never widen,
+      never narrow. chown must run BEFORE chmod: POSIX has a non-root chown()
+      clear setuid/setgid even when it is a same-owner no-op, which would undo
+      the mode just restored. A file that does not exist yet gets 0600; in
+      practice migrate() only ever rewrites a file it just read.
+    * any exception unlinks the staged file, so a failed migration leaves
+      neither a damaged goal nor litter next to it.
+    """
+    path = os.path.abspath(dest)
+    try:
+        dest_stat = os.stat(path)
+    except OSError:
+        dest_stat = None
+
+    fd, tmp_name = tempfile.mkstemp(
+        dir=os.path.dirname(path) or ".",
+        prefix=os.path.basename(path) + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if dest_stat is not None:
+            wanted_mode = stat.S_IMODE(dest_stat.st_mode)
+            if hasattr(os, "chown"):
+                # Best-effort: only root can hand a file to another uid, and a
+                # non-root run that merely has write access must still get the
+                # atomic write.
+                try:
+                    os.chown(tmp_name, dest_stat.st_uid, dest_stat.st_gid)
+                except OSError:
+                    pass
+            # Not best-effort: swallowing this would silently re-introduce the
+            # permission change this branch exists to prevent.
+            os.chmod(tmp_name, wanted_mode)
+            final_mode = stat.S_IMODE(os.stat(tmp_name).st_mode)
+            if final_mode != wanted_mode:
+                # chmod() may drop setuid/setgid without privilege. We cannot
+                # restore those, but we refuse to change the mode *quietly*.
+                sys.stderr.write(
+                    "WARNING: could not preserve mode %s on %s; wrote it as %s\n"
+                    % (oct(wanted_mode), path, oct(final_mode)))
+        else:
+            os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
 def migrate(goal_path, apply=False):
     """Add a '## Canonical Goal' heading to a goal file that predates it.
 
@@ -169,8 +254,7 @@ def migrate(goal_path, apply=False):
         print("WOULD MIGRATE: %s" % goal_path)
         print("  seeded goal: %r%s" % (placeholder, "" if seed else "  (PLACEHOLDER -- edit it)"))
         return 0
-    with open(goal_path, "w", encoding="utf-8") as fh:
-        fh.write(updated)
+    _atomic_write_text(goal_path, updated)
     print("migrated: %s" % goal_path)
     if not seed:
         print("  WARNING: placeholder goal written -- edit it before trusting the hash")

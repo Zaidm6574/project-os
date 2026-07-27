@@ -52,6 +52,36 @@ from brain import SECRET_PATTERNS, record_secret_hit  # noqa: E402
 sys.path.pop(0)
 
 
+def _create_private(path) -> bool:
+    """Create `path` as an empty 0600 file, or leave an existing one untouched.
+
+    The shared brain holds lesson text harvested from every project, and every
+    record is credential-scanned before it is allowed in, so it must not be
+    born at the umask default (0644 on a stock umask 022 account).
+    scripts/brain_archive.py already creates this same data with
+    os.open(..., O_CREAT|O_EXCL, 0o600) and gives the reasoning in
+    _mode_or_private(); this is that pattern, kept byte-identical in every
+    module that can bring a brain file into existence -- scripts/brain_append.py,
+    scripts/install_full_engine.py, addons/full-engine/brain/brain.py and
+    addons/full-engine/brain/central_brain.py. Path.touch(), Path.write_text()
+    and open(path, "a") all create at 0666 & ~umask instead, and this repo has
+    already shipped a guard applied to one of two installers, so a sync test
+    pins these copies together.
+
+    O_EXCL is what makes it safe to call unconditionally: it fails with EEXIST
+    when the path already exists -- including when the path is a symlink, even
+    a dangling one -- so an operator who deliberately chose 0640 keeps 0640,
+    and nothing is ever created through a pre-planted name. Returns True only
+    when this call is the one that created the file.
+    """
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return False
+    os.close(fd)
+    return True
+
+
 # --------------------------------------------------------------------------- #
 # Concurrent-write lock (audit 2026-07-27)
 # --------------------------------------------------------------------------- #
@@ -142,7 +172,10 @@ def init_central(path: Path) -> Path:
     path = path.expanduser().resolve()
     path.mkdir(parents=True, exist_ok=True)
     brain_file = path / CENTRAL_FILE
-    brain_file.touch(exist_ok=True)
+    # touch() created this at 0666 & ~umask -- 0644 on a stock account -- so
+    # the CROSS-PROJECT brain was world-readable from its first moment, while
+    # scripts/brain_archive.py wrote the very same records 0600.
+    _create_private(brain_file)
     readme = path / README
     if not readme.exists():
         readme.write_text(
@@ -165,6 +198,10 @@ def read_jsonl(path: Path, unparsable: list | None = None) -> list[dict]:
     the loss was invisible on every surface -- the repo's
     data-loss-looks-like-success signature (audit 2026-07-27).
 
+    A file that will not DECODE is different from a line that will not parse:
+    it has no line numbers, so the loss cannot be bounded and the read refuses
+    outright, in the sibling reader's own words (see the handler below).
+
     Pass `unparsable` to collect the 1-based line numbers that were dropped so
     the caller can report them; memory/brain_fts_mirror.py::read_records, the
     strict reader of this same format, names line numbers the same way. The
@@ -173,7 +210,23 @@ def read_jsonl(path: Path, unparsable: list | None = None) -> list[dict]:
     records: list[dict] = []
     if not path.exists():
         return records
-    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        # The SIBLING reader of this exact file, brain.py::_read_jsonl, already
+        # refuses these bytes with this exact sentence; here the same byte
+        # escaped as a raw UnicodeDecodeError traceback out of main(), so one
+        # torn write (every writer uses ensure_ascii=False, so a partial
+        # multi-byte character is a real failure mode) made push/pull/sync/
+        # status look like a CRASH IN THE TOOL rather than damage in the data
+        # (audit 2026-07-27). Two readers of one format must not disagree
+        # about the diagnosis. Refusal, not skip: a file that will not decode
+        # has no line numbers to report, so nothing here can bound the loss.
+        sys.exit(
+            f"refuse: '{path}' is not valid UTF-8 (byte {exc.start}: "
+            f"{exc.reason}); expected a UTF-8 JSON/JSONL file"
+        )
+    for line_no, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
             continue
         try:
@@ -200,6 +253,11 @@ def append_new(path: Path, records: list[dict]) -> int:
     try:
         existing = {record.get("id") for record in read_jsonl(path)}
         added = 0
+        # open("a") CREATES at 0666 & ~umask. init_central is not always the
+        # one that got here first (append_new is called directly, and by pull
+        # against a project brain), so the private creation has to be here too
+        # -- a fix at some of the creation sites is not a fix.
+        _create_private(path)
         with path.open("a", encoding="utf-8") as handle:
             # Never weld onto a crash-truncated last line: appending to a partial
             # JSON fragment makes ONE unparseable line, destroying the damaged
@@ -322,7 +380,9 @@ def pull(path: Path, project: Path, explicit_project_id: str | None = None,
     pid = project_id(project, explicit_project_id)
     dest = project_brain_path(project)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.touch(exist_ok=True)
+    # Same reason as init_central: pull is how a project's brain first comes
+    # into existence on a fresh machine, and touch() would publish it 0644.
+    _create_private(dest)
     safe_records = []
     skipped = 0
     for record in read_jsonl(brain_file, unparsable):

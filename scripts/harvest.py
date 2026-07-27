@@ -363,28 +363,96 @@ def norm(t):
 
 
 def brain_norms():
-    out = []
+    """Normalized text of every shared-brain entry, for the dedupe comparison.
+
+    A line this cannot parse is a line NOT compared against, so the next scan
+    can re-stage a lesson that is already in the brain. That stayed silent
+    (`except ValueError: continue`), and a valid-JSON non-object -- `"a string"`
+    on its own line -- did not even reach that handler: `.get` raised
+    AttributeError and took the whole scan down with a raw traceback
+    (audit 2026-07-27). Name what was skipped, on stderr, with line numbers,
+    exactly as memory/mneme_adapter.py::_gather does over this same file.
+    """
+    out, skipped = [], []
     if os.path.isfile(SHARED_BRAIN):
-        with open(SHARED_BRAIN, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    out.append(norm(json.loads(line).get("text", "")))
-                except ValueError:
-                    continue
+        try:
+            with open(SHARED_BRAIN, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except UnicodeDecodeError as exc:
+            # No line numbers exist for an undecodable file, so the loss cannot
+            # be bounded: dedupe would silently compare against NOTHING, and
+            # every candidate row would be staged as fresh. Same refusal
+            # sentence the brain's own readers use.
+            sys.exit(f"REFUSED: '{SHARED_BRAIN}' is not valid UTF-8 (byte "
+                     f"{exc.start}: {exc.reason}); repair the brain file, then "
+                     f"re-run — nothing was staged")
+        for line_no, line in enumerate(lines, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError as exc:
+                skipped.append((line_no, exc))
+                continue
+            if not isinstance(obj, dict):
+                skipped.append((line_no, "not a JSON object"))
+                continue
+            out.append(norm(obj.get("text", "")))
+    for line_no, why in skipped[:10]:
+        print(f"harvest: WARNING: shared brain line {line_no} of {SHARED_BRAIN} "
+              f"is unreadable ({why}); it was NOT compared against",
+              file=sys.stderr)
+    if len(skipped) > 10:
+        print(f"harvest: WARNING: ... and {len(skipped) - 10} more unreadable "
+              f"brain line(s)", file=sys.stderr)
+    if skipped:
+        print(f"harvest: WARNING: {len(skipped)} brain line(s) took no part in "
+              f"the dupe check, so a lesson already in the brain can be staged "
+              f"again; repair the brain file", file=sys.stderr)
     return [n for n in out if n]
 
 
-def is_dupe(text, norms):
+# Below this many normalized characters a row carries no lesson to speak of.
+MIN_LESSON_CHARS = 20
+
+
+def skip_reason(text, norms):
+    """Why this candidate is not staged: "short", "dupe", or None to stage it.
+
+    These are DIFFERENT FACTS and cmd_scan reports them separately. is_dupe()
+    returned True for both, so a row with too little content was counted as a
+    dupe and `scan` printed "all N already in the brain" -- against a brain
+    that can be, and in the repro provably WAS, EMPTY (audit 2026-07-27). That
+    is a claim about a lookup that never happened: it tells the operator their
+    lesson is safely stored when nothing of the sort is true, and it is the
+    reason a content-free row looks identical to a genuine duplicate.
+    """
     n = norm(text)
-    if len(n) < 20:
-        return True  # too short to be a lesson; treat as noise
+    if len(n) < MIN_LESSON_CHARS:
+        return "short"
     # Dupe = the new lesson is contained in an existing entry (or equal).
     # Deliberately NOT bidirectional: a short old entry contained inside a
     # longer new lesson must not silently drop the richer new one.
-    return any(n in b for b in norms)
+    if any(n in b for b in norms):
+        return "dupe"
+    return None
+
+
+def is_dupe(text, norms):
+    """True when the row must not be staged. See skip_reason() for WHY."""
+    return skip_reason(text, norms) is not None
+
+
+def _skip_summary(dupes, short):
+    """Name each skipped class with its own count, never one as the other."""
+    parts = []
+    if dupes:
+        parts.append(f"{dupes} already in the brain")
+    if short:
+        parts.append(f"{short} with too little content to be a lesson "
+                     f"(under {MIN_LESSON_CHARS} characters)")
+    return ", ".join(parts)
 
 
 # One heading parser, used by BOTH the extractor and the source check in
@@ -672,10 +740,14 @@ def cmd_scan(run):
         cands = list(eval_log_candidates(eval_md))
     norms = brain_norms()
     today = datetime.date.today().isoformat()
-    fresh, skipped = [], 0
+    fresh, skipped_dupe, skipped_short = [], 0, 0
     for i, (typ, text) in enumerate(cands, 1):
-        if is_dupe(text, norms):
-            skipped += 1
+        why = skip_reason(text, norms)
+        if why == "dupe":
+            skipped_dupe += 1
+            continue
+        if why == "short":
+            skipped_short += 1
             continue
         fresh.append({
             "id": f"harvest-{slug}-{today}-{i:02d}", "origin_id": f"{slug}/{source_file}",
@@ -687,7 +759,10 @@ def cmd_scan(run):
         # every row was filtered out -- a false report of the one outcome an
         # operator most needs to see (audit 2026-07-26).
         if cands:
-            why = f"all {skipped} already in the brain"
+            # "all N already in the brain" was printed for rows that were never
+            # looked up in the brain at all -- see skip_reason().
+            why = (f"all {skipped_dupe + skipped_short} candidate row(s) "
+                   f"skipped: {_skip_summary(skipped_dupe, skipped_short)}")
         elif DROPPED:
             why = (f"all {len(DROPPED)} row(s) filtered as "
                    f"rejected/private-only")
@@ -704,7 +779,10 @@ def cmd_scan(run):
     with open(out, "w", encoding="utf-8") as f:
         for o in fresh:
             f.write(json.dumps(o, ensure_ascii=False) + "\n")
-    print(f"{slug}: staged {len(fresh)} new (skipped {skipped} dupes) -> {out}")
+    total_skipped = skipped_dupe + skipped_short
+    note = (f" (skipped {total_skipped}: "
+            f"{_skip_summary(skipped_dupe, skipped_short)})") if total_skipped else ""
+    print(f"{slug}: staged {len(fresh)} new{note} -> {out}")
     _report_dropped()
     print(f"review the file, then: python3 scripts/harvest.py apply {out}")
     return 0

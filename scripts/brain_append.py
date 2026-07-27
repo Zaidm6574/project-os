@@ -39,6 +39,36 @@ MNEME = os.path.join(ROOT, "memory", "mneme_adapter.py")
 CANON_FIELDS = ("id", "type", "text")
 
 
+def _create_private(path) -> bool:
+    """Create `path` as an empty 0600 file, or leave an existing one untouched.
+
+    The shared brain holds lesson text harvested from every project, and every
+    record is credential-scanned before it is allowed in, so it must not be
+    born at the umask default (0644 on a stock umask 022 account).
+    scripts/brain_archive.py already creates this same data with
+    os.open(..., O_CREAT|O_EXCL, 0o600) and gives the reasoning in
+    _mode_or_private(); this is that pattern, kept byte-identical in every
+    module that can bring a brain file into existence -- scripts/brain_append.py,
+    scripts/install_full_engine.py, addons/full-engine/brain/brain.py and
+    addons/full-engine/brain/central_brain.py. Path.touch(), Path.write_text()
+    and open(path, "a") all create at 0666 & ~umask instead, and this repo has
+    already shipped a guard applied to one of two installers, so a sync test
+    pins these copies together.
+
+    O_EXCL is what makes it safe to call unconditionally: it fails with EEXIST
+    when the path already exists -- including when the path is a symlink, even
+    a dangling one -- so an operator who deliberately chose 0640 keeps 0640,
+    and nothing is ever created through a pre-planted name. Returns True only
+    when this call is the one that created the file.
+    """
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return False
+    os.close(fd)
+    return True
+
+
 def canon_gaps(record):
     """Which canon-required fields this record is missing (nonempty strings)."""
     return [f for f in CANON_FIELDS
@@ -166,6 +196,12 @@ def main():
         print("FAILED: could not lock shared-brain.jsonl", file=sys.stderr)
         sys.exit(1)
     try:
+        # open("a") CREATES at 0666 & ~umask, so on a stock umask 022 account
+        # the first append published the brain 0644 -- every record in it has
+        # just been through the credential gate above, and brain_archive.py
+        # writes the same records 0600. Inside the lock, so a concurrent
+        # appender cannot slip a umask-default creation in between.
+        _create_private(SHARED_BRAIN)
         with open(SHARED_BRAIN, "a", encoding="utf-8") as f:
             # Never weld onto a truncated tail. If a previous write died between
             # the buffered write and the flush (SIGKILL, full disk, an
