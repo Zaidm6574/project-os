@@ -48,9 +48,13 @@ SECRET_PATTERNS = [
     re.compile(r"(?<![A-Za-z0-9_])rk_(live|test)_[A-Za-z0-9]{16,}"),   # Stripe restricted
     re.compile(r"AKIA[0-9A-Z]{16}"),                  # AWS access key id
     re.compile(r"ASIA[0-9A-Z]{16}"),                  # AWS session key
-    re.compile(r"(?<![A-Za-z0-9_])ghp_[A-Za-z0-9]{20,}"),
-    re.compile(r"(?<![A-Za-z0-9_])gho_[A-Za-z0-9]{20,}"),
-    re.compile(r"(?<![A-Za-z0-9_])ghs_[A-Za-z0-9]{20,}"),
+    # gh[pours]_ is ONE family: personal (p), OAuth (o), server-to-server (s),
+    # user-to-server (u) and refresh (r). Only the first three were listed, so
+    # a GitHub App's ghu_/ghr_ tokens walked through the gate -- and through
+    # import_chat_history, which certifies its output as redacted (adversary
+    # 2026-07-26). Enumerating a vendor's prefixes one at a time is how this
+    # list has failed before; match the character class, not the examples.
+    re.compile(r"(?<![A-Za-z0-9_])gh[pousr]_[A-Za-z0-9]{20,}"),
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
     re.compile(r"(?<![A-Za-z0-9_])AIza[0-9A-Za-z_\-]{20,}"),           # Google
     re.compile(r"(?<![A-Za-z0-9_])ya29\.[A-Za-z0-9_\-]{20,}"),         # Google OAuth
@@ -428,8 +432,23 @@ def _lessons_from_file(path):
         recs = blob.get("records", blob) if isinstance(blob, dict) else blob
         if isinstance(recs, dict):
             recs = list(recs.values())
+    if not isinstance(recs, list):
+        # a bare JSON scalar (`42`, `"note"`) is iterable-or-not by accident;
+        # say so instead of a TypeError traceback (2026-07-26).
+        sys.exit(f"refuse: '{path}' must hold a list of lesson objects or a "
+                 f"mapping with a 'records' key, got {type(recs).__name__}")
     out = []
-    for r in recs:
+    for i, r in enumerate(recs):
+        # 2026-07-26: a record that is valid JSON but not an object (a bare
+        # string, number or list) has no .get(), so `export --from` died with a
+        # raw AttributeError traceback. Refuse by index rather than skipping:
+        # a malformed line is the user's data, and silently dropping it would
+        # report success for an export that lost a lesson.
+        if not isinstance(r, dict):
+            sys.exit(f"refuse: record #{i} in '{path}' is a "
+                     f"{type(r).__name__}, not a JSON object; every lesson "
+                     "must be a JSON object like "
+                     '{"id": ..., "type": "lesson", "text": ...}')
         if r.get("type") == "lesson" or r.get("memory_type") == "lesson":
             out.append({
                 "id": r.get("id") or r.get("memory_id"),

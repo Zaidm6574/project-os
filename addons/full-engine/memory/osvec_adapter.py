@@ -84,9 +84,9 @@ _SECRET_PATTERNS = [
     r"(?<![A-Za-z0-9_])rk_(live|test)_[A-Za-z0-9]{16,}",
     r"AKIA[0-9A-Z]{16}",
     r"ASIA[0-9A-Z]{16}",
-    r"(?<![A-Za-z0-9_])ghp_[A-Za-z0-9]{20,}",
-    r"(?<![A-Za-z0-9_])gho_[A-Za-z0-9]{20,}",
-    r"(?<![A-Za-z0-9_])ghs_[A-Za-z0-9]{20,}",
+    # One family: personal / OAuth / server-to-server / user-to-server /
+    # refresh. ghu_ and ghr_ were missing while the other three were listed.
+    r"(?<![A-Za-z0-9_])gh[pousr]_[A-Za-z0-9]{20,}",
     r"github_pat_[A-Za-z0-9_]{20,}",
     r"(?<![A-Za-z0-9_])AIza[0-9A-Za-z_\-]{20,}",
     r"(?<![A-Za-z0-9_])ya29\.[A-Za-z0-9_\-]{20,}",

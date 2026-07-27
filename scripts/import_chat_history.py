@@ -2,32 +2,104 @@
 """Create a private Project OS memory report from local chat exports.
 
 This script is intentionally conservative. It does not upload data, does not
-store raw transcripts in the default output, and redacts common secret patterns.
+store raw transcripts in the default output, and redacts secrets using the
+project's ONE authoritative credential list.
+
+Credential shapes are NOT defined here. They are loaded at run time from
+addons/full-engine/brain/brain.py's SECRET_PATTERNS -- the same list
+scripts/brain_append.py gates the shared brain with. The local fork this file
+used to carry had drifted badly: it missed live Slack, SendGrid, Figma, Stripe,
+Twilio and GitLab keys and the generic `api_key=...` catch-all, so a README
+that promised "redacts secrets" wrote them straight into the report
+(audit finding, 2026-07-26). If that list cannot be loaded the importer
+REFUSES and writes nothing rather than falling back to a weaker one.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 
-SECRET_PATTERNS = [
-    (re.compile(r"sk-[A-Za-z0-9_-]{20,}"), "[REDACTED_OPENAI_KEY]"),
-    (re.compile(r"sk-proj-[A-Za-z0-9_-]{20,}"), "[REDACTED_OPENAI_KEY]"),
-    (re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"), "[REDACTED_GITHUB_TOKEN]"),
-    (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "[REDACTED_GITHUB_TOKEN]"),
-    (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED_AWS_KEY]"),
-    (re.compile(r"ASIA[0-9A-Z]{16}"), "[REDACTED_AWS_KEY]"),
-    (re.compile(r"AIza[0-9A-Za-z_-]{20,}"), "[REDACTED_GOOGLE_KEY]"),
+ROOT = Path(__file__).resolve().parents[1]
+
+# Where brain.py lives: the repo / bootstrapped layout, and the
+# install_full_engine layout (addons/full-engine/brain -> <project>/brain).
+BRAIN_MODULE_CANDIDATES = (
+    ROOT / "addons" / "full-engine" / "brain" / "brain.py",
+    ROOT / "brain" / "brain.py",
+)
+
+CREDENTIAL_REPLACEMENT = "[REDACTED_CREDENTIAL]"
+
+# A shape the shared list matches only the HEADER of. It must run BEFORE the
+# credential patterns: once brain.py has replaced `-----BEGIN ... KEY-----`
+# there is no anchor left for the whole-block pattern, and the key BODY would
+# survive in the report. Detection is still brain.py's; this only widens the
+# span.
+SPAN_WIDENER_PATTERNS = [
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S), "[REDACTED_PRIVATE_KEY]"),
+]
+
+# Personal data the shared credential list does not carry. No vendor
+# credential shape may be defined here, because that is what drifts.
+PII_PATTERNS = [
     (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "[REDACTED_EMAIL]"),
     (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[REDACTED_SSN_LIKE_VALUE]"),
     (re.compile(r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b"), "[REDACTED_PHONE_LIKE_VALUE]"),
 ]
+
+
+class RedactionUnavailable(RuntimeError):
+    """The authoritative credential list could not be loaded."""
+
+
+def load_credential_patterns() -> list:
+    """Return brain.py's SECRET_PATTERNS as (regex, replacement) pairs.
+
+    Loaded by file path (the install_full_engine.load_central_brain_module
+    idiom) so an unrelated `brain` module on sys.path cannot shadow it, and
+    gated on SECRET_SCAN_EXHAUSTIVE exactly like scripts/brain_append.py so an
+    older brain.py cannot silently downgrade this to a narrower list.
+
+    Raises RedactionUnavailable on every failure shape; the caller refuses.
+    """
+    path = next((p for p in BRAIN_MODULE_CANDIDATES if p.is_file()), None)
+    if path is None:
+        raise RedactionUnavailable(
+            "the brain module is not present at "
+            + " or ".join(str(p) for p in BRAIN_MODULE_CANDIDATES)
+        )
+    spec = importlib.util.spec_from_file_location("project_os_brain_patterns", str(path))
+    if spec is None or spec.loader is None:
+        raise RedactionUnavailable(f"{path} could not be loaded")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # noqa: BLE001 - any import failure must fail closed
+        raise RedactionUnavailable(f"{path} failed to import ({exc})")
+    if not getattr(module, "SECRET_SCAN_EXHAUSTIVE", False):
+        raise RedactionUnavailable(
+            f"{path} does not advertise SECRET_SCAN_EXHAUSTIVE, so it may screen "
+            "fewer shapes than the shared-brain gate"
+        )
+    patterns = getattr(module, "SECRET_PATTERNS", None)
+    if (not isinstance(patterns, (list, tuple)) or not patterns
+            or not all(hasattr(p, "finditer") for p in patterns)):
+        raise RedactionUnavailable(f"{path} exposes no usable SECRET_PATTERNS")
+    return [(p, CREDENTIAL_REPLACEMENT) for p in patterns]
+
+
+def redaction_patterns(credential_patterns: list) -> list:
+    """Order the passes: widen spans, then screen credentials, then strip PII."""
+    return SPAN_WIDENER_PATTERNS + list(credential_patterns) + PII_PATTERNS
+
 
 TOOL_KEYWORDS = [
     "codex",
@@ -50,9 +122,64 @@ TOOL_KEYWORDS = [
 ]
 
 
-def redact(text: str) -> str:
-    for pattern, replacement in SECRET_PATTERNS:
-        text = pattern.sub(replacement, text)
+def _sub_whole_tokens(text: str, pattern, replacement: str):
+    """Replace each match, widened to the whitespace-delimited token(s) it sits in.
+
+    Detection stays exactly brain.py's; only the replacement SPAN is widened,
+    and only outward to whitespace. Several shared patterns match a prefix of a
+    longer credential -- SendGrid's `SG.<id>.<signature>` pattern stops at the
+    second dot, JWT stops before the signature -- so a plain `sub` leaves half
+    the key sitting in the report. Widening is generic (no vendor shape is
+    re-implemented here) and cannot reach past a space, so surrounding prose is
+    untouched. Returns (text, replacement_count).
+    """
+    spans = []
+    hits = 0
+    for match in pattern.finditer(text):
+        start, end = match.span()
+        # Both scans are bounded by the previous span's end, which is always a
+        # whitespace index (or end of text). Without that bound a long
+        # whitespace-free blob -- a minified JSON export line -- rescans the
+        # same token once per match and turns this into O(n^2): 96 KB took 80s.
+        floor = spans[-1][1] if spans else 0
+        while start > floor and not text[start - 1].isspace():
+            start -= 1
+        if spans and spans[-1][1] >= end:
+            end = spans[-1][1]  # same token; already scanned to its boundary
+        else:
+            while end < len(text) and not text[end].isspace():
+                end += 1
+        hits += 1
+        # Merge rather than skip: widening can push a span over the start of
+        # the NEXT match, and dropping that match would leave its tail (the
+        # body of a second PEM block glued to the first) in the report.
+        if spans and start <= spans[-1][1]:
+            spans[-1][1] = max(spans[-1][1], end)
+        else:
+            spans.append([start, end])
+    if not hits:
+        return text, 0
+    out = []
+    pos = 0
+    for start, end in spans:
+        out.append(text[pos:start])
+        out.append(replacement)
+        pos = end
+    out.append(text[pos:])
+    return "".join(out), hits
+
+
+def redact(text: str, patterns: list, counts: Counter = None) -> str:
+    """Redact every match of `patterns`, tallying replacements into `counts`.
+
+    The tally is what makes a redaction visible: the importer prints it and
+    writes it into the report, so a transcript that carried credentials can
+    never be summarized silently.
+    """
+    for pattern, replacement in patterns:
+        text, hits = _sub_whole_tokens(text, pattern, replacement)
+        if hits and counts is not None:
+            counts[replacement] += hits
     return text
 
 
@@ -94,10 +221,10 @@ def read_export(path: Path) -> list[str]:
     return chunks
 
 
-def clean_lines(chunks: list[str]) -> list[str]:
+def clean_lines(chunks: list[str], patterns: list, counts: Counter = None) -> list[str]:
     lines: list[str] = []
     for chunk in chunks:
-        chunk = redact(chunk)
+        chunk = redact(chunk, patterns, counts)
         for line in chunk.splitlines():
             line = re.sub(r"\s+", " ", line).strip()
             if 40 <= len(line) <= 500:
@@ -132,7 +259,13 @@ def clipped_hint(line: str, max_words: int = 10) -> str:
     return hint + ("..." if len(words) > max_words else "")
 
 
-def write_summary(lines: list[str], output: Path, max_items: int, include_excerpts: bool) -> None:
+def write_summary(
+    lines: list[str],
+    output: Path,
+    max_items: int,
+    include_excerpts: bool,
+    redaction_counts: Counter = None,
+) -> None:
     preferences = select_lines(
         lines,
         [r"\bi want\b", r"\bi like\b", r"\bi prefer\b", r"\bi need\b", r"\bmy goal\b", r"\bi don't want\b"],
@@ -161,7 +294,14 @@ def write_summary(lines: list[str], output: Path, max_items: int, include_excerp
         f.write("# Private Chat Memory Summary\n\n")
         f.write("Generated locally from user-provided exports. Review before using. Keep this file private.\n\n")
         f.write("This default report avoids copying full source lines. Use it as a review queue, not as verified memory.\n\n")
-        f.write("## Likely Preferences\n\n")
+        # A redaction that nobody can see is indistinguishable from a leak.
+        # Always state the tally, including the zero case.
+        counts = redaction_counts or Counter()
+        f.write("## Redactions Applied\n\n")
+        f.write(f"- Secret-like values redacted before writing: {sum(counts.values())}\n")
+        for label, count in sorted(counts.items()):
+            f.write(f"- {label}: {count}\n")
+        f.write("\n## Likely Preferences\n\n")
         f.write(f"- Candidate preference lines found: {len(preferences)}\n")
         if include_excerpts:
             for item in preferences:
@@ -199,13 +339,28 @@ def main() -> int:
 
     input_path = Path(args.input).expanduser()
     output_path = Path(args.output).expanduser()
+    # Load the shared credential list BEFORE reading or writing anything: with
+    # no authoritative patterns there is no safe report to write, so refuse
+    # instead of degrading to a weaker local list.
+    try:
+        patterns = redaction_patterns(load_credential_patterns())
+    except RedactionUnavailable as exc:
+        print(
+            f"REFUSED: {exc}; refusing to write a report that was never screened "
+            "for credentials. Restore addons/full-engine/brain/brain.py (the "
+            "authoritative secret list) and retry.",
+            file=sys.stderr,
+        )
+        return 2
     try:
         chunks = read_export(input_path)
     except FileNotFoundError as exc:
         parser.error(str(exc))
-    lines = clean_lines(chunks)
-    write_summary(lines, output_path, args.max_items, args.include_excerpts)
+    redaction_counts: Counter = Counter()
+    lines = clean_lines(chunks, patterns, redaction_counts)
+    write_summary(lines, output_path, args.max_items, args.include_excerpts, redaction_counts)
     print(f"Wrote private memory summary: {output_path}")
+    print(f"Redacted {sum(redaction_counts.values())} secret-like value(s) before writing.")
     print("Review the original exports manually before copying any summary into the project blackboard.")
     return 0
 
