@@ -24,8 +24,10 @@ import datetime as dt
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -43,6 +45,172 @@ BRAIN = os.environ.get(
 ARCHIVE = (BRAIN[: -len(".jsonl")] if BRAIN.endswith(".jsonl") else BRAIN) + "-archive.jsonl"
 assert ARCHIVE != BRAIN, "archive path must never collide with the active brain path"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _within(real_root, real_path):
+    if real_path == real_root:
+        return True
+    try:
+        return os.path.commonpath([real_root, real_path]) == real_root
+    except ValueError:
+        # Different drives, or an embedded NUL: not provably contained.
+        return False
+
+
+def _escapes_brain_dir(path):
+    """Real target when `path` is a symlink -- ANY symlink.
+
+    This was once a containment check: a link that still resolved inside the
+    brain directory was allowed, on the theory that pointing the brain at a
+    sibling store is a supported layout. An adversary took both halves of that
+    apart (2026-07-26). A link is refused outright now:
+
+      * a link INSIDE the directory is not safe either -- pointing the archive
+        at the brain made the moved entry get appended to the brain and then
+        overwritten by the rewrite, so it survived in NEITHER file while the
+        tool printed "archived 1" and the docstring promised nothing is ever
+        deleted;
+      * `os.path.islink()` cannot see a HARD link, so this check can never be
+        the only guard. The sinks below open with O_NOFOLLOW and verify the
+        FILE DESCRIPTOR they actually hold (st_nlink), which is what closes
+        the hardlink and the swap-after-the-check race.
+
+    A path check alone is advisory: it reports a clear reason before any side
+    effect. It is the fd checks that are load-bearing.
+    """
+    if not os.path.islink(path):
+        return ""
+    return os.path.realpath(path)
+
+
+def _mode_or_private(path):
+    """Permissions of `path`, or 0600 when it does not exist yet.
+
+    The brain holds lesson text harvested from every project, so when there is
+    no existing file to copy permissions from we pick the restrictive answer
+    instead of the umask default (0644 on a stock umask 022 account).
+    """
+    try:
+        return stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        return 0o600
+
+
+def _copy_backup(src, dest_base):
+    """Copy `src` to `dest_base` (or a numbered sibling) without following links.
+
+    2026-07-26 (audit): the backup name is "<brain>.pre-archive-<stamp>" and
+    the stamp is only second-resolution, so it is guessable; shutil.copy2()
+    FOLLOWS a symlink and truncates, which let a link planted at that name
+    redirect the copy on top of an arbitrary file the user can write.
+    O_CREAT|O_EXCL is what closes that: POSIX requires it to fail with EEXIST
+    when the path already exists, and to fail *even when the path is a
+    symlink*, including a dangling one -- so this never writes through
+    anything that was already there.
+
+    A genuinely taken name (a second archive inside the same second) falls
+    through to a numbered sibling rather than overwriting: this module
+    promises backups are kept, so clobbering one would be its own data loss.
+    The path actually written is returned, and that is the one apply prints.
+    """
+    taken = None
+    for n in range(1, 51):
+        path = dest_base if n == 1 else "%s-%d" % (dest_base, n)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError as exc:
+            taken = exc
+            continue
+        with os.fdopen(fd, "wb") as out, open(src, "rb") as f:
+            shutil.copyfileobj(f, out)
+        shutil.copystat(src, path)  # what copy2() carried over: mode + times
+        return path
+    raise taken
+
+
+def _atomic_write_preserving_mode(dest, text):
+    """Replace dest's contents atomically, never writing through a planted path.
+
+    2026-07-26 (audit): this rewrite went through a fixed, guessable
+    "<brain>.tmp" name opened with plain open(..., "w"). Anyone able to create
+    a file in the brain directory could pre-plant a symlink there; open()
+    follows it, so the run truncated whatever the link pointed at, and
+    os.replace() -- which does NOT follow links -- then renamed the symlink
+    itself over the brain, leaving the active brain aliased to the file it had
+    just destroyed. Reproduced end-to-end before this fix.
+
+    tempfile.mkstemp() closes the hole, and the property doing the work is
+    O_EXCL, not the unpredictable name: mkstemp opens with O_CREAT|O_EXCL
+    (plus O_NOFOLLOW where the platform has it), and O_CREAT|O_EXCL fails with
+    EEXIST on any pre-existing path, symlinks included. Randomising the name
+    alone would only make pre-planting harder; O_EXCL makes writing through an
+    existing path impossible. os.replace() then swaps the finished file in as
+    one atomic rename, so no reader ever sees a half-written brain.
+
+    Mode is carried across the swap exactly as in
+    addons/full-engine/memory/cost_actuals.py: mkstemp always creates 0600
+    regardless of umask and rename carries the temp file's mode onto the
+    destination, so a naive temp-file rewrite REPLACES the brain's own
+    permissions with whatever the writer happened to create (the old
+    open(..., "w") handed a deliberately 0600 brain back as 0644, publishing
+    every project's lesson text to every other account on the machine). Stat
+    the destination and reproduce what was already there -- we never widen and
+    never narrow. Only when the destination is absent do we choose, and there
+    we choose 0600 rather than cost_actuals's umask default, which is right
+    for a cost report meant to be read by teammates and wrong for the brain.
+
+    dest is NOT resolved. Resolving it re-followed a symlink at write time,
+    which handed the whole guard back: an attacker who swapped the brain for a
+    link AFTER the caller's check still had the rewrite land on the link's
+    target, destroying it and re-aliasing the brain to it (adversary
+    2026-07-26). os.replace() does not follow a symlink -- it replaces the link
+    itself -- so writing to the literal path is both the safe behaviour and the
+    one that keeps an operator's deliberate layout from silently redirecting a
+    rewrite.
+    """
+    real_dest = os.path.abspath(dest)
+    try:
+        dest_stat = os.stat(real_dest)
+    except OSError:
+        dest_stat = None
+
+    fd, tmp_name = tempfile.mkstemp(
+        dir=os.path.dirname(real_dest) or ".",
+        prefix=os.path.basename(real_dest) + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        if dest_stat is not None:
+            wanted_mode = stat.S_IMODE(dest_stat.st_mode)
+            if hasattr(os, "chown"):
+                # Best-effort: only root can hand a file to another uid, and a
+                # non-root run that merely has write access should still get
+                # the atomic write. It must run BEFORE the chmod -- POSIX has
+                # a non-root chown() clear setuid/setgid, even a same-owner
+                # no-op one, which would undo the mode we just restored.
+                try:
+                    os.chown(tmp_name, dest_stat.st_uid, dest_stat.st_gid)
+                except OSError:
+                    pass
+            # Not best-effort: swallowing this would silently re-introduce the
+            # permission change this function exists to prevent.
+            os.chmod(tmp_name, wanted_mode)
+            final_mode = stat.S_IMODE(os.stat(tmp_name).st_mode)
+            if final_mode != wanted_mode:
+                # chmod() may drop setuid/setgid without privilege. We cannot
+                # restore those, but we refuse to change the mode *quietly*.
+                print("WARNING: could not preserve mode %s on %s; wrote it as %s"
+                      % (oct(wanted_mode), real_dest, oct(final_mode)),
+                      file=sys.stderr)
+        else:
+            os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, real_dest)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def _rows(path):
@@ -122,6 +290,19 @@ def cmd_apply(args):
         print("FAILED: could not lock shared brain", file=sys.stderr)
         return 1
     try:
+        # Checked INSIDE the lock. It used to run before acquire(), and
+        # acquire() waits up to 15s for a concurrent agent -- an attacker-sized
+        # window to swap the brain for a symlink after the check had passed
+        # (adversary 2026-07-26). Holding the lock first shrinks the window to
+        # the writes themselves, which is why each sink below re-verifies its
+        # own file descriptor rather than trusting this.
+        for label, path in (("shared brain", BRAIN), ("archive", ARCHIVE)):
+            target = _escapes_brain_dir(path)
+            if target:
+                print(f"REFUSED: the {label} path {path} is a symlink -> "
+                      f"{target}; refusing to write through it",
+                      file=sys.stderr)
+                return 2
         # 2026-07-25: rows/move were computed from a pre-lock read; a
         # concurrent writer could append between that read and lock
         # acquisition, and the stale in-memory `keep` snapshot written back
@@ -132,20 +313,54 @@ def cmd_apply(args):
             move = [o for o in rows if _rid(o) in wanted]
         else:
             move = [o for o, _ in _interest_candidates(rows, args.interest_days)]
-        backup = BRAIN + ".pre-archive-" + time.strftime("%Y%m%d-%H%M%S")
-        shutil.copy2(BRAIN, backup)
+        # The mode the brain is wearing right now: the archive holds the very
+        # same lesson text, so a brain that is private must not spawn a
+        # world-readable archive on its first append.
+        brain_mode = _mode_or_private(BRAIN)
+        try:
+            backup = _copy_backup(
+                BRAIN, BRAIN + ".pre-archive-" + time.strftime("%Y%m%d-%H%M%S"))
+        except FileExistsError:
+            print("REFUSED: every candidate backup name next to the shared "
+                  "brain is already taken; refusing to archive without a "
+                  "backup", file=sys.stderr)
+            return 2
         move_ids = {id(o) for o in move}
         keep = [o for o in rows if id(o) not in move_ids]
         stamp = dt.date.today().isoformat()
-        with open(ARCHIVE, "a", encoding="utf-8") as f:
+        archive_existed = os.path.exists(ARCHIVE)
+        # O_NOFOLLOW refuses a symlink at the final component atomically -- no
+        # check-then-open window -- and st_nlink on the OPEN descriptor is the
+        # only way to see a hard link, which os.path.islink() is blind to. A
+        # pre-planted hardlink at the archive name otherwise appended every
+        # archived lesson into an arbitrary file with no race at all
+        # (adversary 2026-07-26).
+        try:
+            fd = os.open(ARCHIVE,
+                         os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                         | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except OSError as e:
+            print(f"REFUSED: cannot open the archive {ARCHIVE} safely "
+                  f"({e.strerror or e}); refusing to write through it",
+                  file=sys.stderr)
+            return 2
+        if os.fstat(fd).st_nlink > 1:
+            os.close(fd)
+            print(f"REFUSED: the archive {ARCHIVE} has more than one hard link;"
+                  f" writing would also write the other name", file=sys.stderr)
+            return 2
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
             for o in move:
                 o["archived"] = stamp
                 f.write(json.dumps(o, ensure_ascii=False) + "\n")
-        tmp = BRAIN + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            for o in keep:
-                f.write(json.dumps(o, ensure_ascii=False) + "\n")
-        os.replace(tmp, BRAIN)
+        if not archive_existed:
+            # Created just now (0600, umask cannot widen it): match the active
+            # brain instead of the umask default. An archive that already
+            # exists keeps whatever mode its owner chose.
+            os.chmod(ARCHIVE, brain_mode)
+        _atomic_write_preserving_mode(
+            BRAIN,
+            "".join(json.dumps(o, ensure_ascii=False) + "\n" for o in keep))
         print(f"archived {len(move)} -> {ARCHIVE}")
         print(f"active brain: {len(rows)} -> {len(keep)} entries (backup: {backup})")
     finally:
