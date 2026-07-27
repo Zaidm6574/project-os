@@ -2,20 +2,29 @@
 
 [![Tests](https://github.com/Zaidm6574/project-os/actions/workflows/test.yml/badge.svg)](https://github.com/Zaidm6574/project-os/actions/workflows/test.yml)
 
-The system I use to ship real software with AI assistants — most recently a live booking application for a working auto-detailing business. The "agents" here are prompt roles executed by Claude/Codex sessions, not autonomous background processes; the engineering is in the locking, validation, and verification tooling underneath them. It gives an AI-assisted project persistent goals, decisions, verification gates, and memory, instead of leaving everything inside one disappearing chat.
+A workflow template for AI coding assistants — a goal file, a shared blackboard, and operating rules the assistant reads at the start of every session — plus the Python that keeps the template from lying to you: file locks with fencing tokens, a plan gate that refuses a plan which never says how the result will be checked, atomic writes that survive a crash mid-rewrite, and a secret gate that fails closed before chat memory syncs anywhere.
 
-![Fresh clone, full test suite green, a sham plan rejected, a real plan accepted — 20 seconds, no dependencies](docs/proof.gif)
+The template is Markdown. The tooling underneath it is not: **38,000+ lines of Python against ~4,000 lines of Markdown, and roughly two thirds of that Python is tests.** 900+ tests, zero third-party dependencies, running on the Python that already ships with macOS — no `pip install`, no virtualenv, no `requirements.txt`.
 
-Don't take the README's word for any of this:
+Don't take the README's word for any of that. On a fresh clone:
 
 ```bash
 git clone https://github.com/Zaidm6574/project-os.git && cd project-os
-python3 -m unittest discover -s tests    # 500+ tests, zero dependencies
+/usr/bin/python3 -V                              # 3.9.6 — the stock macOS interpreter
+/usr/bin/python3 -m unittest discover -s tests   # 900+ tests, zero dependencies
 ```
 
-Built by someone with ADHD who needed project state to live outside his head. The first version of that detailing site looked finished but couldn't take a booking — it failed silently, for real people. Project OS is what I built so that never happens again: plans are rejected unless they declare how the result will be checked, concurrent agents can't silently erase each other's work (fencing-token file locks), and chat-derived memory never syncs without explicit approval (privacy fail-closed).
+That takes a couple of minutes and ends `OK`. Every skip names the specific dependency it needs — all but one want `numpy` for the optional vector-memory layer. If you have six seconds instead:
 
-The suite covers installation, concurrency, privacy boundaries, plan verification, and memory tooling. An adversarial model-judge review found real flaws (a sync gate that silently dropped every lesson, a validator/compiler mismatch); each became a regression test before the fix landed.
+```bash
+/usr/bin/python3 -m unittest tests.test_docs_claims_20260726 \
+  tests.test_brain_privacy_gate tests.test_brain_archive_security_20260726 \
+  tests.test_bb_lock_hardening 2>&1 | tail -1     # -> OK (skipped=1)
+```
+
+The first of those four parses this README, runs the commands in it, and fails if the output does not match what the page claims.
+
+Scope, stated plainly so you can stop reading if it isn't what you want: the "agents" here are prompt roles executed by a Claude or Codex session — structured instructions, not autonomous background processes. Nothing in this repo runs on its own, and the plan gate proves a plan *declares* a check, never that the check was executed.
 
 ## Check these claims yourself
 
@@ -29,6 +38,8 @@ Every load-bearing claim in this README has a command a stranger can run on a fr
 | Chat-derived memory never syncs to the shared brain without explicit approval | `python3 -m unittest tests.test_brain_privacy -v` |
 | The installer fails closed below Python 3.10 and names the interpreter it found | `PATH=/usr/bin:/bin sh install.sh /tmp/demo --dry-run` (on a machine whose only `python3` is older than 3.10, e.g. stock macOS: exits 1, prints `found python3 = 3.9.6 (/usr/bin/python3); ...`) |
 
+![Fresh clone, full test suite green, a sham plan rejected, a real plan accepted — 20 seconds, no dependencies](docs/proof.gif)
+
 The plan gate, live — the checker's `verification.method`/`expected` are placeholders, so the plan never gets created:
 
 ```bash
@@ -41,6 +52,43 @@ python3 scripts/plan_artifact.py create --goal "demo" --steps-file /tmp/sham.jso
 ```
 
 Swap those placeholders for a real method and expected result and the same command succeeds. The gate is structural: it enforces that every work step is covered by a checker and that at least one checker declares a nonempty, non-placeholder verification. It cannot tell whether that verification was ever executed — a plausible-sounding but never-run `method` is accepted, and confirming it actually ran stays the human gate's job (see [docs/verifier-ladder.md](docs/verifier-ladder.md)).
+
+## How this is built
+
+Four pieces worth opening, each with the reason it exists and the command that settles it. Run them from a fresh clone; none of them writes to the repo.
+
+**`tests/test_docs_claims_20260726.py` — this README is executed, not proofread.** It extracts the fenced blocks below, runs them, and diffs the output against what the page quotes. It also asserts the documented install tree equals what the installer actually creates, that the interpreter probe order matches `install.sh`'s real loop, and that this README does not claim more than the plan gate can prove.
+
+```bash
+/usr/bin/python3 -m unittest tests.test_docs_claims_20260726 2>&1 | tail -1
+# OK
+```
+
+**`scripts/brain_archive.py` — the path check is not the guard; the descriptor is.** `os.path.islink()` cannot see a hard link, so a path test can never be the only defence. The archive append opens with `O_WRONLY|O_CREAT|O_APPEND|O_NOFOLLOW` and then checks `os.fstat(fd).st_nlink > 1` on the descriptor it is holding, refusing before any write. The rewrite path deliberately uses `abspath()` and not `realpath()` — resolving re-follows a symlink at write time and hands the guard back to an attacker who swapped the target after the check — and it restores the destination's original mode after `rename`, so a deliberately-0600 file is not silently republished 0644. Both tests below include near-miss cases asserting the guards do not fire on ordinary input.
+
+```bash
+/usr/bin/python3 -m unittest tests.test_brain_archive_security_20260726 \
+  tests.test_evolution_atomic_write_20260727 2>&1 | tail -1
+# OK
+```
+
+**`scripts/bb_lock.py` — two sessions editing one blackboard cannot silently overwrite each other.** Same-user cross-process locking in stdlib only: a uuid4 fencing token written into the lockfile is the only proof of ownership (`--force` cannot override a tokened lease), leases renew via `os.utime`, stale ones are reaped, and `--wait N` is bounded against `time.monotonic()` rather than wall-clock so a wedged holder cannot make it wait forever.
+
+```bash
+/usr/bin/python3 -m unittest tests.test_bb_lock_hardening \
+  tests.test_bb_lock_ownership_regression tests.test_bb_lock_wait_bound_20260726 2>&1 | tail -1
+# OK (skipped=1)
+```
+
+The skip is deliberate: the end-to-end version of the lease-loss test suspends a live holder with `SIGSTOP`, which can freeze it while it owns the guard lock and fail on a healthy machine. It is kept as an opt-in stress test (`BB_LOCK_STRESS=1`) rather than deleted, because a test that fails 2% of the time under load teaches you to ignore it.
+
+**`scripts/sync_runtime_assets.py` — one source of truth for every runtime.** The workflows live once under `prompts/workflows/`; the Claude slash commands, the Codex skills, and the universal index are generated from them. `--check` is the drift gate: hand-edit a generated file to improve only Claude's copy and it fails.
+
+```bash
+/usr/bin/python3 scripts/sync_runtime_assets.py --check; echo "exit=$?"
+# RUNTIME-PARITY: OK
+# exit=0
+```
 
 ## What it gives your AI tool
 
@@ -68,7 +116,7 @@ The following are working now:
 - `scripts/import_chat_history.py` — scans old AI chat exports locally, redacts secrets, writes a private review report (never uploads)
 - Loop tooling (added 2026-07): `bb_lock.py`, `plan_artifact.py`, `promptsmith.py`, `evolution.py`, `wt.py`, `harvest.py`, `brain_scale.py`, `brain_append.py`, `os_nightly.py` — `promptsmith` runs end-to-end without any personal setup via `--brief-file examples/sample-brief.md`
 - Local vector memory: `memory/mneme_adapter.py` — neural search via Ollama if available, lexical fallback otherwise
-- Unit tests for setup and chat-import safety behavior
+- 900+ tests across 80+ modules covering locking, atomic writes, path containment, secret redaction, plan validation, cost measurement, and documentation drift — zero third-party dependencies
 
 What is not automatic without additional setup: external vector/graph packages, autonomous swarm runtime, scheduled research, GitHub publishing.
 
@@ -167,6 +215,8 @@ rg -n --hidden --no-ignore -S "/Users|sk-|ghp_|github_pat_|AKIA[0-9A-Z]{16}|AIza
 ```
 
 ## Status
+
+Built by someone with ADHD who needed project state to live outside his head. The first version of a booking site I shipped for a working auto-detailing business looked finished but couldn't take a booking — it failed silently, for real people. Project OS is what I built so that never happens again: plans are rejected unless they declare how the result will be checked, concurrent agents can't silently erase each other's work (fencing-token file locks), and chat-derived memory never syncs without explicit approval (privacy fail-closed). Nearly every guard in here exists because something failed first.
 
 Active. Loop tooling added July 2026. CI passing. Template is safe to publish after the privacy check above.
 
