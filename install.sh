@@ -2,7 +2,12 @@
 set -eu
 
 show_usage() {
-  printf '%s\n' "Usage: ./install.sh /path/to/target-project [--force] [--dry-run] [--check-tools] [--full-engine] [--claude-engine] [--codex-engine] [--central-brain PATH] [--project-id ID]"
+  printf '%s\n' "Usage: ./install.sh /path/to/target-project [--force] [--dry-run] [--check-tools] [--allow-unsafe-target] [--full-engine] [--claude-engine] [--codex-engine] [--central-brain PATH] [--project-id ID]"
+  printf '%s\n' ""
+  printf '%s\n' "The target must be a project folder. \$HOME, /, and system directories are"
+  printf '%s\n' "refused (an install writes ~120 files and appends to the target's .gitignore);"
+  printf '%s\n' "pass --allow-unsafe-target to override. Symlinks inside the target are never"
+  printf '%s\n' "written through - they are reported and skipped."
   printf '%s\n' ""
   printf '%s\n' "Examples:"
   printf '%s\n' "  ./install.sh ../my-new-project"
@@ -24,6 +29,7 @@ shift
 FORCE=0
 DRY_RUN=0
 CHECK_TOOLS=0
+ALLOW_UNSAFE_TARGET=0
 FULL_ENGINE=0
 CLAUDE_ENGINE=0
 CODEX_ENGINE=0
@@ -40,6 +46,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --check-tools)
       CHECK_TOOLS=1
+      ;;
+    --allow-unsafe-target)
+      ALLOW_UNSAFE_TARGET=1
       ;;
     --full-engine)
       FULL_ENGINE=1
@@ -122,6 +131,9 @@ if [ "$FORCE" = "1" ]; then
 fi
 if [ "$DRY_RUN" = "1" ]; then
   set -- "$@" --dry-run
+fi
+if [ "$ALLOW_UNSAFE_TARGET" = "1" ]; then
+  set -- "$@" --allow-unsafe-target
 fi
 "$PYTHON" "$SETUP_SCRIPT" "$@"
 

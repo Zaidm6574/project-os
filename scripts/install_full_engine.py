@@ -34,7 +34,41 @@ def is_distributable(src: Path, src_dir: Path) -> bool:
     )
 
 
-def copy_file(src: Path, dst: Path, force: bool, dry_run: bool = False) -> str:
+def _guard():
+    """setup_project_os's destination guard, imported rather than copied.
+
+    install.sh drives BOTH installers with the same --target, so a guard on
+    only one of them is no guard at all: --full-engine reached this file's
+    unprotected sinks and wrote through a symlinked target directory exactly
+    as before, exit 0, no refusal (adversary 2026-07-26). Importing the one
+    implementation is deliberate -- the same week, a forked copy of the secret
+    patterns drifted and silently stopped matching two token families.
+    """
+    path = Path(__file__).resolve().parent / "setup_project_os.py"
+    spec = importlib.util.spec_from_file_location("project_os_setup", path)
+    if spec is None or spec.loader is None:  # pragma: no cover - unreachable
+        raise RuntimeError(f"could not load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_SETUP = _guard()
+REFUSALS: list = []
+
+
+def _refuse_unsafe(dst: Path, root) -> str | None:
+    """Refusal line when writing `dst` would leave `root`, else None."""
+    if root is None:
+        return None
+    return _SETUP._refuse(Path(dst), Path(root), REFUSALS)
+
+
+def copy_file(src: Path, dst: Path, force: bool, dry_run: bool = False,
+              root=None) -> str:
+    refused = _refuse_unsafe(dst, root)
+    if refused:
+        return refused
     if dst.exists() and not force:
         return f"kept existing {dst}"
     if dry_run:
@@ -53,13 +87,15 @@ def copy_file(src: Path, dst: Path, force: bool, dry_run: bool = False) -> str:
     return f"wrote {dst}"
 
 
-def copy_tree(src_dir: Path, dst_dir: Path, force: bool, dry_run: bool = False) -> list[str]:
+def copy_tree(src_dir: Path, dst_dir: Path, force: bool, dry_run: bool = False,
+              root=None) -> list[str]:
     results: list[str] = []
     if not src_dir.exists():
         return results
     for src in sorted(p for p in src_dir.rglob("*") if p.is_file() and is_distributable(p, src_dir)):
         rel = src.relative_to(src_dir)
-        results.append(copy_file(src, dst_dir / rel, force, dry_run=dry_run))
+        results.append(copy_file(src, dst_dir / rel, force, dry_run=dry_run,
+                                 root=root))
     return results
 
 
@@ -101,20 +137,28 @@ def install_full_engine(
     if not dry_run:
         target.mkdir(parents=True, exist_ok=True)
 
-    results.extend(copy_tree(ADDON_ROOT / "memory", target / "memory", force, dry_run=dry_run))
-    results.extend(copy_tree(ADDON_ROOT / "brain", target / "brain", force, dry_run=dry_run))
-    results.extend(copy_tree(ADDON_ROOT / "blackboard-addons", target / "blackboard", force, dry_run=dry_run))
+    results.extend(copy_tree(ADDON_ROOT / "memory", target / "memory", force, dry_run=dry_run, root=target))
+    results.extend(copy_tree(ADDON_ROOT / "brain", target / "brain", force, dry_run=dry_run, root=target))
+    results.extend(copy_tree(ADDON_ROOT / "blackboard-addons", target / "blackboard", force, dry_run=dry_run, root=target))
 
+    # mkdir and write_text follow symlinks exactly as copy2 does, so they need
+    # the same guard: with only copy_file protected, a symlinked memory/ still
+    # got a store/ directory created inside the outside target.
     memory_store = target / "memory" / "store"
     brain_dir = target / "brain"
-    if dry_run:
-        results.append(f"would ensure {memory_store}")
-        results.append(f"would ensure {brain_dir}")
-    else:
-        memory_store.mkdir(parents=True, exist_ok=True)
-        brain_dir.mkdir(parents=True, exist_ok=True)
+    for d in (memory_store, brain_dir):
+        refused = _refuse_unsafe(d, target)
+        if refused:
+            results.append(refused)
+        elif dry_run:
+            results.append(f"would ensure {d}")
+        else:
+            d.mkdir(parents=True, exist_ok=True)
     shared_brain = target / "brain" / "shared-brain.jsonl"
-    if not shared_brain.exists():
+    refused = _refuse_unsafe(shared_brain, target)
+    if refused:
+        results.append(refused)
+    elif not shared_brain.exists():
         if dry_run:
             results.append(f"would write {shared_brain}")
         else:
@@ -125,10 +169,10 @@ def install_full_engine(
 
     if claude:
         results.extend(
-            copy_tree(ADDON_ROOT / "staged" / "agents", target / ".claude" / "agents", force, dry_run=dry_run)
+            copy_tree(ADDON_ROOT / "staged" / "agents", target / ".claude" / "agents", force, dry_run=dry_run, root=target)
         )
         results.extend(
-            copy_tree(ADDON_ROOT / "staged" / "commands", target / ".claude" / "commands", force, dry_run=dry_run)
+            copy_tree(ADDON_ROOT / "staged" / "commands", target / ".claude" / "commands", force, dry_run=dry_run, root=target)
         )
     else:
         results.append("skipped .claude agents/commands; pass --claude to install them")
@@ -141,7 +185,8 @@ def install_full_engine(
     if codex:
         results.extend(
             copy_tree(ADDON_ROOT / "staged" / "codex-skills",
-                      target / ".agents" / "skills", force, dry_run=dry_run)
+                      target / ".agents" / "skills", force, dry_run=dry_run,
+                      root=target)
         )
     else:
         results.append("skipped .agents/skills; pass --codex to install them")
