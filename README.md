@@ -54,7 +54,7 @@ python3 scripts/plan_artifact.py create --goal "demo" --steps-file /tmp/sham.jso
 
 The following are working now:
 
-- `AGENTS.md` and `CLAUDE.md` with the same core Project OS workflow
+- `AGENTS.md` as the single source of truth for the Project OS workflow, with `CLAUDE.md` as a thin pointer to it plus Claude-specific notes
 - Blackboard templates for goals, decisions, risks, cost, model routing, evaluation, delivery, artifacts, memory, research routing, capability preflight, and research refresh
 - `install.sh` — copies Project OS files into a target project folder
   - `--dry-run` flag: prints what would be copied without writing anything

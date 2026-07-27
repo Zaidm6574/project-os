@@ -68,21 +68,53 @@ class TestBBLock(unittest.TestCase):
 
 
 class TestPlanArtifact(unittest.TestCase):
-    """Field note: maker/checker must be structural, not advisory."""
+    """Field note: maker/checker must be structural, not advisory.
+
+    Every subprocess run here uses a sandboxed copy of the scripts plus an
+    empty blackboard/plans/ tree — plan_artifact resolves its plans dir from
+    its own __file__, so copying the script is what redirects the writes.
+    A test run must leave the live blackboard/ tree byte-identical
+    (2026-07-26; it used to write live blackboard/plans/<id>.json)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._sandbox = tempfile.TemporaryDirectory()
+        root = Path(cls._sandbox.name)
+        scripts = root / "scripts"
+        scripts.mkdir()
+        # Copy the shipped scripts so behavior tracks the live source exactly.
+        for name in ("plan_artifact.py", "bb_lock.py"):
+            (scripts / name).write_text((SCRIPTS / name).read_text())
+        (root / "blackboard" / "plans").mkdir(parents=True)
+        cls.sandbox_root = root
+        cls.script = scripts / "plan_artifact.py"
+        cls.sandbox_env = {"BB_LOCK_DIR": str(root / "locks")}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._sandbox.cleanup()
+
+    def _run(self, *args, timeout=None):
+        env = dict(os.environ)
+        env.update(self.sandbox_env)
+        return subprocess.run(
+            [sys.executable, str(self.script), *args],
+            capture_output=True, text=True, cwd=str(self.sandbox_root),
+            env=env, timeout=timeout)
 
     def _create(self, steps, plan_id):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
             json.dump(steps, f)
             steps_file = f.name
         try:
-            return run_py(SCRIPTS / "plan_artifact.py", "create",
-                          "--goal", "test goal", "--steps-file", steps_file,
-                          "--id", plan_id)
+            return self._run("create",
+                             "--goal", "test goal", "--steps-file", steps_file,
+                             "--id", plan_id)
         finally:
             os.unlink(steps_file)
 
     def _cleanup(self, plan_id):
-        p = ROOT / "blackboard" / "plans" / f"{plan_id}.json"
+        p = self.sandbox_root / "blackboard" / "plans" / f"{plan_id}.json"
         if p.exists():
             p.unlink()
 
@@ -137,10 +169,7 @@ class TestPlanArtifact(unittest.TestCase):
                      "depends_on": ["s1"], "outputs": []},
                 ],
             }))
-            r = subprocess.run(
-                [sys.executable, str(SCRIPTS / "plan_artifact.py"),
-                 "compile", str(plan_file), "--force"],
-                capture_output=True, text=True, cwd=ROOT, timeout=2)
+            r = self._run("compile", str(plan_file), "--force", timeout=2)
             self.assertNotEqual(r.returncode, 0)
             self.assertIn("dependency cycle", (r.stderr + r.stdout).lower())
 
@@ -165,10 +194,7 @@ class TestPlanArtifact(unittest.TestCase):
             }))
             for extra in ([], ["--force"]):
                 with self.subTest(extra=extra):
-                    r = subprocess.run(
-                        [sys.executable, str(SCRIPTS / "plan_artifact.py"),
-                         "compile", str(plan_file), *extra],
-                        capture_output=True, text=True, cwd=ROOT, timeout=5)
+                    r = self._run("compile", str(plan_file), *extra, timeout=5)
                     self.assertNotEqual(r.returncode, 0)
                     self.assertIn("cannot compile, invalid",
                                   (r.stderr + r.stdout).lower())
@@ -203,7 +229,7 @@ class TestPlanArtifact(unittest.TestCase):
                              "stale mutation must not be written")
 
     def test_missing_flag_value_is_a_clean_usage_error(self):
-        r = run_py(SCRIPTS / "plan_artifact.py", "create", "--goal")
+        r = self._run("create", "--goal")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("missing value for --goal", r.stderr.lower())
         self.assertNotIn("traceback", r.stderr.lower())
@@ -213,8 +239,8 @@ class TestPlanArtifact(unittest.TestCase):
             f.write("{not json")
             steps_file = f.name
         try:
-            r = run_py(SCRIPTS / "plan_artifact.py", "create",
-                       "--goal", "test goal", "--steps-file", steps_file)
+            r = self._run("create",
+                          "--goal", "test goal", "--steps-file", steps_file)
             self.assertNotEqual(r.returncode, 0)
             self.assertIn("invalid json", r.stderr.lower())
             self.assertNotIn("traceback", r.stderr.lower())
@@ -226,8 +252,8 @@ class TestPlanArtifact(unittest.TestCase):
             json.dump(123, f)
             steps_file = f.name
         try:
-            r = run_py(SCRIPTS / "plan_artifact.py", "create",
-                       "--goal", "test goal", "--steps-file", steps_file)
+            r = self._run("create",
+                          "--goal", "test goal", "--steps-file", steps_file)
             self.assertNotEqual(r.returncode, 0)
             self.assertIn("json array", r.stderr.lower())
             self.assertNotIn("traceback", r.stderr.lower())
@@ -240,7 +266,7 @@ class TestPlanArtifact(unittest.TestCase):
                 with tempfile.NamedTemporaryFile("w", suffix=".json") as f:
                     f.write(contents)
                     f.flush()
-                    r = run_py(SCRIPTS / "plan_artifact.py", "validate", f.name)
+                    r = self._run("validate", f.name)
                 self.assertNotEqual(r.returncode, 0)
                 self.assertIn("usage error", r.stderr.lower())
                 self.assertNotIn("traceback", r.stderr.lower())
