@@ -209,6 +209,83 @@ def _is_reject_verdict(cell):
     return bool(REJECT_CELL_ANY.search(_plain(cell)))
 
 
+# A bracketed or EMPHASISED trailer is an annotation slot: the wrapper is
+# itself the delimiter, so these spans are read from the RAW heading. _plain()
+# strips emphasis, so a rule that flattened first could never see that
+# "## Lessons **Rejected**" annotates rather than continues the label -- the
+# same wrapper-defeats-the-rule shape an earlier verify round added _plain()
+# to close, arriving from the other side (judge round 2026-07-26).
+_HEADING_BRACKET = re.compile(r"[(\[]([^()\[\]]*)[)\]]")
+_HEADING_EMPHASIS = re.compile(
+    r"\*\*(.+?)\*\*|\*(.+?)\*|(?<!\w)__([^_]+)__(?!\w)"
+    r"|(?<!\w)_([^_]+)_(?!\w)|`(.+?)`")
+# Dash separators: an em/en dash needs no spacing (a typographic dash is never
+# a word joiner), an ASCII hyphen counts doubled ("Lessons -- Rejected", this
+# codebase's own idiom) or with whitespace beside it. A LONE word-internal
+# hyphen stays a joiner: splitting on it would manufacture a bare "Rejection"
+# segment out of "Rejection-driven development" and re-open the very
+# over-exclusion this rule exists to fix.
+_HEADING_DASH = re.compile(r"[—–]+|-{2,}|\s-+|-+\s")
+# Remaining annotation separators. Deliberately NOT the "any non-word
+# character" class the cell rules use: an apostrophe there would split
+# "Rejection's reason must be written down" into a bare marker and silently
+# drop an ordinary prose section.
+_HEADING_SEP = re.compile(r"[:,;|/→⇒]|=>")
+
+
+def _heading_segments(heading):
+    """Every span of a heading that could carry a status annotation."""
+    segments = [m.group(1) for m in _HEADING_BRACKET.finditer(heading)]
+    for m in _HEADING_EMPHASIS.finditer(heading):
+        segments.append(next(g for g in m.groups() if g is not None))
+    for part in _HEADING_DASH.split(_plain(heading)):
+        segments.extend(_HEADING_SEP.split(part))
+    return segments
+
+
+def _is_reject_heading(heading):
+    """Heading rule: a marker counts only as the heading's OPERATIVE LABEL.
+
+    The previous rule ran the permissive status-cell regex (REJECT_CELL_ANY)
+    over the WHOLE heading, so a heading that merely MENTIONS the word --
+    "## Lessons — why rejected ideas still teach us" -- read as a verdict
+    and its entire section silently vanished from the harvest
+    (audit 2026-07-26). A heading is a section LABEL plus an optional status
+    ANNOTATION, and only the annotation is a status slot: a bracketed or
+    emphasised trailer ("## Lessons (private-only)", "## Lessons [REJECTED]",
+    "## Lessons **Rejected**") or a tail after a dash / colon / comma
+    ("## Lessons — private-only", "## Lessons -- Rejected",
+    "## Lessons: do not harvest"). EVERY span gets the same free-prose rule a
+    bullet gets -- including the first, because a heading that is nothing but
+    a verdict ("## Rejected") has no separator at all and judging only the
+    tail let it harvest. So "(rejected — superseded)" and "— Rejected because
+    it names a client" are verdicts while "(what rejected drafts teach)",
+    "— why rejected ideas still teach us" and "Rejection's reason must be
+    written down" stay prose. A DIRECTIVE is still honoured ANYWHERE in the
+    line -- "do not harvest" / "private-only" is never ordinary prose on any
+    surface -- so that side keeps failing closed.
+
+    The first cut of this rule (same day) split only on a SPACED single dash
+    and a colon, and dropped the first span. That re-opened 22 verdict shapes
+    HEAD had excluded -- "-- Rejected", the unspaced "—Rejected", emphasised
+    "**Rejected**", comma tails, and bare "## Rejected" -- every one silently,
+    because an excluded-by-heading section leaves DROPPED empty and never
+    prints cmd_scan's "filtered N row(s)" line. Two independent judges caught
+    it. That is the fifth time this file has been fixed in one direction while
+    its mirror opened: verify BOTH directions differentially against the rule
+    you are replacing, never just the case in the bug report.
+
+    The one shape still given up is a verdict glued straight to the label with
+    no punctuation, emphasis or separator at all ("## Lessons rejected"); the
+    `apply` human gate still reviews whatever such a section stages.
+    """
+    flat = _plain(heading)
+    if REJECT_DIRECTIVE.search(flat):
+        return True
+    return any(_is_reject_bullet(seg) for seg in _heading_segments(heading)
+               if seg.strip())
+
+
 # Kept as an alias so existing callers/tests that reference REJECT_ROW keep
 # working; it is the start-anchored TABLE-cell rule.
 REJECT_ROW = REJECT_CELL
@@ -282,11 +359,14 @@ def bullets_by_section(md):
             # under it harvested with nothing in DROPPED. The dash/bracket
             # forms ("## Lessons — private-only", "## Lessons [REJECTED]")
             # leaked the same way via the startswith match (adversarial
-            # verify 2026-07-26). A heading is a status slot, not free
-            # prose, so it gets the permissive verdict rule over the WHOLE
-            # line; the rows still land in DROPPED below, because a silent
-            # section drop is the same defect as a silent row drop.
-            if cur and REJECT_CELL_ANY.search(_plain(line.lstrip("#").strip())):
+            # verify 2026-07-26). Only the heading's ANNOTATION is a status
+            # slot — running the whole-line verdict rule here discarded
+            # sections that merely MENTION rejection ("## Lessons — why
+            # rejected ideas still teach us", audit 2026-07-26); see
+            # _is_reject_heading. The rows still land in DROPPED below,
+            # because a silent section drop is the same defect as a silent
+            # row drop.
+            if cur and _is_reject_heading(line.lstrip("#").strip()):
                 cur = _EXCLUDED
             continue
         if not cur:
