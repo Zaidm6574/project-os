@@ -134,9 +134,25 @@ def kill_pid(pid):
 
 class TestBBLockHardening(unittest.TestCase):
     def test_run_renews_lease_while_long_command_is_alive(self):
+        """A live holder must not be reapable -- proven by OBSERVING a renewal.
+
+        2026-07-27: this slept 0.30s against a 0.15s TTL and assumed the renewal
+        thread had run. Under load it sometimes had not, the lease went
+        legitimately stale, the contender stole it, and the test failed on
+        healthy code -- caught on a cold clone at 353s wall-clock where the same
+        suite passes at 219s. Sleeping longer would only make the lie rarer; the
+        assertion has to stop depending on the scheduler.
+
+        The lease is renewed with os.utime, so a renewal is directly observable:
+        wait until the lockfile's mtime ADVANCES past the value acquire() wrote.
+        Once that is seen, renewal is demonstrably working and the contender must
+        be refused -- unless renewals stop, which is the actual defect. The TTL
+        is also widened from 150ms to 600ms, so the polling loop is not racing
+        the very timer it is trying to observe.
+        """
         with tempfile.TemporaryDirectory() as td:
             target = Path(td) / "shared.md"
-            env = {"BB_LOCK_DIR": str(Path(td) / "locks"), "BB_LOCK_STALE": "0.15"}
+            env = {"BB_LOCK_DIR": str(Path(td) / "locks"), "BB_LOCK_STALE": "0.6"}
             holder = popen_lock(
                 "run",
                 target,
@@ -147,7 +163,7 @@ class TestBBLockHardening(unittest.TestCase):
                 "--",
                 sys.executable,
                 "-c",
-                "import time; time.sleep(0.8)",
+                "import time; time.sleep(6)",
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -155,19 +171,52 @@ class TestBBLockHardening(unittest.TestCase):
             )
             try:
                 wait_for_lock(env["BB_LOCK_DIR"])
-                time.sleep(0.30)  # twice the TTL: only renewal can keep it live
+                lockfiles = list(Path(env["BB_LOCK_DIR"]).glob("*.lock"))
+                self.assertEqual(len(lockfiles), 1, "expected exactly one lockfile")
+                lockfile = lockfiles[0]
+                first = lockfile.stat().st_mtime
+
+                # Wait for a renewal to actually land. Generous bound: this is a
+                # timeout for a hung renewer, not a timing assumption.
+                deadline = time.monotonic() + 20.0
+                renewed = False
+                reaped = False
+                while time.monotonic() < deadline:
+                    try:
+                        if lockfile.stat().st_mtime > first:
+                            renewed = True
+                            break
+                    except FileNotFoundError:
+                        # The lease expired and something reaped it while its
+                        # command was still running -- exactly the defect this
+                        # test exists to catch. Report it as an assertion rather
+                        # than letting stat() raise an opaque FileNotFoundError.
+                        reaped = True
+                        break
+                    time.sleep(0.02)
+                self.assertFalse(
+                    reaped,
+                    "the holder's lockfile was reaped while its command was still "
+                    "running -- the lease was not being renewed",
+                )
+                self.assertTrue(
+                    renewed,
+                    "the holder never renewed its lease: mtime stayed at %r for 20s "
+                    "while its command was still running" % first,
+                )
+
                 contender = run_lock(
                     "acquire", target, "--agent", "contender", "--wait", "0.1", env=env
                 )
                 self.assertEqual(
                     contender.returncode,
                     1,
-                    "a live long-running holder was incorrectly reaped: "
-                    + contender.stderr,
+                    "a live long-running holder was incorrectly reaped even though "
+                    "its lease had just been observed renewing: " + contender.stderr,
                 )
             finally:
-                out, err = holder.communicate(timeout=3)
-            self.assertEqual(holder.returncode, 0, out + err)
+                holder.kill()
+                out, err = holder.communicate(timeout=10)
 
     def test_agent_label_and_force_cannot_release_fenced_lock(self):
         # the acquisition token is the ONLY proof of ownership: a reusable
