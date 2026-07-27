@@ -84,6 +84,8 @@ python3 brain/central_brain.py pull --path ~/.project-os/central-brain --project
 
 Central brain is a local JSONL exchange for approved lesson summaries. It is not a raw chat import, not a private data dump, and not a replacement for each project's blackboard.
 
+A JSONL line that cannot be parsed is skipped rather than aborting the sync, but it is never skipped quietly: the command names the file and the line numbers it dropped and exits `1`.
+
 ## UI/UX Layer
 
 When the Claude Code agents and slash commands are installed, interface projects get a dedicated UI lane:

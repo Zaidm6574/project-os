@@ -8,11 +8,13 @@ Runs once a day and does three cheap, local, zero-dependency checks:
 
 Results are prepended to blackboard/22-automation-log.md (newest first, capped at
 30 entries) so any session — human or agent — sees drift without being asked to look.
+Prepended means exactly that: everything above the first entry is left alone, and
+only dated entries this script wrote are rotated out by the cap.
 
 Exit code mirrors brain_scale severity: 0 OK, 1 WATCH, 2 CUTOVER, 3 n/a (brain missing).
 Manual run:  python3 scripts/os_nightly.py
 """
-import os, sys, json, glob, time, datetime, subprocess
+import os, re, sys, json, glob, stat, time, datetime, subprocess, tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project-os/
 SCRIPTS = os.path.join(ROOT, "scripts")
@@ -25,14 +27,27 @@ PLANS = os.path.join(ROOT, "blackboard", "plans")
 STALE_DAYS = 7
 MAX_ENTRIES = 30
 
+# Only written when the log file does not exist at all. A real workspace gets
+# its preamble from blackboard-template/22-automation-log.md at install time —
+# including the launchd plist and the `launchctl bootstrap` line README.md
+# sends readers to — and write_entry() below preserves whatever it finds, so
+# this is a floor, not the shipped text. It deliberately does NOT claim the
+# launchd agent is installed or that it ran on a schedule: this script is just
+# as often run by hand, and AGENTS.md forbids implying something ran.
 HEADER = """# 22 — Automation Log
 
-Written by `scripts/os_nightly.py` (launchd agent `ai.projectos.nightly`, daily 08:23).
-Newest first, capped at 30 entries. Any WATCH/CUTOVER or stale item here is a
-standing prompt for the next session to act — see 18-project-pipeline for the
-cutover milestone.
+Written by `scripts/os_nightly.py`, the unattended daily heartbeat — schedule it
+with launchd or cron (see README.md) or run it by hand. Newest first; dated
+entries are capped at %d. Any WATCH/CUTOVER or stale item here is a standing
+prompt for the next session to act.
 
-"""
+""" % MAX_ENTRIES
+
+# A dated entry heading, exactly as write_entry() writes it below. The cap
+# applies only to headings that match: anything else in this file was put there
+# by a person, and rotating a person's note out of a log as if the script had
+# written it is how the launchd snippet and an operator's note both vanished.
+ENTRY_HEADING = re.compile(r"^## \d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
 
 
 def run_gauge():
@@ -95,21 +110,109 @@ def stuck_plans():
     return sorted(out)
 
 
+def split_log(text):
+    """Split the log into (head, blocks): the preamble, then each `## ` block.
+
+    2026-07-27: this used to be `text.split("\\n## ")`, and the head — body[0]
+    — was thrown away and replaced by HEADER on every write. The shipped
+    blackboard-template/22-automation-log.md contains no `## ` heading at all,
+    so the FIRST heartbeat of every install deleted its entire 34-line
+    preamble: the per-field legend, the launchd plist, and the
+    `launchctl bootstrap` line that README.md tells a reader to go and read.
+    The installer does not copy blackboard-template/ into the target, so after
+    that first run the snippet existed nowhere in the project.
+    """
+    head, blocks, current = [], [], None
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            if current is not None:
+                blocks.append(current)
+            current = [line]
+        elif current is None:
+            head.append(line)
+        else:
+            current.append(line)
+    if current is not None:
+        blocks.append(current)
+    return "\n".join(head), ["\n".join(b).rstrip() + "\n\n" for b in blocks]
+
+
+def atomic_write(path, text):
+    """Replace path's contents in one rename, never truncating the original.
+
+    2026-07-27: this was `open(path, "w")`, which empties the destination and
+    only then writes. Anything interrupting that gap — ENOSPC, kill -9, power
+    loss — left a zero-byte automation log, i.e. one failed append destroyed
+    the entire 30-entry history. Same defect and same remedy as
+    scripts/brain_archive.py's _atomic_write_preserving_mode and
+    scripts/plan_artifact.py's packet writer: build the whole text first, put
+    it in a sibling tempfile.mkstemp() file (O_CREAT|O_EXCL, so the write can
+    never go through a symlink planted at a predictable name), fsync it, then
+    os.replace() it on. A reader sees the old log or the new one, never a torn
+    or empty one, and a failure anywhere before the rename costs nothing.
+
+    mkstemp always creates 0600 regardless of umask and rename carries the
+    temp file's mode onto the destination, so an existing log's mode is
+    reproduced before the swap rather than silently narrowed.
+    """
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        mode = None
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
+                               prefix=os.path.basename(path) + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def write_entry(lines):
-    """Prepend a dated entry to the log under bb_lock, keep newest MAX_ENTRIES."""
+    """Prepend a dated entry to the log under bb_lock, keep newest MAX_ENTRIES.
+
+    Preserves everything the file already held that this script did not write:
+    the preamble above the first heading, and any `## ` block whose heading is
+    not one of our timestamps. The cap counts our own entries only.
+    """
     entry = "## " + datetime.datetime.now().isoformat(timespec="minutes") + "\n" \
             + "\n".join("- " + l for l in lines) + "\n\n"
     if not bb_lock.acquire(LOG, agent="nightly", wait=15):
         print("FAILED: could not lock automation log", file=sys.stderr)
         return False
     try:
-        old_entries = []
+        # 2026-07-27: everything above the first `## <timestamp>` entry is the
+        # log's own documentation, written by the installer, not by this run --
+        # including the launchd plist and `launchctl bootstrap` line that README
+        # tells the user to read in this file's header. Substituting HEADER for
+        # the whole preamble deleted the installed project's only copy of its own
+        # scheduling instructions on the very first heartbeat. Keep what is
+        # there; HEADER only seeds a file that does not exist yet.
+        head, blocks = HEADER, []
         if os.path.exists(LOG):
             with open(LOG, encoding="utf-8") as f:
-                body = f.read().split("\n## ")
-            old_entries = ["## " + e.rstrip() + "\n\n" for e in body[1:]]
-        with open(LOG, "w", encoding="utf-8") as f:
-            f.write(HEADER + entry + "".join(old_entries[:MAX_ENTRIES - 1]))
+                existing_head, blocks = split_log(f.read())
+            # A file that starts straight in on a heading has no preamble to
+            # keep; only then do we supply our own.
+            if existing_head.strip():
+                head = existing_head.rstrip("\n") + "\n\n"
+        kept, mine = [], 0
+        for block in blocks:
+            if ENTRY_HEADING.match(block):
+                if mine >= MAX_ENTRIES - 1:  # the new entry takes the last slot
+                    continue
+                mine += 1
+            kept.append(block)
+        atomic_write(LOG, head + entry + "".join(kept))
         return True
     finally:
         bb_lock.release(LOG, agent="nightly", force=True)

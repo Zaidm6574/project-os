@@ -862,6 +862,69 @@ class ScaffolderWorksFromAFreshClone(unittest.TestCase):
                 "older full-engine helper",
             )
 
+    def _assert_canonical_build_graph(self, target, where):
+        installed = Path(target) / "memory" / "build_graph.py"
+        self.assertTrue(installed.is_file(), "%s did not deliver build_graph.py" % where)
+        self.assertEqual(
+            installed.read_text(encoding="utf-8"),
+            (ROOT / "memory" / "build_graph.py").read_text(encoding="utf-8"),
+            "%s replaced the canonical memory/build_graph.py with the older "
+            "add-on fork (different JSON schema: edge_count/node_count/"
+            "generated_at instead of built_at/source)" % where,
+        )
+        self.assertFalse(
+            (Path(target) / "memory" / "build_graph.py.pre-force").exists(),
+            "%s backed the canonical build_graph.py up as though it were a "
+            "user edit before overwriting it" % where,
+        )
+
+    def test_full_engine_installer_does_not_downgrade_build_graph(self):
+        """The guard above only ever drove ONE of the two installers.
+
+        install.sh runs setup_project_os.py and then install_full_engine.py
+        against the same target and forwards --force to both, and the add-on
+        installer copied addons/full-engine/memory/ wholesale -- so it put the
+        older build_graph.py fork straight back on top of the canonical file
+        that setup_project_os.py:324-335 was patched to protect (audit
+        2026-07-25). Same sequence as the wrapper, driven directly so it runs
+        on every interpreter the suite supports.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            target = Path(tmp) / "project"
+            env = dict(os.environ, HOME=str(home), PYTHONDONTWRITEBYTECODE="1")
+            for args in ([], ["--force"]):
+                for script in ("setup_project_os.py", "install_full_engine.py"):
+                    proc = subprocess.run(
+                        [sys.executable, str(ROOT / "scripts" / script),
+                         "--target", str(target)] + args,
+                        capture_output=True, text=True, check=False, env=env,
+                    )
+                    self.assertEqual(proc.returncode, 0,
+                                     proc.stdout + proc.stderr)
+            self._assert_canonical_build_graph(
+                target, "scripts/install_full_engine.py --force")
+
+    def test_install_sh_full_engine_force_does_not_downgrade_build_graph(self):
+        """The verbatim documented update path (docs/install-from-github.md)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            target = Path(tmp) / "project"
+            env = dict(os.environ, HOME=str(home), PYTHONDONTWRITEBYTECODE="1")
+            for args in ([], ["--force"]):
+                proc = subprocess.run(
+                    ["sh", str(ROOT / "install.sh"), str(target),
+                     "--full-engine"] + args,
+                    capture_output=True, text=True, check=False, env=env,
+                )
+                if proc.returncode != 0 and "Python 3.10 or newer" in proc.stderr:
+                    self.skipTest("install.sh requires Python >=3.10 on PATH")
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self._assert_canonical_build_graph(
+                target, "./install.sh <target> --full-engine --force")
+
 
 class AdoptVerifiesItsOwnWrite(unittest.TestCase):
     def test_two_adopted_projects_get_different_goal_hashes(self):
@@ -999,6 +1062,35 @@ class Round2AdversarialBypasses(unittest.TestCase):
             f"stripped-and-downgraded plan validated clean: {probs}",
         )
 
+    # The private scorer's own key-free verifier contract. It re-runs
+    # `score_rubric.py --selftest` and needs no trust-root fixture, so driving
+    # the gate from this public suite costs nothing but a subprocess.
+    SCORER_CONTRACT = "project-os-score-rubric-selftest-v1"
+    # The contract pins its own artifact, so the rubric must name that file.
+    SCORER_CONTRACT_ARTIFACT = "memory/score_rubric.py"
+
+    def _score_private_rubric(self, private_root, criteria):
+        """Drive the private scorer's documented CLI: JSON in, exit code out.
+
+        A subprocess, not an import: it is exactly how the evaluator calls the
+        scorer, and it keeps this public test free of any coupling to the
+        private engine's trust internals.
+        """
+        evidence = [self.SCORER_CONTRACT_ARTIFACT]
+        payload = {
+            "artifact": self.SCORER_CONTRACT_ARTIFACT,
+            "artifact_type": "executable",
+            "passk": "1/1",
+            "verifier": {"contract": self.SCORER_CONTRACT},
+            "criteria": [dict(c, evidence=evidence) for c in criteria],
+        }
+        proc = subprocess.run(
+            [sys.executable, self.SCORER_CONTRACT_ARTIFACT],
+            input=json.dumps(payload), capture_output=True, text=True,
+            check=False, cwd=str(private_root), timeout=120,
+        )
+        return proc.returncode, proc.stdout + proc.stderr
+
     def test_a_single_user_need_lookalike_does_not_satisfy_the_gate(self):
         """One decoy named 'User Needs Documented' shipped a Pass verdict.
 
@@ -1006,6 +1098,16 @@ class Round2AdversarialBypasses(unittest.TestCase):
         opt-in via PROJECT_OS_PRIVATE_ROOT and skips everywhere else. It must
         never hardcode a developer's home directory -- the first version of
         this test did, and put an absolute personal path into a public repo.
+
+        This asserts BEHAVIOUR, not source text. The version before it grepped
+        the private file for `CANONICAL = "user need gate"` and
+        `decoys and not ung_matches` -- strings a scorer satisfies just by
+        MENTIONING them in a comment. A private engine carrying the original
+        first-match-wins gate plus a four-line "hardening notes" comment scored
+        the decoy rubric Pass/exit 0 while that grep reported OK, which is this
+        repo's signature defect: a test that passes whether or not the guarded
+        code exists. It also broke on a pure rename that changed no behaviour.
+        Score a real decoy-only rubric instead and demand the refusal.
         """
         private_root = os.environ.get("PROJECT_OS_PRIVATE_ROOT")
         if not private_root:
@@ -1013,15 +1115,41 @@ class Round2AdversarialBypasses(unittest.TestCase):
         src = Path(private_root) / "memory" / "score_rubric.py"
         if not src.is_file():
             self.skipTest(f"no score_rubric.py under {private_root}")
-        body = src.read_text(encoding="utf-8")
-        self.assertIn(
-            'CANONICAL = "user need gate"', body,
-            "the gate no longer requires the canonical criterion name",
+
+        gate = {"name": "User Need Gate", "score": 1.0, "weight": 0.20,
+                "kill_below": 0.60}
+        decoy = dict(gate, name="User Needs Documented")
+        filler = {"name": "quality", "score": 1.0, "weight": 0.80}
+
+        # THE defect: one look-alike, weighted and kill-lined exactly like the
+        # real gate, must not stand in for it. Exit 4 is the scorer's
+        # documented "missing User Need Gate" refusal.
+        code, out = self._score_private_rubric(private_root, [decoy, filler])
+        self.assertEqual(
+            code, 4,
+            "the decoy-only rubric was not refused with the documented exit "
+            f"4: exit {code}\n{out}",
         )
+        # And the refusal must NAME the impostor. Dropping to the generic
+        # "rubric missing User Need Gate criterion" message sends the author
+        # off to add a gate they believe they already have -- which is exactly
+        # how the decoy shipped green. Mutation-checked: deleting the
+        # look-alike branch alone still exits 4, so exit code by itself does
+        # not cover this.
         self.assertIn(
-            "decoys and not ung_matches", body,
-            "a single look-alike criterion can still satisfy the gate",
+            decoy["name"], out,
+            f"the refusal did not name the look-alike criterion:\n{out}",
         )
+
+        # The mirror direction, or the check above is satisfied by a scorer
+        # that refuses everything: the canonical name must still be accepted.
+        code, out = self._score_private_rubric(private_root, [gate, filler])
+        self.assertEqual(
+            code, 0,
+            "a correctly named 'User Need Gate' criterion no longer satisfies "
+            f"the gate: exit {code}\n{out}",
+        )
+        self.assertIn("Pass", out)
 
     def test_sync_refuses_to_write_through_a_symlink(self):
         """A legit name + a planted symlink still redirected the write."""

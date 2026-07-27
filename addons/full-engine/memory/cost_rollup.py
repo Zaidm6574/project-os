@@ -10,6 +10,11 @@ Usage:
   python3 memory/cost_rollup.py [--runs DIR]
   python3 memory/cost_rollup.py --selftest
 
+Exits 2 when the rollup cannot be trusted as the portfolio total: --runs points
+at a directory that does not exist, or a run's 09-cost-estimate.md exists but
+could not be read (its spend is then missing from the **All runs** row, which is
+footnoted in the rendered table as well as flagged on stderr).
+
 Standard library only. No network access.
 """
 import argparse
@@ -60,8 +65,21 @@ def _parse_actuals(text):
     return out
 
 
-def rollup(runs_dir):
-    """Return {run_slug: {tier: $}} for every run with parseable actuals."""
+def rollup(runs_dir, unreadable=None):
+    """Return {run_slug: {tier: $}} for every run with parseable actuals.
+
+    Pass a list as `unreadable` to collect the cost files that EXIST but could
+    not be opened/read. Callers MUST report those before presenting the grand
+    total as the portfolio's spend.
+
+    2026-07-27: `except OSError: continue` conflated "this run has no
+    09-cost-estimate.md" (a legitimate skip — this function only promises runs
+    with parseable actuals) with "the file is there but unreadable". The second
+    case dropped a run's real measured spend, so the **All runs** row silently
+    understated the portfolio (three runs at $100/$250/$400 rendered $350.0000
+    once one file was mode 000). Mirrors the `unreadable` tracking cost_actuals.py
+    already does for transcripts.
+    """
     result = {}
     if not os.path.isdir(runs_dir):
         return result
@@ -73,14 +91,28 @@ def rollup(runs_dir):
         try:
             with open(cost_path, encoding="utf-8") as fh:
                 per_tier = _parse_actuals(fh.read())
+        except FileNotFoundError:
+            continue  # no cost file recorded for this run — nothing to read
         except OSError:
+            # Present but unreadable (mode 000, a directory in its place, an
+            # I/O error): the spend is real, so never drop it quietly.
+            if unreadable is not None:
+                unreadable.append(cost_path)
             continue
         if per_tier:
             result[slug] = per_tier
     return result
 
 
-def render(data):
+def _unreadable_note(unreadable):
+    """Markdown footnote naming the runs excluded from the grand total."""
+    return ("\n> **INCOMPLETE — grand total EXCLUDES %d unreadable run(s):** %s\n"
+            "> These cost files exist but could not be read, so the **All runs**\n"
+            "> row above UNDERSTATES real spend." % (
+                len(unreadable), ", ".join(unreadable)))
+
+
+def render(data, unreadable=None):
     tiers = sorted({t for per in data.values() for t in per})
     lines = ["| Run | " + " | ".join(t.capitalize() for t in tiers) + " | Run total $ |",
              "|---|" + "---|" * (len(tiers) + 1)]
@@ -99,6 +131,11 @@ def render(data):
         lines.append("| %s | %s | $%.4f |" % (slug, " | ".join(cells), run_total))
     tot_cells = " | ".join("$%.4f" % col_totals[t] for t in tiers)
     lines.append("| **All runs** | %s | **$%.4f** |" % (tot_cells, grand))
+    if unreadable:
+        # The caveat belongs in the rendered markdown, not only on stderr: this
+        # table gets pasted into reports, where a bare **All runs** row would
+        # read as the whole portfolio.
+        lines.append(_unreadable_note(unreadable))
     return "\n".join(lines)
 
 
@@ -130,6 +167,22 @@ def selftest():
         assert "All runs" in table, table
         # grand total = 15+10+2.5 = 27.5
         assert "$27.5000" in table, table
+        # 2026-07-27: a cost file that exists but cannot be read must be
+        # reported, not dropped from the grand total. A directory standing in
+        # for the file reproduces that branch even when running as root.
+        os.makedirs(os.path.join(base, "run-broken", "09-cost-estimate.md"))
+        unreadable = []
+        partial = rollup(base, unreadable)
+        assert set(partial) == {"run-a", "run-b"}, partial
+        assert len(unreadable) == 1 and "run-broken" in unreadable[0], unreadable
+        noted = render(partial, unreadable)
+        assert "EXCLUDES" in noted, noted
+        # Mirror direction: a run with no cost file at all is still skipped
+        # silently — it has nothing to read, so it is not "unreadable".
+        os.makedirs(os.path.join(base, "run-no-costs"))
+        unreadable2 = []
+        rollup(base, unreadable2)
+        assert unreadable2 == unreadable, unreadable2
     finally:
         import shutil
         shutil.rmtree(base)
@@ -144,14 +197,31 @@ def main():
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
     if args.selftest:
-        sys.exit(selftest())
-    data = rollup(args.runs)
+        return selftest()
+    if not os.path.isdir(args.runs):
+        # 2026-07-27: a typo'd path used to print the same "no runs with
+        # recorded actuals" line as a genuinely empty portfolio and exit 0.
+        sys.stderr.write(
+            "NO SUCH RUNS DIRECTORY: %s\n"
+            "Nothing was scanned — this is not an empty portfolio.\n" % args.runs)
+        return 2
+    unreadable = []
+    data = rollup(args.runs, unreadable)
     if not data:
         print("No runs with recorded actuals found under %s" % args.runs)
-        return
-    print("# Cost rollup across runs\n")
-    print(render(data))
+        if unreadable:
+            print(_unreadable_note(unreadable))
+    else:
+        print("# Cost rollup across runs\n")
+        print(render(data, unreadable))
+    if unreadable:
+        sys.stderr.write(
+            "\nUNREADABLE COST FILE(S): %s\n"
+            "These exist but could not be opened/read, so the total above is\n"
+            "INCOMPLETE and UNDERSTATES real spend.\n" % ", ".join(unreadable))
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

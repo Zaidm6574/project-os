@@ -22,4 +22,6 @@ python3 brain/central_brain.py push --path ~/.project-os/central-brain --project
 python3 brain/central_brain.py pull --path ~/.project-os/central-brain --project . --project-id my-project
 ```
 
+If a JSONL line cannot be parsed (a crash-truncated tail, a hand edit), that record does not sync. `push`, `pull`, `sync`, and `status` still process every other line, then print the file and the line numbers they had to skip and exit `1`, so a lost lesson is never reported as a clean run.
+
 For exact keyword search over this file (instead of semantic recall), use the read-only FTS mirror: `python3 memory/brain_fts_mirror.py rebuild` then `query "<terms>"` — see the full-engine README.

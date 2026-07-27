@@ -78,7 +78,7 @@ class UnreadableTranscriptMakesWriteRefuse(_CostActualsCase):
         with tempfile.TemporaryDirectory() as tmp:
             missing = pathlib.Path(tmp) / "no-such-session.jsonl"
             with _sandbox_home(tmp):
-                main_t, sub_t, unreadable = self.cost._parse_usage(
+                main_t, sub_t, unreadable, malformed = self.cost._parse_usage(
                     [missing], missing
                 )
             self.assertEqual(
@@ -88,6 +88,8 @@ class UnreadableTranscriptMakesWriteRefuse(_CostActualsCase):
             )
             self.assertEqual(main_t, {})
             self.assertEqual(sub_t, {})
+            # A file that never opened has no decodable lines to report.
+            self.assertEqual(malformed, [])
 
     def test_write_refuses_and_leaves_the_target_untouched(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -136,7 +138,7 @@ class NonDictMessageOrUsageDoesNotAbortParse(_CostActualsCase):
             )
             with _sandbox_home(tmp):
                 try:
-                    main_t, sub_t, unreadable = self.cost._parse_usage(
+                    main_t, sub_t, unreadable, malformed = self.cost._parse_usage(
                         [transcript], transcript
                     )
                 except AttributeError as exc:  # the exact pre-fix crash
@@ -145,6 +147,8 @@ class NonDictMessageOrUsageDoesNotAbortParse(_CostActualsCase):
                         "non-dict message/usage field: %r" % (exc,)
                     )
             self.assertEqual(unreadable, [])
+            # Every line here is valid JSON; only the *shape* is odd.
+            self.assertEqual(malformed, [])
             self.assertEqual(main_t["opus"]["input"], 100)
             self.assertEqual(main_t["opus"]["output"], 10)
 

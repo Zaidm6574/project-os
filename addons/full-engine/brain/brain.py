@@ -42,6 +42,14 @@ BRAIN_FILE = os.path.join(HERE, "shared-brain.jsonl")
 # could not cross a hyphen or underscore, so every modern key format passed:
 # sk-ant-…, sk-proj-…, sk_live_… (Stripe), xoxb-… (Slack), figd_…, SG.… ,
 # Twilio AC…, JWTs, and postgres:// DSNs with inline credentials.
+#
+# EDITING THIS LIST: every entry needs a shape-only sample in PATTERN_SAMPLES
+# (tests/test_brain_privacy_gate.py), and the two lists here and in
+# memory/osvec_adapter.py must stay byte-identical. Until 2026-07-27 only 13 of
+# these 28 were exercised anywhere, so the private-key pattern could be deleted
+# from BOTH files with all 656 tests still green while gate_record() went on to
+# accept a PEM key. Add the sample in the same edit as the pattern; do not
+# delete the sample to quiet the test.
 SECRET_PATTERNS = [
     re.compile(r"(?<![A-Za-z0-9_])sk-[A-Za-z0-9_\-]{16,}"),            # OpenAI/Anthropic incl. sk-ant-, sk-proj-
     re.compile(r"(?<![A-Za-z0-9_])sk_(live|test)_[A-Za-z0-9]{16,}"),   # Stripe

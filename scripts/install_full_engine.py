@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import shlex
-import shutil
 import sys
 from pathlib import Path
 
@@ -66,34 +65,51 @@ def _refuse_unsafe(dst: Path, root) -> str | None:
 
 def copy_file(src: Path, dst: Path, force: bool, dry_run: bool = False,
               root=None) -> str:
-    refused = _refuse_unsafe(dst, root)
-    if refused:
-        return refused
-    if dst.exists() and not force:
-        return f"kept existing {dst}"
-    if dry_run:
-        action = "overwrite" if dst.exists() else "write"
-        return f"would {action} {dst}"
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    # 2026-07-25: --force silently destroyed user edits (no backup step, unlike
-    # setup_project_os.py's copy_file). Keep a one-deep .pre-force backup when
-    # the existing target differs from the template before overwriting.
-    if dst.exists() and dst.read_bytes() != src.read_bytes():
-        backup = dst.with_name(dst.name + ".pre-force")
-        shutil.copy2(dst, backup)
-        shutil.copy2(src, dst)
-        return f"wrote {dst} (previous version saved to {backup.name})"
-    shutil.copy2(src, dst)
-    return f"wrote {dst}"
+    """setup_project_os's copy_file, delegated rather than forked.
+
+    This was a hand-copy of it, and the copy drifted: 2026-07-25 added the
+    one-deep `.pre-force` backup here but not the refusal that guards the
+    BACKUP's own destination. That backup writes the USER's bytes, so through a
+    link named <file>.pre-force this installer copied their file OUT of the
+    target -- exit 0, no refusal -- while the sibling installer refused the
+    identical attack. Delegating is the same choice `_guard` documents above:
+    one implementation is the only version of this guard that stays fixed.
+    """
+    return _SETUP.copy_file(src, dst, force, dry_run=dry_run, root=root,
+                            refusals=REFUSALS)
+
+
+def canonical_owner(rel: Path):
+    """The canonical memory/ file this add-on path would shadow, or None.
+
+    setup_project_os.py delivers CANONICAL_MEMORY_ADAPTERS from the repo's own
+    memory/ and deliberately refuses to let the older add-on forks land on top
+    of them (audit 2026-07-25). install.sh then runs THIS installer against the
+    same target and forwards --force to it, and copying addons/full-engine/
+    memory/ wholesale put the older build_graph.py fork straight back -- a
+    different graph schema, with the good file left behind as
+    build_graph.py.pre-force as though the user had edited it. The roster is
+    read from the sibling module so adding an adapter there cannot silently
+    re-open this here.
+    """
+    if len(rel.parts) != 1 or rel.name not in _SETUP.CANONICAL_MEMORY_ADAPTERS:
+        return None
+    canonical = TEMPLATE_ROOT / "memory" / rel.name
+    return canonical if canonical.is_file() else None
 
 
 def copy_tree(src_dir: Path, dst_dir: Path, force: bool, dry_run: bool = False,
-              root=None) -> list[str]:
+              root=None, skip=None) -> list[str]:
     results: list[str] = []
     if not src_dir.exists():
         return results
     for src in sorted(p for p in src_dir.rglob("*") if p.is_file() and is_distributable(p, src_dir)):
         rel = src.relative_to(src_dir)
+        owned = None if skip is None else skip(rel)
+        if owned is not None:
+            results.append("kept canonical %s (owned by %s)"
+                           % (dst_dir / rel, owned.relative_to(TEMPLATE_ROOT)))
+            continue
         results.append(copy_file(src, dst_dir / rel, force, dry_run=dry_run,
                                  root=root))
     return results
@@ -137,7 +153,8 @@ def install_full_engine(
     if not dry_run:
         target.mkdir(parents=True, exist_ok=True)
 
-    results.extend(copy_tree(ADDON_ROOT / "memory", target / "memory", force, dry_run=dry_run, root=target))
+    results.extend(copy_tree(ADDON_ROOT / "memory", target / "memory", force, dry_run=dry_run, root=target,
+                             skip=canonical_owner))
     results.extend(copy_tree(ADDON_ROOT / "brain", target / "brain", force, dry_run=dry_run, root=target))
     results.extend(copy_tree(ADDON_ROOT / "blackboard-addons", target / "blackboard", force, dry_run=dry_run, root=target))
 

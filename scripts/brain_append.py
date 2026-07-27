@@ -9,9 +9,18 @@ indexed. Use THIS for shared-brain writes, not a raw bb_lock append.
 Validates the line is well-formed JSON before appending (it is a JSONL file),
 appends under bb_lock, then rebuilds the OSVec index.
 
+Record shape: nonempty "id", "type" and "text" are what canon actually READS.
+The field is "type" even though brain.py's CLI flag is `--kind` — brain.py
+writes `"type": args.kind`. This docstring (which is also --help) used to name
+the field "kind" and omit "id", a row NOTHING in canon understands: it is
+dropped by central_brain.py and mneme_adapter.py, and it makes
+memory/validate_run.py reject the WHOLE brain file, flipping an otherwise
+closable run's "Graph/memory artifact present" to [ ] (audit 2026-07-27).
+Every JSON example below must therefore stay copy-pasteable as-is.
+
 Usage:
-  python3 scripts/brain_append.py --line '{"kind":"lesson","text":"..."}' [--agent ID]
-  echo '{"kind":"lesson","text":"..."}' | python3 scripts/brain_append.py
+  python3 scripts/brain_append.py --line '{"id":"...","type":"lesson","text":"..."}' [--agent ID]
+  echo '{"id":"...","type":"lesson","text":"..."}' | python3 scripts/brain_append.py
   ... [--no-reindex]   # skip the rebuild (batch mode: reindex once at the end)
 """
 import os, sys, json, subprocess
@@ -24,6 +33,16 @@ SHARED_BRAIN = os.environ.get(
     "PROJECT_OS_SHARED_BRAIN",
     os.path.expanduser("~/.project-os/central-brain/shared-brain.jsonl"))
 MNEME = os.path.join(ROOT, "memory", "mneme_adapter.py")
+
+# Mirror of memory/validate_run.py:_valid_jsonl_record — the only fields canon
+# actually reads off a shared-brain row.
+CANON_FIELDS = ("id", "type", "text")
+
+
+def canon_gaps(record):
+    """Which canon-required fields this record is missing (nonempty strings)."""
+    return [f for f in CANON_FIELDS
+            if not (isinstance(record.get(f), str) and record.get(f).strip())]
 
 
 def main():
@@ -120,6 +139,26 @@ def main():
               "unscreened. Check addons/full-engine/brain/brain.py.",
               file=sys.stderr)
         sys.exit(2)
+
+    # Say so BEFORE the row disappears. central_brain.py/mneme_adapter.py skip
+    # a row canon cannot read without a word, and validate_run.py then fails
+    # the whole brain file over it — the operator's only signal was
+    # central_brain's "skipped by privacy/type gate" tally, which reads like a
+    # privacy event rather than a schema typo (audit 2026-07-27). A WARNING,
+    # not a refusal: harvest.py aborts an entire batch on a nonzero
+    # brain_append, so tightening this into a gate would be a separate,
+    # louder change.
+    _missing = canon_gaps(record)
+    if _missing:
+        _hint = ""
+        if "type" in _missing and record.get("kind"):
+            _hint = (' — the record field is "type", not "kind"; brain.py\'s '
+                     'CLI flag --kind writes "type"')
+        print("WARNING: record has no nonempty %s%s. Appending anyway, but "
+              "central_brain.py and mneme_adapter.py drop rows like this "
+              "silently, and memory/validate_run.py rejects the whole brain "
+              "file over one, failing the run's Graph/memory check."
+              % (", ".join(_missing), _hint), file=sys.stderr)
 
     _bp = os.path.dirname(os.path.abspath(SHARED_BRAIN))
     os.makedirs(_bp, exist_ok=True)

@@ -134,6 +134,150 @@ MODERN_SECRETS = {
 }
 
 
+# Fifth finding (2026-07-27): MODERN_SECRETS above is a HAND-PICKED SUBSET --
+# it exercises 13 of the 28 entries in brain.SECRET_PATTERNS, so 15 of them were
+# asserted on by nothing anywhere in the suite. The PEM private-key pattern
+# could be deleted from brain.py AND osvec_adapter.py and all 656 tests still
+# reported OK, while brain.gate_record() went on to ACCEPT a record carrying
+# "-----BEGIN RSA PRIVATE KEY-----". (Deleting it from ONE side is caught by
+# SecretPatternsStayInSync; deleting it from BOTH was caught by nothing, and a
+# refactor that rewrites the two lists together is the realistic regression.)
+#
+# So this fixture is keyed to the LIST, not to a curated highlight reel:
+# EverySecretPatternIsExercised walks brain.SECRET_PATTERNS and fails if any
+# pattern has no sample here, so adding a pattern without a sample is red; and
+# it drives every sample through the real gate_record() sink, so deleting a
+# pattern from both files is red too. None of these are live credentials --
+# they are shape-only, assembled from repeated filler characters.
+PATTERN_SAMPLES = {
+    "openai_anthropic":   "sk-ant-api03-" + "A" * 40,
+    "stripe_live":        "sk_live_" + "C" * 24,
+    "stripe_restricted":  "rk_live_" + "R" * 24,
+    "aws_access_key":     "AKIA" + "J" * 16,
+    "aws_session_key":    "ASIA" + "S" * 16,
+    "github_user_token":  "ghu_" + "K" * 30,
+    "github_fine_pat":    "github_pat_" + "L" * 30,
+    "google_api_key":     "AIza" + "M" * 35,
+    "google_oauth":       "ya29." + "I" * 40,
+    "slack_bot":          "xoxb-123456789012-123456789012-" + "D" * 24,
+    "figma_pat":          "figd_" + "E" * 30,
+    "sendgrid":           "SG." + "F" * 22 + "." + "G" * 30,
+    "twilio_account_sid": "AC" + "0" * 32,
+    "twilio_api_key":     "SK" + "1" * 32,
+    "gitlab_pat":         "glpat-" + "H" * 20,
+    "digitalocean":       "dop_v1_" + "N" * 40,
+    "npm_token":          "npm_" + "O" * 36,
+    "huggingface":        "hf_" + "P" * 36,
+    "notion":             "ntn_" + "Q" * 44,
+    "linear":             "lin_api_" + "T" * 36,
+    "vercel":             "vercel_" + "U" * 30,
+    "sentry_dsn":         "https://" + "a" * 32 + "@o123456.ingest.sentry.io/4501",
+    "azure_storage_key":  "AccountKey=" + "V" * 44 + "==",
+    "slack_webhook":      ("https://hooks.slack.com/services/T" + "0" * 10 +
+                           "/B" + "1" * 10 + "/" + "Z" * 24),
+    "jwt":                "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123",
+    "pg_dsn":             "postgres://admin:hunter2@db.example.com:5432/prod",
+    "pem_private_key":    "-----BEGIN RSA PRIVATE KEY-----",
+    "labelled_secret":    "api_key = hunter2xyz",
+}
+
+# How an accidental paste actually looks: dropped into the prose of a lesson.
+# The wrapper itself must stay clean -- SAMPLE_PROSE % "nothing" is asserted to
+# pass the gate, so a "refuse everything" mutation cannot fake a green run here.
+SAMPLE_PROSE = "a lesson that mentions %s in passing"
+
+
+class EverySecretPatternIsExercised(unittest.TestCase):
+    """Every entry in SECRET_PATTERNS must be load-bearing and proven at the sink.
+
+    Three properties, each killing a different mutation:
+
+      * a pattern with no sample -> test_every_pattern_has_a_sample fails, so a
+        new pattern cannot be added un-exercised (which is how 15 of 28 got
+        here in the first place);
+      * a pattern deleted from brain.py -> test_gate_record_refuses_every_sample
+        fails, because its sample is then the only thing no pattern catches;
+      * a pattern that is redundant with another -> test_every_pattern_is_the_
+        sole_detector_of_some_sample fails, which is what KEEPS the previous
+        bullet true. Without it, a sample covered by two patterns would let a
+        deletion slip through green again.
+    """
+
+    def _detectors(self, sample: str) -> list:
+        prose = SAMPLE_PROSE % sample
+        return [p for p in brain.SECRET_PATTERNS if p.search(prose)]
+
+    def test_every_pattern_has_a_sample(self) -> None:
+        """Adding a pattern without a sample must be loud, not silent."""
+        unexercised = [p.pattern for p in brain.SECRET_PATTERNS
+                       if not any(p.search(SAMPLE_PROSE % s)
+                                  for s in PATTERN_SAMPLES.values())]
+        self.assertEqual(
+            unexercised, [],
+            "these SECRET_PATTERNS entries are asserted on by nothing -- add a "
+            "shape-only sample for each to PATTERN_SAMPLES so the suite can "
+            "tell whether they still fire: %s" % unexercised,
+        )
+
+    def test_every_sample_is_detected_by_exactly_one_pattern(self) -> None:
+        """A sample no pattern claims is a fixture typo, not a finding."""
+        for name, sample in PATTERN_SAMPLES.items():
+            with self.subTest(kind=name):
+                self.assertTrue(
+                    self._detectors(sample),
+                    "no SECRET_PATTERNS entry matches the %r sample; either the "
+                    "pattern was deleted or the sample is malformed" % name,
+                )
+
+    def test_every_pattern_is_the_sole_detector_of_some_sample(self) -> None:
+        """Each pattern must be the ONLY thing standing between one sample and
+        the brain -- otherwise deleting it stays green and we are back where we
+        started. Simulated by dropping one pattern at a time from a COPY of the
+        list; brain.SECRET_PATTERNS itself is never mutated.
+        """
+        patterns = list(brain.SECRET_PATTERNS)
+        redundant = []
+        for i, pattern in enumerate(patterns):
+            rest = patterns[:i] + patterns[i + 1:]
+            orphaned = [n for n, s in PATTERN_SAMPLES.items()
+                        if not any(q.search(SAMPLE_PROSE % s) for q in rest)]
+            if not orphaned:
+                redundant.append(pattern.pattern)
+        self.assertEqual(
+            redundant, [],
+            "deleting any of these patterns would leave every PATTERN_SAMPLES "
+            "entry still detected, so the deletion would pass the suite -- give "
+            "each one a sample only it can catch: %s" % redundant,
+        )
+
+    def test_gate_record_refuses_every_sample(self) -> None:
+        """The point: the real sink, not just the regex list.
+
+        record_secret_path() is what gate_record() consults, and gate_record()
+        is what every writer calls; asserting on `pattern.search` alone would
+        pass even if the gate stopped consulting the list.
+        """
+        for name, sample in PATTERN_SAMPLES.items():
+            with self.subTest(kind=name):
+                record = {"id": "pattern-probe", "type": "lesson",
+                          "text": SAMPLE_PROSE % sample, "tags": ["lesson"]}
+                self.assertEqual(
+                    brain.record_secret_path(record), "text",
+                    "gate_record would ACCEPT the %r sample into the brain" % name,
+                )
+                with self.assertRaises(SystemExit) as raised:
+                    brain.gate_record(record, where="pattern-probe")
+                self.assertIn("refuse", str(raised.exception).lower())
+
+    def test_the_sample_wrapper_alone_is_accepted(self) -> None:
+        """Control, so 'refuse everything' cannot pass the test above."""
+        record = {"id": "pattern-probe-control", "type": "lesson",
+                  "text": SAMPLE_PROSE % "no credential at all",
+                  "tags": ["lesson"]}
+        self.assertIsNone(brain.record_secret_path(record))
+        self.assertIs(brain.gate_record(record, where="pattern-probe"), record)
+
+
 class SecretPatternCoverage(unittest.TestCase):
     def test_modern_key_formats_are_detected(self) -> None:
         for name, secret in MODERN_SECRETS.items():

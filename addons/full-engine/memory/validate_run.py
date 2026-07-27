@@ -10,7 +10,9 @@ Invariants:
   3. 09-cost-estimate.md Actuals (between the ACTUALS markers) is populated,
      not the dashes-only placeholder.
   4. At least one packet exists under <run_dir>/packets/, OR an explicit
-     'no-packets: solo run' note is present.
+     'no-packets: solo run' note is present. For a Full Swarm run that packet
+     must be marked 'Status: Approved' -- the wave gate the CEO agent doc and
+     new_run.py's solo waiver both promise.
   5. An artifact manifest is present.
   6. A non-empty, machine-readable graph/memory artifact exists at the project
      root — proof the memory/graph layer actually fired at close.
@@ -107,12 +109,75 @@ def _actuals_populated(cost_text):
     return False
 
 
-def _has_packets(run_dir):
+TIER_FIELD = re.compile(r"\s*(?:[-*]\s*)?\**\s*Tier\s*\**\s*:\s*(.+?)\s*$", re.I)
+STATUS_FIELD = re.compile(
+    r"^\s*(?:[-*]\s*)?\**\s*Status\s*\**\s*:\s*(.+?)\s*$", re.I | re.M)
+
+
+def _is_full_swarm(goal_text):
+    """True when a `Tier:` field in the goal doc names Full Swarm.
+
+    Fail closed the way `_tier_locked` does: the Approved-packet branch is the
+    STRICTER one, so any Tier line naming Full Swarm selects it. A goal doc
+    that still advertises Full Swarm in a rejected-option block is ambiguous,
+    and refusing to close an ambiguous run is the safe direction.
+    """
+    if not goal_text:
+        return False
+    for line in goal_text.splitlines():
+        m = TIER_FIELD.match(line)
+        if m and re.search(r"\bfull\s*swarm\b", m.group(1), re.I):
+            return True
+    return False
+
+
+def _packet_is_approved(text):
+    """A packet is Approved only when its own `Status:` field says exactly so.
+
+    The packet schema (blackboard-template/packets/README.md) ends every packet
+    with `Status: Draft / Rejected / Approved`. Read that FIELD -- do not scan
+    for the word. Substring matching is what broke `_tier_locked` ("locked"
+    anywhere) and `_has_manifest` ("manifest" anywhere) before; here it would
+    let `Recommended Next Step: get this approved` clear an evaluator gate.
+
+    Every Status field in the packet must say approved, so a packet that an
+    evaluator later downgraded ("## Re-review / Status: Rejected") does not
+    keep its earlier approval on a first-match-wins read.
+    """
+    values = [m.group(1).strip().strip("*`").strip().lower()
+              for m in STATUS_FIELD.finditer(text or "")]
+    return bool(values) and all(v == "approved" for v in values)
+
+
+def _has_packets(run_dir, goal_text=None):
+    """Packets exist -- and for Full Swarm, at least one is Approved.
+
+    `addons/full-engine/staged/agents/project-os-ceo.md` and the solo waiver
+    text in `new_run.py` both state the same hard gate: a Full Swarm wave does
+    not advance until >= 1 packet is marked `Status: Approved`, and "only
+    Draft/Rejected packets means the wave is not done". Nothing enforced it --
+    this check accepted ANY file under `packets/`, so a Full Swarm run whose
+    only packet was explicitly `Status: Rejected` closed with VALIDATE: PASS
+    (audit 2026-07-27). Other tiers keep the previous behaviour; doctrine
+    scopes the Approved requirement to Full Swarm.
+    """
+    if goal_text is None:
+        goal_text = _read(os.path.join(run_dir, "00-project-goal.md"))
+    require_approved = _is_full_swarm(goal_text)
     pkt = os.path.join(run_dir, "packets")
     if os.path.isdir(pkt):
         for name in os.listdir(pkt):
-            if not name.startswith(".") and name != "README.md":
+            if name.startswith(".") or name == "README.md":
+                continue
+            if not require_approved:
                 return True
+            if _packet_is_approved(_read(os.path.join(pkt, name)) or ""):
+                return True
+    if require_approved:
+        # The waiver is the obvious way around the gate, so it must not open
+        # for the one tier the gate exists for: a Full Swarm run is by
+        # definition not "a single-agent loop with no subagents".
+        return False
     # explicit solo-run waiver in any run file
     for name in os.listdir(run_dir) if os.path.isdir(run_dir) else []:
         if name.endswith(".md"):
@@ -276,11 +341,16 @@ def _has_graph_or_memory(run_dir):
 def validate(run_dir):
     goal_text = _read(os.path.join(run_dir, "00-project-goal.md"))
     cost_text = _read(os.path.join(run_dir, "09-cost-estimate.md"))
+    packet_label = (
+        "Approved packet present (Full Swarm wave gate)"
+        if _is_full_swarm(goal_text)
+        else "Packets present (or solo-run waiver)"
+    )
     checks = [
         ("DoD has no remaining TBD", _dod_no_tbd(goal_text)),
         ("Tier line present and Locked", _tier_locked(goal_text)),
         ("Actuals populated (not placeholder)", _actuals_populated(cost_text)),
-        ("Packets present (or solo-run waiver)", _has_packets(run_dir)),
+        (packet_label, _has_packets(run_dir, goal_text)),
         ("Artifact manifest present", _has_manifest(run_dir)),
         ("Graph/memory artifact present", _has_graph_or_memory(run_dir)),
     ]
@@ -341,6 +411,22 @@ def selftest():
                "## Definition of Done\n- [ ] TBD\n\n"
                "## Current Execution Level\nTier: Solo\nLocked: yes\n")
         assert validate(bad) is False, "bad run should FAIL"
+
+        # Full Swarm closes only on an APPROVED packet. Same otherwise-good run,
+        # one field different, so the gate is proven to be the thing deciding.
+        swarm = os.path.join(base, "swarm-project", "runs", "swarm")
+        _good_run(swarm)
+        _write(os.path.join(swarm, "00-project-goal.md"),
+               "## Definition of Done\n- [x] Ship it\n\n"
+               "## Current Execution Level\nTier: Full Swarm\nLocked: yes\n")
+        _write(os.path.join(swarm, "packets", "3-builder-001.md"),
+               "Packet ID: 3-builder-001\nStatus: Rejected\n")
+        assert validate(swarm) is False, \
+            "Full Swarm run with only a Rejected packet should FAIL"
+        _write(os.path.join(swarm, "packets", "3-builder-001.md"),
+               "Packet ID: 3-builder-001\nStatus: Approved\n")
+        assert validate(swarm) is True, \
+            "Full Swarm run with an Approved packet should PASS"
 
         # Otherwise-good run with NO graph/memory artifact and no pointer -> FAIL.
         nomem = os.path.join(base, "nomem-project", "runs", "nomem")

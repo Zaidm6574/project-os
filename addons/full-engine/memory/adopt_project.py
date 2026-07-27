@@ -20,6 +20,7 @@ import json
 import os
 import re
 import shutil
+import stat as stat_module
 import sys
 import tempfile
 
@@ -149,30 +150,105 @@ def _write_goal_stub(run_dir: str, goal: str, source: str, project_path: str) ->
     text = _replace_canonical_goal(text, goal, source)
     text = _add_adoption_criteria(text, project_path)
 
-    with open(goal_path, "w", encoding="utf-8") as fh:
-        fh.write(text)
+    _replace_goal_file_atomically(goal_path, text, goal)
 
-    # Verify the write with the SAME parser the guard uses, reading the file
-    # back FROM DISK. Checking the in-memory string only proved the function was
-    # self-consistent -- a short or corrupted write still reported success
-    # (adversarial verify 2026-07-25).
+
+def _verify_goal_file(path: str, goal: str, dest: str) -> None:
+    """Raise SystemExit unless goal_guard reads exactly `goal` out of `path`.
+
+    Verify with the SAME parser the guard uses, reading the file back FROM
+    DISK. Checking the in-memory string only proved the function was
+    self-consistent -- a short or corrupted write still reported success
+    (adversarial verify 2026-07-25). `path` is the staged temp file; `dest` is
+    the goal file the message should name, since that is the one the operator
+    knows and the one left untouched when this raises.
+    """
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import goal_guard  # noqa: E402
 
-        with open(goal_path, encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             on_disk = fh.read()
         written = goal_guard.canonical_goal(on_disk)
     except Exception as exc:  # noqa: BLE001 - report, never silently continue
         raise SystemExit(
             "adopt: wrote %s but goal_guard cannot read a canonical goal from "
-            "it (%s). Refusing to report a successful adoption." % (goal_path, exc)
+            "it (%s). Refusing to report a successful adoption; %s is "
+            "unchanged." % (dest, exc, dest)
         )
     if written != goal:
         raise SystemExit(
-            "adopt: wrote %s but goal_guard reads %r, not the inferred goal %r."
-            % (goal_path, written, goal)
+            "adopt: wrote %s but goal_guard reads %r, not the inferred goal "
+            "%r. Refusing to report a successful adoption; %s is unchanged."
+            % (dest, written, goal, dest)
         )
+
+
+def _replace_goal_file_atomically(goal_path: str, text: str, goal: str) -> None:
+    """Swap `text` onto goal_path only once goal_guard has vouched for it.
+
+    This used to open goal_path with mode "w" -- which truncates the real file
+    the instant it is opened -- and verify afterwards. 00-project-goal.md is
+    hand-authored durable run data (the canonical goal that gets hashed into
+    21-agent-roster.md, plus the run's success criteria) with no template to
+    regenerate an edited one from, so the read-back could only ever REPORT the
+    loss: a killed process, ENOSPC or EIO left a 0-byte goal file and nothing
+    to restore it from, and a write that failed verification left the
+    verified-BAD text on disk anyway (2026-07-27).
+
+    Same shape as scripts/brain_archive.py and cost_actuals.py: write a sibling
+    tempfile.mkstemp() file, verify THAT, and only then os.replace() it into
+    place as one atomic rename. Any failure before the rename leaves the
+    previous goal file untouched.
+
+    mkstemp always creates its file 0600 (deliberately, independent of umask)
+    and os.replace() carries that mode across the rename, so copy the
+    destination's own mode onto the temp file first -- otherwise the swap
+    silently narrows a world-readable goal file to owner-only, the exact
+    regression already fixed in cost_actuals.py (2026-07-26).
+    """
+    real_path = os.path.realpath(goal_path)
+    try:
+        dest_mode = stat_module.S_IMODE(os.stat(real_path).st_mode)
+    except OSError:
+        dest_mode = None
+
+    fd, tmp_name = tempfile.mkstemp(
+        dir=os.path.dirname(real_path),
+        prefix=os.path.basename(real_path) + ".",
+        suffix=".tmp",
+    )
+    try:
+        os.close(fd)
+        # Deliberately the module-level open(), not os.fdopen(): the write path
+        # stays a single seam the corrupted-write tests can stand in front of
+        # (bypass it and Round2AdversarialBypasses'
+        # test_adopt_verifies_the_file_on_disk_not_its_own_string goes dead).
+        # Reopening by name is safe here in a way it would NOT be for the
+        # destination: mkstemp picked an unpredictable name and already created
+        # the file O_EXCL, and anyone able to swap it can write the goal file
+        # directly -- it lives in the same run directory.
+        with open(tmp_name, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        _verify_goal_file(tmp_name, goal, goal_path)
+        if dest_mode is not None:
+            # Ownership is best-effort (only root can hand a file to another
+            # uid) and MUST precede the chmod: a non-root chown() clears
+            # S_ISUID/S_ISGID even when it is a same-owner no-op.
+            if hasattr(os, "chown"):
+                try:
+                    dest_stat = os.stat(real_path)
+                    os.chown(tmp_name, dest_stat.st_uid, dest_stat.st_gid)
+                except OSError:
+                    pass
+            os.chmod(tmp_name, dest_mode)
+        os.replace(tmp_name, real_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def adopt(project_path: str, slug: str | None = None, tier: str = "solo") -> int:

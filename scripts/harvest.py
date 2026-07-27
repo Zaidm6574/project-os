@@ -189,13 +189,29 @@ def _plain(text):
     return re.sub(r"`(.+?)`", r"\1", text)
 
 
-def _is_reject_bullet(text):
-    """Free-prose rule: bullets and a table row's lesson cell."""
+def _is_reject_span(text):
+    """The free-prose rule applied to ONE span, read from its start."""
     text = _plain(text)
     return bool(REJECT_DIRECTIVE.search(text)
                 or REJECT_BULLET.match(text)
                 or REJECT_BULLET_CONTINUED.match(text)
                 or REJECT_ONLY.match(text))
+
+
+def _is_reject_bullet(text):
+    """Free-prose rule: bullets and a table row's lesson cell.
+
+    Every rule above reads free prose from its START, so the operator idiom
+    that puts the verdict where a reader expects it -- at the END of the line,
+    "... [Rejected]", "... (Private-only)", "... -- Rejected" -- walked past
+    all of them and harvested with DROPPED EMPTY, i.e. with no "filtered N
+    row(s)" line either (audit 2026-07-27). The same trailing annotation was
+    ALREADY honoured on a heading and in a status column, so this was an
+    internal inconsistency rather than a policy. Free prose carries the same
+    annotation slot at its end; see _prose_trailers.
+    """
+    return bool(_is_reject_span(text)
+                or any(_is_reject_span(seg) for seg in _prose_trailers(text)))
 
 
 def _is_reject_verdict(cell):
@@ -241,6 +257,38 @@ def _heading_segments(heading):
     for part in _HEADING_DASH.split(_plain(heading)):
         segments.extend(_HEADING_SEP.split(part))
     return segments
+
+
+# Free prose has ONE annotation slot: the TRAILER. Deliberately narrower than
+# _heading_segments, which reads EVERY span -- a lesson is a sentence, and
+# splitting a sentence on every bracket, colon and comma would manufacture a
+# bare "Rejected" out of ordinary prose and silently drop real lessons, the
+# exact over-exclusion three earlier rounds of this file opened. A wrapper is
+# a trailer only when it CLOSES the text ("... [Rejected]", "... **Rejected**"),
+# so a mid-sentence parenthesis stays prose, and the dash tail is the last
+# dash-separated part, reusing the heading's dash vocabulary (a lone
+# word-internal hyphen is a joiner, never a separator, so
+# "Rejection-driven development" is untouched).
+_PROSE_TRAILER = re.compile(
+    r"(?:[(\[]([^()\[\]]*)[)\]]"
+    r"|\*\*([^*]+)\*\*|\*([^*]+)\*"
+    r"|(?<!\w)__([^_]+)__|(?<!\w)_([^_]+)_"
+    r"|`([^`]+)`)[\W_]*$")
+
+
+def _prose_trailers(text):
+    """The trailing annotation slot(s) of a free-prose lesson."""
+    text = text.rstrip()
+    segments = []
+    # Read the wrapper from the RAW text: _plain() strips the very delimiter
+    # that marks the span as an annotation (same reason _heading_segments does).
+    wrapped = _PROSE_TRAILER.search(text)
+    if wrapped:
+        segments.append(next(g for g in wrapped.groups() if g is not None))
+    parts = _HEADING_DASH.split(_plain(text))
+    if len(parts) > 1:
+        segments.append(parts[-1])
+    return [s for s in segments if s.strip()]
 
 
 def _is_reject_heading(heading):
@@ -339,18 +387,57 @@ def is_dupe(text, norms):
     return any(n in b for b in norms)
 
 
+# One heading parser, used by BOTH the extractor and the source check in
+# cmd_scan. Two copies of "which headings count" would drift, and the drift
+# would be exactly the silence this file keeps re-learning: a heading the check
+# recognises but the extractor does not (or the reverse) reintroduces the
+# stamped-but-unharvested run below.
+_HEADING = re.compile(r"^##\s+(.+?)\s*(?:\(.*\))?\s*$")
+
+
+def _heading_key(line):
+    """The shared-brain type a '## ' heading maps to, or None if unrecognised."""
+    h = _HEADING.match(line)
+    if not h:
+        return None
+    key = h.group(1).strip().lower()
+    return next((v for k, v in SECTION_TYPES.items() if key.startswith(k)), None)
+
+
+def _recognized_sections(md):
+    """True when at least one '## ' heading maps to a SECTION_TYPES key."""
+    return any(_heading_key(line) for line in md.splitlines())
+
+
+# A bullet or a table row: the two shapes bullets_by_section can harvest.
+_ROW = re.compile(r"^\s*[-*]\s+\S|^\s*\|")
+
+
+def _has_rows(md):
+    """True when the file carries content the extractor could have harvested."""
+    return any(_ROW.match(line) for line in md.splitlines())
+
+
 def bullets_by_section(md):
     """Yield (type, text) from ## sections of a 19-memory-harvest.md.
+
     Accepts BOTH content shapes: bullet lists and markdown tables (the public
-    template uses tables; a row is text = first cell, and any row marked
-    Rejected/Private-only is never harvested)."""
+    template uses tables; a row is text = first cell). A row is REFUSED —
+    recorded in DROPPED instead of yielded — when its lesson cell carries an
+    explicit rejection annotation, when a later status cell carries a
+    Rejected/Private-only marker, when its approval column says no, or when its
+    section heading is annotated. What is NOT refused is a marker glued to
+    ordinary prose with no annotation slot at all ("## Lessons rejected"): see
+    _is_reject_bullet for why that line is drawn where it is, and `apply` is
+    the human gate behind it. The old wording here ("any row marked
+    Rejected/Private-only is never harvested") promised more than any rule in
+    this file delivers (audit 2026-07-27).
+    """
     cur = None
     appr = None
     for line in md.splitlines():
-        h = re.match(r"^##\s+(.+?)\s*(?:\(.*\))?\s*$", line)
-        if h:
-            key = h.group(1).strip().lower()
-            cur = next((v for k, v in SECTION_TYPES.items() if key.startswith(k)), None)
+        if _HEADING.match(line):
+            cur = _heading_key(line)
             appr = None
             # The regex above STRIPS a trailing parenthetical before the key
             # is matched, so "## Lessons (private-only)" — the least
@@ -376,14 +463,22 @@ def bullets_by_section(md):
             if cur is _EXCLUDED:
                 DROPPED.append(line.strip()[:120])
                 continue
-            text = re.sub(r"\*\*(.+?)\*\*", r"\1", b.group(1)).strip()
+            raw = b.group(1).strip()
             # The bullet branch used to yield unconditionally while the table
             # branch enforced REJECT_ROW per cell -- a bullet like "Private-only:
             # ..." harvested straight through with no exclusion at all
             # (audit 2026-07-25). Apply the same check here.
-            if _is_reject_bullet(text):
+            #
+            # Check the RAW bullet, exactly as the table branch checks its raw
+            # first cell. Flattening `**bold**` FIRST destroyed the delimiter
+            # that makes an EMPHASISED trailer an annotation, so
+            # "... **Rejected**" survived while the identical table cell was
+            # refused (audit 2026-07-27). _is_reject_bullet flattens internally
+            # for every start-anchored rule, so nothing is lost by checking raw.
+            if _is_reject_bullet(raw):
                 DROPPED.append(line.strip()[:120])
                 continue
+            text = re.sub(r"\*\*(.+?)\*\*", r"\1", raw).strip()
             if text:
                 yield cur, text
             continue
@@ -475,11 +570,20 @@ def run_dir(run):
 
 
 def read(p):
+    """File text; "" when it is absent, None when it exists but cannot be read.
+
+    Every OSError used to collapse into "", so a 19-memory-harvest.md at
+    chmod 000 (or any IO fault) was indistinguishable from a run that never had
+    one: cmd_scan printed "no harvest sources found", exited 0 and stamped the
+    run `.harvested`, taking its lessons off the unharvested queue for good
+    while they sat intact on disk (audit 2026-07-27). The caller has to be able
+    to tell "there is nothing here" from "I could not look".
+    """
     try:
         with open(p, encoding="utf-8") as f:
             return f.read()
     except OSError:
-        return ""
+        return None if os.path.exists(p) else ""
 
 
 def unharvested():
@@ -516,21 +620,56 @@ def _report_dropped():
         print(f"    ... and {len(DROPPED) - 5} more")
 
 
+def _refuse(slug, why):
+    """Stop without staging and WITHOUT stamping the run harvested.
+
+    `.harvested` is the only thing that takes a finished run off
+    `unharvested()`, which feeds `status` and the nightly heartbeat. Stamping a
+    run whose source could not actually be harvested is a SILENT loss of the
+    discovery signal, so these paths have to exit loud and non-zero instead.
+    """
+    print(f"{slug}: REFUSED — {why}")
+    print("  nothing staged and the run was NOT marked harvested; "
+          "fix the source and re-run `scan`.")
+    return 2
+
+
 def cmd_scan(run):
     d = run_dir(run)
     slug = os.path.basename(d)
     # DROPPED is module state; a scan reports only its OWN filtered rows.
     del DROPPED[:]
     harvest_md = read(os.path.join(d, "19-memory-harvest.md"))
+    if harvest_md is None:
+        return _refuse(slug, "19-memory-harvest.md exists but could not be read")
     if harvest_md:
         source_file = "19-memory-harvest.md"
+        # Only a '## ' heading that maps to a SECTION_TYPES key is ever read,
+        # so a run written in another dialect ("### Lessons", "## Durable
+        # lessons (reviewed, safe to promote)" — a shape this repo's own runs/
+        # already uses) yielded nothing and was stamped as a completed harvest,
+        # taking its lessons off the queue with a message that claimed there
+        # were no sources (audit 2026-07-27). Refuse instead — but ONLY when
+        # the file actually carries rows: the shipped template ships
+        # unrecognised sections beside recognised ones, and a file with no
+        # bullet and no table row has nothing to lose, so those stay stamped.
+        if not _recognized_sections(harvest_md) and _has_rows(harvest_md):
+            return _refuse(
+                slug,
+                "19-memory-harvest.md has rows but no recognized '## ' section"
+                " heading (recognized: "
+                + ", ".join(sorted(SECTION_TYPES)) + ")")
         cands = list(bullets_by_section(harvest_md))
     else:
         # Record the file the lesson actually came from. origin_id was
         # hardcoded to 19-memory-harvest.md, so every fallback proposal
         # misattributed its provenance in a PUBLIC brain (audit 2026-07-26).
         source_file = "12-evaluation-log.md"
-        cands = list(eval_log_candidates(read(os.path.join(d, source_file))))
+        eval_md = read(os.path.join(d, source_file))
+        if eval_md is None:
+            return _refuse(slug,
+                           f"{source_file} exists but could not be read")
+        cands = list(eval_log_candidates(eval_md))
     norms = brain_norms()
     today = datetime.date.today().isoformat()
     fresh, skipped = [], 0

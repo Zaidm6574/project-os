@@ -8,7 +8,9 @@ its evaluator score, and the next variant ALWAYS evolves from the best-scoring o
 proposing a mutation to prompts, tools, or orchestration.
 
 Records live at runs/<run>/evolution.json; a human-readable evolution.md table is
-regenerated next to it on every write. Writes go through bb_lock.
+regenerated next to it on every write. Writes go through bb_lock, and each file
+is replaced atomically (staged next to it, then renamed) so an interrupted write
+can never destroy the history already recorded.
 
 Usage:
   python3 scripts/evolution.py record --run <name> --variant <id> --change "<what changed>" \
@@ -17,13 +19,100 @@ Usage:
   python3 scripts/evolution.py next   --run <name>     # context block for the Evolution agent
   python3 scripts/evolution.py report --run <name>     # markdown table
 """
-import os, sys, json, datetime
+import os, sys, json, stat, tempfile, datetime
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project-os/
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 import bb_lock
 
 VERDICTS = ("approve", "reject", "revise")
+
+
+def _atomic_write_text(dest, text):
+    """Replace `dest` with `text` in one atomic step, or leave it untouched.
+
+    2026-07-27: both writers here opened the destination with mode "w", which
+    truncates the only copy of a run's evolution history BEFORE a single new
+    byte exists. Reproduced end-to-end against the shipped CLI: three recorded
+    variants (636 bytes), a 4th `record` interrupted mid-write, and
+    evolution.json was left at 572 bytes of unterminated JSON --
+    `best`, `next`, `report` and even the next `record` then all died with
+    `JSONDecodeError: Expecting property name enclosed in double quotes`. The
+    records were unrecoverable: the tool could no longer read its own history
+    nor append to it. `report` was the worse surface -- it reads as read-only,
+    runs OUTSIDE the bb_lock critical section, and still rewrote evolution.md
+    in place (434 bytes and 3 table rows down to 217 bytes and 1).
+
+    Same defect and same remedy as scripts/brain_archive.py's _atomic_rewrite,
+    which this follows deliberately rather than inventing a second pattern:
+
+    * tempfile.mkstemp() in the DESTINATION's directory. The property doing
+      the work is O_CREAT|O_EXCL, not the unpredictable name: it refuses any
+      pre-existing path, symlink included, so a link pre-planted at a
+      guessable temp name cannot redirect the write. Same directory keeps
+      os.replace() a rename within one filesystem, which is what makes it
+      atomic.
+    * flush + os.fsync before the rename, so a crash cannot leave the renamed
+      file holding data the kernel never committed.
+    * dest is NOT resolved with realpath(). Resolving it re-follows a symlink
+      at write time and hands the guard straight back to whoever planted the
+      link (adversary 2026-07-26 on brain_archive). os.replace() does not
+      follow a symlink -- it replaces the link itself -- so the literal path
+      is both the safe target and the one that respects a deliberate layout.
+    * mkstemp always creates 0600 regardless of umask, and rename carries the
+      temp file's mode onto the destination, so a naive temp-file rewrite
+      REPLACES the destination's permissions with the writer's. Stat the
+      destination first and reproduce exactly what was there -- never widen,
+      never narrow. chown must run BEFORE chmod: POSIX has a non-root chown()
+      clear setuid/setgid even when it is a same-owner no-op, which would undo
+      the mode just restored. Only a file that does not exist yet gets to be
+      chosen, and there we choose 0600.
+    * any exception unlinks the staged file, so a failed write leaves neither
+      a damaged destination nor litter next to it.
+    """
+    dest = os.path.abspath(dest)
+    try:
+        dest_stat = os.stat(dest)
+    except OSError:
+        dest_stat = None
+
+    fd, tmp_name = tempfile.mkstemp(
+        dir=os.path.dirname(dest) or ".",
+        prefix=os.path.basename(dest) + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if dest_stat is not None:
+            wanted_mode = stat.S_IMODE(dest_stat.st_mode)
+            if hasattr(os, "chown"):
+                # Best-effort: only root can hand a file to another uid, and a
+                # non-root run that merely has write access must still get the
+                # atomic write.
+                try:
+                    os.chown(tmp_name, dest_stat.st_uid, dest_stat.st_gid)
+                except OSError:
+                    pass
+            # Not best-effort: swallowing this would silently re-introduce the
+            # permission change this branch exists to prevent.
+            os.chmod(tmp_name, wanted_mode)
+            final_mode = stat.S_IMODE(os.stat(tmp_name).st_mode)
+            if final_mode != wanted_mode:
+                # chmod() may drop setuid/setgid without privilege. We cannot
+                # restore those, but we refuse to change the mode *quietly*.
+                print("WARNING: could not preserve mode %s on %s; wrote it as %s"
+                      % (oct(wanted_mode), dest, oct(final_mode)),
+                      file=sys.stderr)
+        else:
+            os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, dest)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def paths(run):
@@ -64,8 +153,10 @@ def render_md(data, mf, run):
                      f"{r.get('score','—')} | {r['verdict']} | {r['ts'][:16]} |")
     b = best_of(data)
     lines += ["", f"**Best so far:** {b['variant']} ({b['score']})" if b else "**Best so far:** none scored"]
-    with open(mf, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
+    # Reached from `record` (inside the bb_lock critical section) and from
+    # `report` (outside it). _atomic_write_text holds no lock of its own, so
+    # both callers keep the locking they already had.
+    _atomic_write_text(mf, "\n".join(lines) + "\n")
 
 
 def main():
@@ -117,8 +208,9 @@ def main():
                 "verdict": verdict, "notes": notes,
                 "ts": datetime.datetime.now().isoformat(timespec="seconds"),
             })
-            with open(jf, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
+            # Still inside the bb_lock critical section, and byte-identical to
+            # the old json.dump(f, indent=2) output.
+            _atomic_write_text(jf, json.dumps(data, indent=2))
             render_md(data, mf, run)
             b = best_of(data)  # computed inside the lock — no post-release re-read race
         finally:

@@ -18,6 +18,15 @@ knowledge-graph/
 graphify-out/
 **/shared-brain.jsonl
 brain/shared-brain.jsonl
+# scripts/brain_archive.py moves records OUT of the brain into a sibling
+# `-archive.jsonl` and leaves a `.pre-archive-<stamp>` copy of the original
+# next to it. Both hold the same lesson text as the file above and neither
+# name matches it, so with a brain configured inside the tree `git add -A`
+# staged them in plaintext. The curated list the installer ships
+# (scripts/project-os.gitignore) has carried these two rules since the
+# 2026-07-26 audit; this file did not — two files, one guard (audit 2026-07-27).
+**/shared-brain-archive.jsonl
+**/shared-brain.jsonl.pre-archive-*
 **/*.sidecar.json
 **/store/*.tvim
 central-brain/

@@ -333,7 +333,17 @@ class OsvecStoreLocking(unittest.TestCase):
 
     # -- torn writes -------------------------------------------------------- #
     def test_a_failed_save_leaves_the_previous_sidecar_readable(self):
-        """The side-car must be replaced atomically, never truncated in place."""
+        """A save() that dies while SERIALISING the new side-car must not have
+        touched the destination yet.
+
+        Scope, corrected 2026-07-27: the crash injected here fires inside
+        json.dump(), i.e. strictly before the swap, so what this pins is the
+        build-a-complete-temp-file-first ORDER, plus temp cleanup and lock
+        release on that path. It does NOT prove the swap itself is atomic --
+        it passes unchanged if os.replace() is downgraded to a truncating copy,
+        because the destination is never reached. The atomicity of the swap is
+        pinned by the two tests below, which is where that claim now lives.
+        """
         self._seed()
         sidecar = Path(osvec.SIDECAR_PATH)
         before = sidecar.read_text(encoding="utf-8")
@@ -363,6 +373,136 @@ class OsvecStoreLocking(unittest.TestCase):
         self.assertEqual(leftovers, [], "temp side-car files were left behind")
         self.assertTrue(self._lock_is_free(exclusive=True),
                         "a failed save() leaked the lock")
+
+    def test_a_successful_save_swaps_the_sidecar_in_rather_than_rewriting_it(self):
+        """The side-car must be REPLACED (a new inode swapped in), never
+        rewritten over the existing one.
+
+        This is the promise save()'s own comment makes to brain.py, which reads
+        SIDECAR_PATH directly without taking the lock: such a reader sees the
+        whole old file or the whole new one. Any implementation that streams the
+        new bytes over the existing inode -- open(dst, "w"), shutil.copyfile,
+        a copy loop -- breaks that promise SILENTLY, because the end state on
+        disk is byte-identical to a correct run. Holding a reader's fd open
+        across the save is what makes the difference observable: after an
+        os.replace() that fd still yields the complete previous JSON, after an
+        in-place rewrite it yields the new (or half-written) bytes.
+        """
+        self._seed()
+        sidecar = Path(osvec.SIDECAR_PATH)
+        before = sidecar.read_text(encoding="utf-8")
+        before_ino = os.stat(osvec.SIDECAR_PATH).st_ino
+        # An unlocked reader (brain.py's shape) that already has the file open.
+        reader_fd = open(osvec.SIDECAR_PATH, encoding="utf-8")
+        self.addCleanup(reader_fd.close)
+
+        mem = osvec.ProjectMemory().load()
+        mem.add("a note whose save must swap a new side-car in", "lesson",
+                memory_id="swapped-in")
+        mem.save()
+
+        after = sidecar.read_text(encoding="utf-8")
+        self.assertIn("swapped-in", after,
+                      "precondition: save() did not write the new record")
+        self.assertNotEqual(after, before,
+                            "precondition: save() left the side-car unchanged")
+        self.assertNotEqual(
+            os.stat(osvec.SIDECAR_PATH).st_ino, before_ino,
+            "save() rewrote the side-car over the SAME inode instead of "
+            "swapping a completed temp file in; an unlocked reader can then "
+            "observe a partially written store",
+        )
+        held = reader_fd.read()
+        self.assertEqual(
+            held, before,
+            "the file a reader already had open was rewritten underneath it; "
+            "the new side-car must be swapped in over a fresh inode so the "
+            "previous one stays intact for anyone still reading it",
+        )
+        self.assertIn(
+            "records", json.loads(held),
+            "the side-car a reader was holding is no longer parseable JSON",
+        )
+
+    def test_a_crash_at_the_sidecar_swap_leaves_the_previous_file_complete(self):
+        """Crash AT the swap -- the point the dump-crash test above cannot reach.
+
+        Two things keep this from being a probe that passes for the wrong
+        reason: the injection is scoped to SIDECAR_PATH as the DESTINATION, so
+        it cannot fire inside the index write earlier in save() (which would
+        leave the side-car untouched trivially), and `fired` asserts the seam
+        was actually reached, so an implementation that writes the destination
+        directly fails here instead of quietly never raising.
+        """
+        self._seed()
+        sidecar = Path(osvec.SIDECAR_PATH)
+        before = sidecar.read_text(encoding="utf-8")
+        fired = []
+        originals = {}
+
+        def targets_sidecar(dst):
+            try:
+                return os.path.abspath(os.fspath(dst)) == \
+                    os.path.abspath(osvec.SIDECAR_PATH)
+            except TypeError:
+                return False
+
+        def arm(module, name):
+            original = getattr(module, name)
+            originals[(module, name)] = original
+
+            def boom(src, dst, *a, **kw):
+                if targets_sidecar(dst):
+                    fired.append(name)
+                    raise RuntimeError("simulated crash at the side-car swap")
+                return original(src, dst, *a, **kw)
+
+            setattr(module, name, boom)
+
+        try:
+            # Arm every plausible swap primitive rather than only os.replace, so
+            # a correct implementation that swaps with os.rename still passes
+            # (this pins the property, not one function name). An implementation
+            # that rewrites the destination directly calls none of them, `fired`
+            # stays empty and save() never raises -- which is the failure above.
+            # Armed inside the try so a half-finished arming still gets undone:
+            # these are process-global functions the rest of the suite needs.
+            for module, name in ((osvec.os, "replace"), (osvec.os, "rename"),
+                                 (osvec.shutil, "copyfile"),
+                                 (osvec.shutil, "move")):
+                arm(module, name)
+            mem = osvec.ProjectMemory().load()
+            mem.add("this write is going to blow up at the swap", "lesson",
+                    memory_id="doomed-at-swap")
+            with self.assertRaises(RuntimeError):
+                mem.save()
+        finally:
+            for (module, name), original in originals.items():
+                setattr(module, name, original)
+
+        self.assertTrue(
+            fired,
+            "save() never handed SIDECAR_PATH to a swap primitive, so it wrote "
+            "the destination directly; the new side-car must be built under a "
+            "temp name and swapped in",
+        )
+        surviving = sidecar.read_text(encoding="utf-8")
+        self.assertEqual(
+            surviving, before,
+            "a save() interrupted AT the swap changed the side-car; the "
+            "previous file must survive byte-for-byte",
+        )
+        self.assertIn(
+            "records", json.loads(surviving),
+            "the side-car left behind by an interrupted swap is not parseable "
+            "JSON; readers that skip the lock (brain.py) see a torn store",
+        )
+        leftovers = [n for n in os.listdir(self.tmp)
+                     if n.startswith(".project.sidecar.")]
+        self.assertEqual(leftovers, [],
+                         "a swap that failed left its temp side-car behind")
+        self.assertTrue(self._lock_is_free(exclusive=True),
+                        "a save() that failed at the swap leaked the lock")
 
 
 if __name__ == "__main__":

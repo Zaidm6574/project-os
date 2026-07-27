@@ -14,7 +14,7 @@ Usage:
   python3 memory/mneme_adapter.py query "your text here" [k]
   python3 memory/mneme_adapter.py stats
 """
-import os, re, json, glob, sys, math, hashlib
+import os, re, json, glob, sys, math, hashlib, tempfile
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project-os/
@@ -99,10 +99,30 @@ def cosine(a, b):
 
 
 def read(p):
+    """Read a source file. Absent is fine; DAMAGED OR UNREADABLE IS NOT.
+
+    This was `except Exception: return ""`, which conflated "there is no such
+    file" with "the brain file is corrupt / not readable" (audit 2026-07-27).
+    A single non-UTF-8 byte anywhere in shared-brain.jsonl — brain_append,
+    brain_archive and harvest all write with ensure_ascii=False, so a torn
+    write can leave a partial multi-byte character — made _gather() see an
+    EMPTY document. `build` then published a 0-vector index over a good one,
+    printed "built ... 0 vectors" and exited 0 with no stderr, and
+    brain_append.py / brain_scale.py both reported that total loss of
+    semantic recall as success. chmod 000 on the same file did likewise.
+
+    Fail loud on a damaged brain file, like every sibling reader already does:
+    addons/full-engine/memory/brain_fts_mirror.py raises on these same bytes
+    (test_brain_fts_mirror.py::test_malformed_jsonl_fails_loudly_not_silently)
+    and brain.py's export aborts non-zero on a corrupt source line. Both
+    callers below guard with os.path.isfile()/glob, so only a genuine race
+    reaches the absent branch — and brain_append.py:163-167 already has the
+    "appended, but reindex FAILED" branch for the raise.
+    """
     try:
         with open(p, encoding="utf-8") as f:
             return f.read()
-    except Exception:
+    except FileNotFoundError:
         return ""
 
 
@@ -122,19 +142,40 @@ def _gather():
     active brain (smaller, sharper flat file) without losing semantic recall.
     """
     items = []
+    skipped = []
     # shared-brain lessons: active file + archive tier
     for path, source in ((SHARED_BRAIN, "lesson"),
                          (SHARED_BRAIN.replace(".jsonl", "-archive.jsonl"), "lesson-archived")):
         if os.path.isfile(path):
-            for line in read(path).splitlines():
+            for line_no, line in enumerate(read(path).splitlines(), start=1):
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     o = json.loads(line)
-                except Exception:
+                except Exception as exc:
+                    skipped.append((path, line_no, exc))
+                    continue
+                if not isinstance(o, dict):
+                    # `123` and `["a"]` are valid JSON but have no .get(); this
+                    # used to escape the try above and abort build() with a raw
+                    # AttributeError traceback (audit 2026-07-27).
+                    skipped.append((path, line_no, "not a JSON object"))
                     continue
                 items.append((o.get("id", f"lesson-{len(items)}"), source, _brain_text(o)))
+    # Dropping a brain line stays non-fatal — a torn tail must not brick every
+    # future reindex, and brain_append.py deliberately leaves such a fragment
+    # ALONE — but it must never be SILENT. brain_append.py:132-146 names this
+    # exact skip as one of the reasons such a loss is "invisible forever".
+    for pth, line_no, why in skipped[:10]:
+        print(f"[mneme] WARNING: skipped unparseable line {line_no} of {pth}: {why}",
+              file=sys.stderr)
+    if len(skipped) > 10:
+        print(f"[mneme] WARNING: ... and {len(skipped) - 10} more unparseable line(s)",
+              file=sys.stderr)
+    if skipped:
+        print(f"[mneme] WARNING: {len(skipped)} brain line(s) are NOT in the index; "
+              f"repair the source and rebuild", file=sys.stderr)
     # run goals
     for goal in glob.glob(os.path.join(ROOT, "runs", "*", "00-project-goal.md")):
         slug = os.path.basename(os.path.dirname(goal))
@@ -156,10 +197,41 @@ def build():
                for (_id, source, text), v in zip(gathered, vecs)]
     dim = len(vecs[0]) if vecs else DIM
     index = {"dim": dim, "embedder": embedder, "count": len(entries), "entries": entries}
-    os.makedirs(os.path.dirname(INDEX), exist_ok=True)
-    with open(INDEX, "w", encoding="utf-8") as f:
-        json.dump(index, f)
+    _publish(index)
     return index
+
+
+def _publish(index):
+    """Swap the finished index in with a single atomic rename.
+
+    `open(INDEX, "w")` truncated the live index BEFORE the new JSON was
+    flushed, so a build that died partway (full disk, SIGKILL) — or a reader
+    arriving mid-write — saw a torn or empty file where a good index had been.
+    Same sibling-temp + os.replace() shape as osvec_adapter.save() and
+    brain_archive.py: a reader sees either the previous complete index or the
+    new one, never a half-written one.
+
+    Resolve symlinks first, like cost_actuals._atomic_write_preserving_mode:
+    os.replace() does not follow a link, so renaming onto the link PATH would
+    delete the link and drop a regular file in its place (and fail with EXDEV
+    if the link crosses a filesystem). mkstemp's 0600 is left as-is: the index
+    holds text[:240] of the CROSS-PROJECT brain (see
+    test_open_findings_opus_20260726.py), so owner-only is the right default.
+    """
+    real = os.path.realpath(INDEX)
+    directory = os.path.dirname(real) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".mneme_index.", suffix=".json", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(index, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, real)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
 
 
 def load():
@@ -192,7 +264,16 @@ def query(text, k=5):
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "build"
     if cmd == "build":
-        i = build()
+        try:
+            i = build()
+        except (OSError, UnicodeDecodeError) as e:
+            # Non-zero and legible, not a raw traceback: brain_append.py:167
+            # surfaces only the FIRST 300 stderr chars, and a traceback puts
+            # the actual cause LAST, so the operator would see frames instead
+            # of the reason. Narrow on purpose — a bug in this file must still
+            # crash loudly rather than be reported as a source problem.
+            sys.exit(f"[mneme] REFUSED: cannot read a brain source — {e}\n"
+                     f"[mneme] {INDEX} was left untouched; repair the source, then rebuild")
         print(f"[mneme] built {INDEX} — {i['count']} vectors (dim {i['dim']}, {i['embedder']})")
     elif cmd == "stats":
         i = load()

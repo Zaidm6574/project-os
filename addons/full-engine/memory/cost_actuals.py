@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Post-run transcript cost parser for Project OS.
 
-Parses a Claude Code session .jsonl (and its sibling subagents/ dir) to measure
-actual token usage and compute dollars per model.
+Parses a Claude Code session .jsonl (and the subagents/ tree that sits beside
+it) to measure actual token usage and compute dollars per model.
 
 Usage:
   python3 cost_actuals.py [--transcript PATH] [--prices JSON] [--write] [--target PATH]
@@ -10,8 +10,9 @@ Usage:
   python3 cost_actuals.py --selftest
 
 --transcript  Path to a .jsonl session file.  Default: auto-detect the most
-              recently modified *.jsonl under ~/.claude/projects (plus any
-              *.jsonl in a sibling subagents/ folder).
+              recently modified *.jsonl under ~/.claude/projects (plus every
+              *.jsonl under its subagents/ tree -- for <slug>/<uuid>.jsonl that
+              tree lives at <slug>/<uuid>/subagents/, not <slug>/subagents/).
 --prices      Path to a JSON file OR inline JSON string mapping model slug ->
               {"in": <$/1M input>, "out": <$/1M output>}.
               Default: built-in table (Haiku $1/$5, Sonnet $3/$15, Opus $5/$25).
@@ -117,12 +118,48 @@ def _load_prices(prices_arg):
     return {k.lower(): v for k, v in raw.items()}
 
 
+def _subagent_dir_candidates(transcript):
+    """Every place a subagents/ tree can sit relative to a main transcript.
+
+    Claude Code writes the main session file and its subagent tree as SIBLINGS
+    of each other, not parent/child (2026-07-27):
+
+        <slug>/<uuid>.jsonl                       <- the main transcript
+        <slug>/<uuid>/subagents/agent-*.jsonl     <- its subagents
+
+    so probing only `transcript.parent / "subagents"` resolved to
+    `<slug>/subagents`, which does not exist. Every subagent transcript went
+    unread and the table printed a confident "$0.0000" under a column headed
+    "Measured $" -- and a lookup that finds nothing is indistinguishable from a
+    real zero, so none of the honesty guards (unreadable / missing /
+    unpriced_tiers) could fire. The flat sibling layout is probed first and kept
+    for older/hand-built trees.
+    """
+    return [
+        transcript.parent / "subagents",
+        transcript.parent / transcript.stem / "subagents",
+    ]
+
+
 def _collect_jsonl_files(transcript):
-    """Return [main_file] plus any *.jsonl in a sibling subagents/ directory."""
+    """Return [main_file] plus any *.jsonl under a subagents/ directory.
+
+    rglob, not glob (2026-07-27): subagent transcripts are written either
+    directly in subagents/ or one tier deeper under
+    subagents/workflows/wf_*/agent-*.jsonl, and a plain glob missed the latter
+    entirely (43 of 102 subagents/ dirs on a real machine).
+    """
     files = [transcript]
-    subagents_dir = transcript.parent / "subagents"
-    if subagents_dir.is_dir():
-        files.extend(sorted(subagents_dir.glob("*.jsonl")))
+    seen = {os.path.realpath(str(transcript))}
+    for subagents_dir in _subagent_dir_candidates(transcript):
+        if not subagents_dir.is_dir():
+            continue
+        for found in sorted(subagents_dir.rglob("*.jsonl")):
+            key = os.path.realpath(str(found))
+            if key in seen:
+                continue
+            seen.add(key)
+            files.append(found)
     return files
 
 
@@ -133,8 +170,9 @@ def _empty_counts():
 def _parse_usage(files, main_file):
     """Parse usage from JSONL files.
 
-    Returns (main_totals, sub_totals, unreadable): dicts mapping tier -> count
-    dict, plus a list of files that could not be opened/read at all.
+    Returns (main_totals, sub_totals, unreadable, malformed): dicts mapping
+    tier -> count dict, a list of files that could not be opened/read at all,
+    and a list of (path, lineno) pairs for lines that could not be JSON-decoded.
     main_totals covers the main session file; sub_totals covers everything else.
 
     unreadable is tracked (2026-07-25) because a missing/unreadable transcript
@@ -142,22 +180,31 @@ def _parse_usage(files, main_file):
     cannot see (there is nothing to flag), so the caller silently reported a
     confident $0.00 "measured" total instead of refusing. Callers MUST check
     this list before trusting main_totals/sub_totals as measured.
+
+    malformed is tracked for the same reason (2026-07-27). A transcript
+    truncated mid-write was skipped by a bare `continue`, so its tokens simply
+    vanished and the smaller total was still presented as *measured* and still
+    accepted by --write. That contradicted this module's own sibling gate: an
+    unreadable FILE refuses --write with exit 2 while an unreadable LINE exited
+    0. Callers MUST check this list too.
     """
     main_totals = {}
     sub_totals  = {}
     unreadable  = []
+    malformed   = []
 
     for fpath in files:
         target = main_totals if fpath == main_file else sub_totals
         try:
             with open(fpath) as fh:
-                for line in fh:
+                for lineno, line in enumerate(fh, 1):
                     line = line.strip()
                     if not line:
                         continue
                     try:
                         msg = json.loads(line)
                     except json.JSONDecodeError:
+                        malformed.append((fpath, lineno))
                         continue
                     # usage may sit at the top level or inside a "message" key.
                     # Either key can be present-but-null or hold a non-dict
@@ -179,7 +226,7 @@ def _parse_usage(files, main_file):
         except OSError:
             unreadable.append(fpath)
 
-    return main_totals, sub_totals, unreadable
+    return main_totals, sub_totals, unreadable, malformed
 
 
 def unpriced_tiers(totals, prices):
@@ -382,6 +429,10 @@ def _parse_codex_session_usage(files):
         "turn_totals": turn_totals,
         "final_session_totals": final_session_totals,
         "cumulative_row_totals": cumulative_row_totals,
+        # Mirrors _parse_usage's malformed list (2026-07-27): a truncated event
+        # line was dropped by a bare `continue`, understating the rollup with no
+        # warning that anything had been skipped.
+        "malformed_lines": [],
     }
 
     for fpath in files:
@@ -390,10 +441,13 @@ def _parse_codex_session_usage(files):
         file_has_usage = False
         try:
             with open(fpath, encoding="utf-8") as fh:
-                for line in fh:
+                for lineno, line in enumerate(fh, 1):
+                    if not line.strip():
+                        continue
                     try:
                         event = json.loads(line)
                     except json.JSONDecodeError:
+                        stats["malformed_lines"].append((fpath, lineno))
                         continue
                     payload = event.get("payload")
                     if not isinstance(payload, dict):
@@ -464,6 +518,8 @@ def _render_codex_session_rollup(stats, sessions_dir):
         "| Files scanned | %s |" % _fmt_tokens(stats["files_scanned"]),
         "| Sessions with usage | %s |" % _fmt_tokens(stats["sessions_with_usage"]),
         "| Usage events | %s |" % _fmt_tokens(stats["usage_events"]),
+        "| Malformed (undecodable) lines | %s |"
+        % _fmt_tokens(len(stats.get("malformed_lines", []))),
         "| Cached-input share of input | %s |" % _fmt_pct(turn["cached_input_tokens"], turn["input_tokens"]),
         "| Wrong cumulative-row overcount | %s |" % overcount_note,
         "| Final-session cross-check | %s |" % agreement_note,
@@ -490,6 +546,14 @@ def run_codex_sessions(sessions_dir):
     files = _collect_codex_session_files(sessions_dir)
     stats = _parse_codex_session_usage(files)
     print(_render_codex_session_rollup(stats, sessions_dir))
+    malformed = stats.get("malformed_lines", [])
+    if malformed:
+        sys.stderr.write(
+            "\nMALFORMED SESSION LINE(S): %s\n"
+            "These could not be JSON-decoded, so the rollup above UNDERSTATES\n"
+            "local activity rather than measuring it.\n"
+            % ", ".join("%s:%d" % (f, n) for f, n in malformed)
+        )
 
 
 def _build_table(main_costs, sub_costs, main_totals=None, sub_totals=None, prices=None):
@@ -653,7 +717,7 @@ def run(transcript_path, prices, write, target_path):
     knowingly-incomplete number as a measured actual.
     """
     files      = _collect_jsonl_files(transcript_path)
-    main_t, sub_t, unreadable = _parse_usage(files, transcript_path)
+    main_t, sub_t, unreadable, malformed = _parse_usage(files, transcript_path)
     main_costs = _compute_cost(main_t, prices)
     sub_costs  = _compute_cost(sub_t,  prices)
     table_md   = _build_table(main_costs, sub_costs, main_t, sub_t, prices)
@@ -679,6 +743,16 @@ def run(transcript_path, prices, write, target_path):
             % ", ".join(str(f) for f in unreadable)
         )
 
+    if malformed:
+        # A truncated/corrupt line used to be skipped in silence, so its tokens
+        # vanished from a number still labelled "Measured $" (2026-07-27).
+        sys.stderr.write(
+            "\nMALFORMED TRANSCRIPT LINE(S): %s\n"
+            "These could not be JSON-decoded, so their tokens are missing and\n"
+            "the totals above UNDERSTATE real spend rather than measuring it.\n"
+            % ", ".join("%s:%d" % (f, n) for f, n in malformed)
+        )
+
     if missing:
         sys.stderr.write(
             "\nUNPRICED MODELS: %s\n"
@@ -692,6 +766,15 @@ def run(transcript_path, prices, write, target_path):
             sys.stderr.write(
                 "REFUSING --write: transcript file(s) unreadable, actuals would be\n"
                 "incomplete. Nothing was written to the ACTUALS block.\n"
+            )
+            return 2
+        if malformed:
+            # Same contract as the unreadable-FILE gate above: a partial read is
+            # not a measurement, so it must not be recorded as one.
+            sys.stderr.write(
+                "REFUSING --write: transcript line(s) could not be decoded, so\n"
+                "the actuals would be understated. Nothing was written to the\n"
+                "ACTUALS block.\n"
             )
             return 2
         if missing:
@@ -745,8 +828,9 @@ def selftest():
         tmp = pathlib.Path(fh.name)
 
     try:
-        main_totals, sub_totals, unreadable = _parse_usage([tmp], tmp)
+        main_totals, sub_totals, unreadable, malformed = _parse_usage([tmp], tmp)
         assert unreadable == [], "expected no unreadable files, got %r" % unreadable
+        assert malformed == [], "expected no malformed lines, got %r" % malformed
 
         # ---- opus ----
         # 1M input * $5/1M = $5.00
@@ -811,36 +895,54 @@ def selftest():
             fh.write(json.dumps(orch_turn) + "\n")
             fh.write(json.dumps(orch_turn) + "\n")
 
-        subdir = base / "subagents"
-        subdir.mkdir()
-        sub_opus = {
-            "model": "claude-opus-4-8",
-            "usage": {
-                "input_tokens": 2_000_000, "output_tokens": 0,
-                "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
-            },
-        }
-        with open(subdir / "evaluator.jsonl", "w") as fh:
-            fh.write(json.dumps(sub_opus) + "\n")
+        def _sub_turn(millions):
+            return {
+                "model": "claude-opus-4-8",
+                "usage": {
+                    "input_tokens": millions * 1_000_000, "output_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                },
+            }
+
+        def _write_one(path, record):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write(json.dumps(record) + "\n")
+
+        # The REAL Claude Code layout (2026-07-27): the subagents/ tree is a
+        # sibling of the main transcript, nested under a directory named after
+        # the transcript's stem -- NOT a sibling of the transcript's parent.
+        # This selftest used to build the flat parent/"subagents" layout, which
+        # exists nowhere on disk, so it passed on code that could never find a
+        # real subagent transcript.
+        nested = base / main_file.stem / "subagents"
+        _write_one(nested / "evaluator.jsonl", _sub_turn(2))
+        # ...and subagents themselves nest one tier deeper under workflows/.
+        _write_one(nested / "workflows" / "wf_1" / "agent-a.jsonl", _sub_turn(1))
+        # The historical flat layout must keep working too.
+        _write_one(base / "subagents" / "legacy.jsonl", _sub_turn(1))
 
         files = _collect_jsonl_files(main_file)
-        main_t, sub_t, unreadable = _parse_usage(files, main_file)
+        main_t, sub_t, unreadable, malformed = _parse_usage(files, main_file)
         assert unreadable == [], "expected no unreadable files, got %r" % unreadable
+        assert malformed == [], "expected no malformed lines, got %r" % malformed
 
         # 3 orchestrator turns * 1M input each = 3M summed into the main loop.
         assert main_t["opus"]["input"] == 3_000_000, (
             "orchestrator turns not summed: %r" % main_t["opus"]
         )
-        # Subagent Opus stays separate (2M), not folded into the orchestrator.
-        assert sub_t["opus"]["input"] == 2_000_000, (
+        # Subagent Opus stays separate (2M nested + 1M workflows + 1M flat = 4M),
+        # not folded into the orchestrator and not silently dropped.
+        assert sub_t["opus"]["input"] == 4_000_000, (
             "subagent opus leaked/lost: %r" % sub_t.get("opus")
         )
 
         main_costs = _compute_cost(main_t, DEFAULT_PRICES)
         sub_costs  = _compute_cost(sub_t, DEFAULT_PRICES)
-        # 3M input * $5/1M = $15.00 orchestrator; 2M * $5/1M = $10.00 subagents.
+        # 3M input * $5/1M = $15.00 orchestrator; 4M * $5/1M = $20.00 subagents.
         assert abs(main_costs["opus"] - 15.0) < 1e-9, main_costs["opus"]
-        assert abs(sub_costs["opus"] - 10.0) < 1e-9, sub_costs["opus"]
+        assert abs(sub_costs["opus"] - 20.0) < 1e-9, sub_costs["opus"]
 
         table = _build_table(main_costs, sub_costs, main_t, sub_t, DEFAULT_PRICES)
         assert "Main loop / orchestrator (Opus)" in table, table
@@ -850,6 +952,36 @@ def selftest():
     finally:
         import shutil
         shutil.rmtree(base)
+
+    # ---- malformed (crash-truncated) transcript line ---------------------
+    # A line that cannot be JSON-decoded must be REPORTED, not skipped in
+    # silence: its tokens are missing, so the total is understated rather than
+    # measured, and --write must refuse exactly as it does for an unreadable
+    # file (2026-07-27).
+    trunc_base = pathlib.Path(tempfile.mkdtemp())
+    try:
+        trunc = trunc_base / "session.jsonl"
+        with open(trunc, "w") as fh:
+            fh.write(json.dumps(msg1) + "\n")
+            fh.write('{"model":"claude-opus-4-8","usage":{"input_tok' + "\n")
+        _m, _s, unreadable, malformed = _parse_usage([trunc], trunc)
+        assert unreadable == [], "expected no unreadable files, got %r" % unreadable
+        assert malformed == [(trunc, 2)], (
+            "truncated transcript line was dropped silently: %r" % malformed
+        )
+
+        marked = trunc_base / "09-cost-estimate.md"
+        marked.write_text(
+            "<!-- ACTUALS:START -->\nSENTINEL\n<!-- ACTUALS:END -->\n"
+        )
+        rc = run(trunc, DEFAULT_PRICES, True, marked)
+        assert rc == 2, "--write did not refuse a partially-decoded transcript"
+        assert "SENTINEL" in marked.read_text(), (
+            "understated actuals were recorded despite a malformed line"
+        )
+    finally:
+        import shutil
+        shutil.rmtree(trunc_base)
 
     # ---- cache-write pressure recommendation branch ---------------------
     # When cache-write cost exceeds half of total cost, the summary must
@@ -959,6 +1091,20 @@ def selftest():
         assert codex_stats["turn_totals"]["output_tokens"] == 35, codex_stats
         assert codex_stats["turn_totals"] == codex_stats["final_session_totals"], codex_stats
         assert codex_stats["cumulative_row_totals"]["total_tokens"] == 495, codex_stats
+        assert codex_stats["malformed_lines"] == [], codex_stats
+
+        # A truncated Codex event line must be reported, not swallowed.
+        session_c = codex_base / "session-c.jsonl"
+        with open(session_c, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(events_b[0]) + "\n")
+            fh.write('{"type":"event_msg","payl' + "\n")
+        trunc_stats = _parse_codex_session_usage([session_c])
+        assert trunc_stats["malformed_lines"] == [(session_c, 2)], (
+            "truncated Codex event line was dropped silently: %r"
+            % trunc_stats["malformed_lines"]
+        )
+        assert "Malformed" in _render_codex_session_rollup(trunc_stats, codex_base)
+
         rendered_codex = _render_codex_session_rollup(codex_stats, codex_base)
         assert "sum `last_token_usage`" in rendered_codex, rendered_codex
         assert "local activity" in rendered_codex, rendered_codex

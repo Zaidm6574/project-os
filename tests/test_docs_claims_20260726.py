@@ -13,6 +13,9 @@ is exactly how the drift these tests exist to catch got shipped:
   * README's privacy gate is an `rg` command while Requirements never named ripgrep
   * README pointed at a launchd snippet "in the file header" of os_nightly.py,
     where no snippet lives
+  * README then pointed at blackboard/22-automation-log.md -- true of the
+    shipped template, false of any project that had run the heartbeat once,
+    because os_nightly.py rewrote the file and dropped the snippet
   * README's claims table said a plan that "fakes its verification step" is
     rejected; the gate rejects EMPTY/PLACEHOLDER verification and cannot know
     whether a plausible-looking method ever ran
@@ -489,9 +492,87 @@ class ReadmeLaunchdPointerTests(unittest.TestCase):
             return direct
         return None
 
+    def install(self):
+        """A real install plus an isolated HOME, so nothing here reads local state."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        target = Path(tmp.name) / "installed"
+        home = Path(tmp.name) / "home"
+        home.mkdir()
+        done = subprocess.run(
+            [sys.executable, str(SETUP), "--target", str(target)],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        self.assertEqual(0, done.returncode, "installer failed:\n%s" % done.stderr)
+        return target, home
+
+    def holders_under(self, root):
+        """The paths README names that really carry the snippet inside ``root``."""
+        holders = []
+        for ref in self.candidate_paths():
+            path = root / ref
+            if path.is_file() and all(m in read(path) for m in self.MARKERS):
+                holders.append(ref)
+        return holders
+
     def test_the_pointer_line_names_paths(self):
         """Guards the guard."""
         self.assertTrue(self.candidate_paths())
+
+    def test_the_snippet_survives_the_heartbeat_that_rewrites_the_log(self):
+        """The claim must hold on a LIVE project, not just on the pristine template.
+
+        `resolve()` above maps `blackboard/...` back to `blackboard-template/...`,
+        so every other assertion in this class inspects a file the runtime never
+        opens. `os_nightly.py` rewrites the real log in "w" mode on every run; it
+        used to substitute its own HEADER for the whole preamble, which deleted
+        the launchd plist -- the installed project's only copy of its own
+        scheduling instructions -- on the very first heartbeat, while this class
+        stayed green forever.
+        """
+        target, home = self.install()
+        self.assertTrue(
+            self.holders_under(target),
+            "guards the guard: a real install does not even ship the snippet at "
+            "%s, so this test could never observe it being lost" % self.candidate_paths(),
+        )
+
+        log = target / "blackboard" / "22-automation-log.md"
+        before = read(log)
+        env = dict(os.environ)
+        env["HOME"] = str(home)
+        env["BB_LOCK_DIR"] = str(home / "locks")
+        done = subprocess.run(
+            [sys.executable, str(target / "scripts" / "os_nightly.py")],
+            cwd=str(target),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        after = read(log)
+        # Guards the guard again: if the heartbeat had refused to run, or written
+        # somewhere else, the markers would survive for a reason that proves
+        # nothing about the rewrite this test exists to police.
+        self.assertIn(
+            "gauge:",
+            after,
+            "the heartbeat never wrote an entry, so the rewrite was never "
+            "exercised:\n%s%s" % (done.stdout, done.stderr),
+        )
+        self.assertNotEqual(
+            before, after, "the heartbeat left the log byte-identical -- nothing was rewritten"
+        )
+
+        self.assertTrue(
+            self.holders_under(target),
+            "one run of scripts/os_nightly.py deleted the launchd snippet (%s) "
+            "from %s. README still tells the user to read it there, and the "
+            "installed project keeps no other copy."
+            % (", ".join(self.MARKERS), self.candidate_paths()),
+        )
 
     def test_the_named_file_contains_the_launchd_snippet(self):
         holders = []

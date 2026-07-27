@@ -37,7 +37,7 @@ to the digest recorded at approve time, and it appends an audit record to
 plan["migrations"]. Anything else — edited steps, a backwards schema, a plan
 approved before content digests were recorded — needs the human gate again.
 """
-import os, sys, json, re, datetime, hashlib, copy, tempfile
+import os, sys, json, re, datetime, hashlib, copy, tempfile, stat
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project-os/
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
@@ -177,10 +177,58 @@ def load(pid):
 def save(plan, pid=None):
     # Write back to the SAME location the plan was loaded from (pid may be a
     # full path); fall back to the id-derived path under PLANS.
-    dest = plan_path(pid) if pid else plan_path(plan["id"])
-    os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
-    with open(dest, "w", encoding="utf-8") as f:
-        json.dump(plan, f, indent=2)
+    dest = os.path.abspath(plan_path(pid) if pid else plan_path(plan["id"]))
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    # Temp file + os.replace(), never a truncating write (audit 2026-07-27):
+    # open(dest, "w") EMPTIES the live plan before one new byte is flushed and
+    # json.dump writes incrementally, so a SIGKILL, a full disk or a
+    # serialization error on a hand-edited plan left the only copy of the run's
+    # coordination state half-written -- `complete` and `approve` on that plan
+    # then died with "invalid JSON in plan file". The DISPOSABLE worker packets
+    # this module compiles were already written this way (see `compile`); the
+    # irreplaceable artifact was not.
+    #
+    # dest is NOT realpath()ed. os.replace() does not follow a symlink -- it
+    # replaces the link itself -- so writing to the literal path leaves
+    # whatever a planted link points at alone, instead of destroying it. Same
+    # rule and same reason as scripts/brain_archive.py (adversary 2026-07-26).
+    #
+    # mkstemp() creates its file 0600 regardless of umask and os.replace()
+    # carries that mode onto the destination, so the mode has to be reproduced
+    # explicitly or every save silently narrows a world-readable plan to
+    # owner-only -- the exact silent narrowing that already burned
+    # addons/full-engine/memory/cost_actuals.py (audit 2026-07-26).
+    try:
+        dest_stat = os.stat(dest)
+    except OSError:
+        dest_stat = None
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dest),
+                               prefix=os.path.basename(dest) + ".",
+                               suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(plan, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        if dest_stat is not None:
+            os.chmod(tmp, stat.S_IMODE(dest_stat.st_mode))
+        else:
+            # No destination to copy from: fall back to what the old
+            # open(dest, "w") produced -- an ordinary create honoring the
+            # process umask -- rather than leaving mkstemp's 0600.
+            umask = os.umask(0)
+            os.umask(umask)
+            os.chmod(tmp, 0o666 & ~umask)
+        os.replace(tmp, dest)
+    except BaseException:
+        # BaseException, not OSError: a TypeError out of json.dump (a plan
+        # holding a value json cannot encode) must not leave the temp file
+        # behind either.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def locked_update(pid, mutate):

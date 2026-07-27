@@ -15,6 +15,10 @@ Usage:
   python3 brain/central_brain.py --selftest
 
 Local filesystem only. No network calls.
+
+push/pull/sync/status exit 1 when the JSONL they read contains an unparsable
+line: that line is a record which did NOT sync, and it is reported by file and
+line number instead of being dropped in silence.
 """
 
 from __future__ import annotations
@@ -151,19 +155,39 @@ def init_central(path: Path) -> Path:
     return brain_file
 
 
-def read_jsonl(path: Path) -> list[dict]:
+def read_jsonl(path: Path, unparsable: list | None = None) -> list[dict]:
+    """Read a JSONL brain file, skipping any line that is not a JSON object.
+
+    Skipping stays right for THIS file: a crash-truncated tail is expected
+    here (brain.py::_heal_truncated_tail, append_new below), and one damaged
+    line must not take a whole sync down. But a skipped line is a LOST record,
+    and push/pull/sync/status printed only "N lesson(s) added" and exited 0, so
+    the loss was invisible on every surface -- the repo's
+    data-loss-looks-like-success signature (audit 2026-07-27).
+
+    Pass `unparsable` to collect the 1-based line numbers that were dropped so
+    the caller can report them; memory/brain_fts_mirror.py::read_records, the
+    strict reader of this same format, names line numbers the same way. The
+    single-argument call still returns a plain list, unchanged.
+    """
     records: list[dict] = []
     if not path.exists():
         return records
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
             continue
         try:
             record = json.loads(line)
         except json.JSONDecodeError:
+            if unparsable is not None:
+                unparsable.append(line_no)
             continue
         if isinstance(record, dict):
             records.append(record)
+        elif unparsable is not None:
+            # A valid-JSON non-object (a list, a bare string) is dropped just
+            # as silently; brain_fts_mirror refuses it outright.
+            unparsable.append(line_no)
     return records
 
 
@@ -239,12 +263,16 @@ def syncable_summary(record: dict) -> bool:
     return True
 
 
-def lessons_for_central(project: Path, pid: str) -> tuple[list[dict], int]:
-    """Returns (syncable lessons, count skipped by the privacy/type gate)."""
+def lessons_for_central(project: Path, pid: str, unparsable: list | None = None) -> tuple[list[dict], int]:
+    """Returns (syncable lessons, count skipped by the privacy/type gate).
+
+    `unparsable` collects the project brain's dropped line numbers; those are
+    NOT part of `skipped`, which counts only deliberate privacy/type refusals.
+    """
     src = project_brain_path(project)
     lessons: list[dict] = []
     skipped = 0
-    for record in read_jsonl(src):
+    for record in read_jsonl(src, unparsable):
         if record.get("central_import") or record.get("central_id") or record.get("source") == "central-brain":
             continue
         if not syncable_summary(record):
@@ -280,14 +308,16 @@ def lessons_for_central(project: Path, pid: str) -> tuple[list[dict], int]:
     return lessons, skipped
 
 
-def push(path: Path, project: Path, explicit_project_id: str | None = None) -> tuple[int, int]:
+def push(path: Path, project: Path, explicit_project_id: str | None = None,
+         unparsable: list | None = None) -> tuple[int, int]:
     brain_file = init_central(path)
     pid = project_id(project, explicit_project_id)
-    lessons, skipped = lessons_for_central(project, pid)
+    lessons, skipped = lessons_for_central(project, pid, unparsable)
     return append_new(brain_file, lessons), skipped
 
 
-def pull(path: Path, project: Path, explicit_project_id: str | None = None) -> tuple[int, int]:
+def pull(path: Path, project: Path, explicit_project_id: str | None = None,
+         unparsable: list | None = None) -> tuple[int, int]:
     brain_file = init_central(path)
     pid = project_id(project, explicit_project_id)
     dest = project_brain_path(project)
@@ -295,7 +325,7 @@ def pull(path: Path, project: Path, explicit_project_id: str | None = None) -> t
     dest.touch(exist_ok=True)
     safe_records = []
     skipped = 0
-    for record in read_jsonl(brain_file):
+    for record in read_jsonl(brain_file, unparsable):
         if record.get("project_id") == pid:
             continue
         if not syncable_summary(record):
@@ -330,11 +360,30 @@ def pull(path: Path, project: Path, explicit_project_id: str | None = None) -> t
     return append_new(dest, safe_records), skipped
 
 
-def status(path: Path) -> tuple[int, list[str]]:
+def status(path: Path, unparsable: list | None = None) -> tuple[int, list[str]]:
     brain_file = init_central(path)
-    records = read_jsonl(brain_file)
+    records = read_jsonl(brain_file, unparsable)
     projects = sorted({str(record.get("project_id")) for record in records if record.get("project_id")})
     return len(records), projects
+
+
+def report_unparsable(path: Path, lines: list, action: str) -> bool:
+    """Print the dropped lines for `path`; return True if any were dropped.
+
+    Always printed on its own line when there is damage, and never printed
+    when there is none -- a warning that fires on healthy files is one nobody
+    reads. Line numbers make the record recoverable by hand, the way
+    memory/brain_fts_mirror.py reports a malformed line.
+    """
+    if not lines:
+        return False
+    shown = ", ".join(str(n) for n in lines[:10])
+    more = f" +{len(lines) - 10} more" if len(lines) > 10 else ""
+    print(
+        f"central brain WARNING: {len(lines)} unparsable line(s) in {path} "
+        f"were NOT {action} (line {shown}{more}); repair the file and re-run"
+    )
+    return True
 
 
 def selftest() -> int:
@@ -374,6 +423,26 @@ def selftest() -> int:
         assert pulled and pulled[0]["text"].startswith("Prefer explicit")
         assert pulled[0]["central_import"] is True
         assert push(central, project_b, "beta") == (0, 0)
+
+        # A crash-truncated line must be REPORTED, never dropped in silence:
+        # the good record still syncs, and the damaged one is named by line.
+        project_c = base / "project-c"
+        (project_c / "brain").mkdir(parents=True)
+        (project_c / PROJECT_BRAIN).write_text(
+            json.dumps(
+                {
+                    "id": "lesson-002",
+                    "type": "lesson",
+                    "text": "A damaged neighbour must not hide this lesson.",
+                }
+            )
+            + "\n"
+            + '{"id": "lesson-003", "type": "les',
+            encoding="utf-8",
+        )
+        damaged: list = []
+        assert push(central, project_c, "gamma", damaged) == (1, 0)
+        assert damaged == [2], damaged
     print("central_brain selftest: OK")
     return 0
 
@@ -397,29 +466,45 @@ def main() -> int:
         brain_file = init_central(Path(args.path))
         print(f"central brain initialized: {brain_file}")
         return 0
+    # An unparsable line is a record that did NOT move. Each command reports
+    # the file it READ records from (push: the project brain, pull/status: the
+    # central brain, sync: both), and exits non-zero so a script cannot read
+    # a partial sync as a complete one.
     if args.cmd == "push":
-        added, skipped = push(Path(args.path), Path(args.project), args.project_id)
+        damaged: list = []
+        added, skipped = push(Path(args.path), Path(args.project), args.project_id, damaged)
         note = f" ({skipped} record(s) skipped by privacy/type gate)" if skipped else ""
         print(f"central brain push: {added} lesson(s) added{note}")
-        return 0
+        return 1 if report_unparsable(project_brain_path(Path(args.project)), damaged, "pushed") else 0
     if args.cmd == "pull":
-        added, skipped = pull(Path(args.path), Path(args.project), args.project_id)
+        central_file = Path(args.path).expanduser().resolve() / CENTRAL_FILE
+        damaged: list = []
+        added, skipped = pull(Path(args.path), Path(args.project), args.project_id, damaged)
         note = f" ({skipped} record(s) skipped by privacy/type gate)" if skipped else ""
         print(f"central brain pull: {added} lesson(s) added to project{note}")
-        return 0
+        return 1 if report_unparsable(central_file, damaged, "pulled") else 0
     if args.cmd == "sync":
-        pushed, push_skipped = push(Path(args.path), Path(args.project), args.project_id)
-        pulled, pull_skipped = pull(Path(args.path), Path(args.project), args.project_id)
+        central_file = Path(args.path).expanduser().resolve() / CENTRAL_FILE
+        push_damaged: list = []
+        pull_damaged: list = []
+        pushed, push_skipped = push(Path(args.path), Path(args.project), args.project_id, push_damaged)
+        pulled, pull_skipped = pull(Path(args.path), Path(args.project), args.project_id, pull_damaged)
         skipped = push_skipped + pull_skipped
         note = f" ({skipped} record(s) skipped by privacy/type gate)" if skipped else ""
         print(f"central brain sync: {pushed} pushed, {pulled} pulled{note}")
-        return 0
+        # Both sides are reported before the exit code is decided: `or` would
+        # short-circuit the second report away.
+        damaged_push = report_unparsable(project_brain_path(Path(args.project)), push_damaged, "pushed")
+        damaged_pull = report_unparsable(central_file, pull_damaged, "pulled")
+        return 1 if (damaged_push or damaged_pull) else 0
     if args.cmd == "status":
-        count, projects = status(Path(args.path))
+        central_file = Path(args.path).expanduser().resolve() / CENTRAL_FILE
+        damaged: list = []
+        count, projects = status(Path(args.path), damaged)
         print(f"central brain status: {count} lesson(s), {len(projects)} project(s)")
         if projects:
             print("projects: " + ", ".join(projects))
-        return 0
+        return 1 if report_unparsable(central_file, damaged, "counted") else 0
     parser.print_help()
     return 0
 

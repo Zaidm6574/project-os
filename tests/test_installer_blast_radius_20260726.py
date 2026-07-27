@@ -38,6 +38,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SETUP = ROOT / "scripts" / "setup_project_os.py"
+FULL_ENGINE = ROOT / "scripts" / "install_full_engine.py"
 INSTALL = ROOT / "install.sh"
 
 OUTSIDE_SENTINEL = b"USER FILE OUTSIDE THE TARGET - MUST NOT BE TOUCHED\n"
@@ -83,6 +84,14 @@ def run_setup(args, home):
     """Run the real installer with HOME redirected into the sandbox."""
     return subprocess.run(
         [sys.executable, str(SETUP)] + [str(a) for a in args],
+        capture_output=True, text=True, timeout=300, env=sandbox_env(home),
+    )
+
+
+def run_full_engine(args, home):
+    """Same, for the sibling installer install.sh runs right after it."""
+    return subprocess.run(
+        [sys.executable, str(FULL_ENGINE)] + [str(a) for a in args],
         capture_output=True, text=True, timeout=300, env=sandbox_env(home),
     )
 
@@ -224,6 +233,149 @@ class HostileTargetSandbox(unittest.TestCase):
 
         self.assert_outside_unchanged(before, proc)
         self.assertEqual(stolen.read_bytes(), OUTSIDE_SENTINEL)
+
+
+class InstallerContainmentContract:
+    """Containment cases EVERY installer entry point has to satisfy.
+
+    install.sh loads both scripts/setup_project_os.py and
+    scripts/install_full_engine.py, points them at the same --target and
+    forwards --force to both (install.sh:118,120,130,147), so a guard proven on
+    one installer proves nothing about the other. That is not theoretical here:
+
+    * 2026-07-26 -- --full-engine reached this file's unprotected sinks and
+      wrote through a symlinked target exactly as the starter installer had,
+      exit 0, no refusal. The guard was then centralised (install_full_engine
+      imports setup_project_os._refuse) but only the starter installer was ever
+      driven by a test, so deleting the add-on installer's call to it left the
+      whole suite green.
+    * The --force `.pre-force` backup is a write too, and it copies the USER's
+      bytes: through a link named <file>.pre-force it hands their file to
+      whatever is outside the target. setup_project_os.py refused that;
+      install_full_engine.py did not.
+
+    The cases live here once and are bound to each entry point by the
+    subclasses below, so a new installer means a new subclass rather than a
+    copy of these assertions that can rot on its own. Assertions are on
+    FILESYSTEM STATE, with the refusal line checked as well so that "wrote
+    nothing outside" cannot be satisfied by an installer that silently did
+    nothing at all.
+    """
+
+    INSTALLER_NAME = ""
+    # A file this installer delivers into <target>/memory/.
+    MEMORY_FILE = ""
+
+    def run_installer(self, *extra):
+        raise NotImplementedError
+
+    def prepare_target(self):
+        """Whatever the installer needs in the target before it will run."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.home = self.base / "home"
+        self.home.mkdir()
+        self.outside = self.base / "outside"
+        self.outside.mkdir()
+        self.target = self.base / "target"
+        self.target.mkdir()
+        self.prepare_target()
+
+    def assert_outside_unchanged(self, before, proc):
+        self.assertEqual(
+            snapshot(self.outside), before,
+            "%s wrote outside the target it was pointed at\nstdout:\n%s\nstderr:\n%s"
+            % (self.INSTALLER_NAME, proc.stdout, proc.stderr),
+        )
+
+    def assert_refused(self, proc):
+        self.assertIn(
+            "REFUSED", proc.stdout + proc.stderr,
+            "%s recorded no refusal for a destination outside the target\n"
+            "stdout:\n%s\nstderr:\n%s" % (self.INSTALLER_NAME, proc.stdout, proc.stderr),
+        )
+
+    def test_symlinked_memory_directory_is_not_written_through(self):
+        (self.outside / "keep.txt").write_bytes(OUTSIDE_SENTINEL)
+        os.symlink(str(self.outside), str(self.target / "memory"))
+        before = snapshot(self.outside)
+
+        proc = self.run_installer()
+
+        self.assert_outside_unchanged(before, proc)
+        self.assertFalse(
+            (self.outside / self.MEMORY_FILE).exists(),
+            "%s delivered %s outside the target" % (self.INSTALLER_NAME, self.MEMORY_FILE),
+        )
+        # the link itself is left alone, not replaced by a real directory
+        self.assertTrue((self.target / "memory").is_symlink())
+        self.assert_refused(proc)
+
+    def test_dangling_symlink_in_memory_does_not_create_the_outside_file(self):
+        """`dst.exists()` is False for a broken link, so nothing stopped this."""
+        missing = self.outside / self.MEMORY_FILE
+        (self.target / "memory").mkdir(exist_ok=True)
+        os.symlink(str(missing), str(self.target / "memory" / self.MEMORY_FILE))
+        before = snapshot(self.outside)
+
+        proc = self.run_installer()
+
+        self.assert_outside_unchanged(before, proc)
+        self.assertFalse(
+            missing.exists(),
+            "%s created a file outside the target through a broken link"
+            % self.INSTALLER_NAME,
+        )
+        self.assert_refused(proc)
+
+    def test_symlinked_pre_force_backup_does_not_leak_the_users_file(self):
+        """The --force backup is a write too, and it copies the USER's content."""
+        stolen = self.outside / "steal.txt"
+        stolen.write_bytes(OUTSIDE_SENTINEL)
+        user_content = b"# my own edits\n"
+        (self.target / "memory").mkdir(exist_ok=True)
+        edited = self.target / "memory" / self.MEMORY_FILE
+        edited.write_bytes(user_content)
+        os.symlink(str(stolen), str(edited.parent / (self.MEMORY_FILE + ".pre-force")))
+        before = snapshot(self.outside)
+
+        proc = self.run_installer("--force")
+
+        self.assert_outside_unchanged(before, proc)
+        self.assertEqual(stolen.read_bytes(), OUTSIDE_SENTINEL)
+        # no safe backup means no overwrite: the user's edit survives
+        self.assertEqual(
+            edited.read_bytes(), user_content,
+            "%s overwrote the user's file after failing to back it up safely"
+            % self.INSTALLER_NAME,
+        )
+        self.assert_refused(proc)
+
+
+class SetupInstallerContainment(InstallerContainmentContract, unittest.TestCase):
+    INSTALLER_NAME = "scripts/setup_project_os.py"
+    MEMORY_FILE = "mneme_adapter.py"
+
+    def run_installer(self, *extra):
+        return run_setup(["--target", self.target] + list(extra), self.home)
+
+
+class FullEngineInstallerContainment(InstallerContainmentContract, unittest.TestCase):
+    INSTALLER_NAME = "scripts/install_full_engine.py"
+    MEMORY_FILE = "goal_guard.py"
+
+    def prepare_target(self):
+        # the add-on installer refuses to run without a starter workspace
+        (self.target / "AGENTS.md").write_text("# Project OS\n", encoding="utf-8")
+        (self.target / "blackboard").mkdir()
+        (self.target / "blackboard" / "00-project-goal.md").write_text(
+            "# Goal\n", encoding="utf-8")
+
+    def run_installer(self, *extra):
+        return run_full_engine(["--target", self.target] + list(extra), self.home)
 
 
 class ContainedSymlinkConventionTests(unittest.TestCase):
