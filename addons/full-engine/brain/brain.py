@@ -135,23 +135,54 @@ def _safe_path(path: str) -> str:
     return full
 
 
-def _read_jsonl(path):
+def _read_jsonl(path, *, strict=False):
+    """Read a JSONL file into a list of parsed objects.
+
+    ``strict`` decides what a corrupt line MEANS. The shared brain file may
+    legitimately carry a crash-truncated tail (see _heal_truncated_tail), so
+    the readers of BRAIN_FILE (_existing_ids, cmd_import) stay lenient and skip
+    an unparseable line. A user-supplied ``export --from`` source is different:
+    silently dropping one of its lines and then printing "export: N new
+    lesson(s) appended" reports SUCCESS for an export that LOST a lesson -- the
+    repo's data-loss-looks-like-success signature (audit 2026-07-25/27). That
+    caller passes ``strict=True`` so a corrupt line is SURFACED and aborts with
+    a non-zero exit instead of vanishing.
+
+    Reads are decoded as UTF-8 -- the encoding every writer here uses -- and
+    non-UTF-8 bytes become a clean, surfaced refusal rather than a raw
+    UnicodeDecodeError traceback.
+    """
     out = []
     if not os.path.exists(path):
         return out
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            # 2026-07-25 audit: this used to call json.loads with no
-            # try/except, so one corrupt line anywhere in the file (a crash
-            # mid-write, a hand edit) raised and took the whole read down.
-            # central_brain.py's read_jsonl already skips bad lines instead.
-            try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+    try:
+        with open(path, encoding="utf-8") as f:
+            for lineno, raw in enumerate(f, 1):
+                line = raw.strip()
+                if not line:
+                    continue
+                # 2026-07-25 audit: this used to call json.loads with no
+                # try/except, so one corrupt line anywhere in the file (a crash
+                # mid-write, a hand edit) raised and took the whole read down.
+                # central_brain.py's read_jsonl already skips bad lines instead.
+                # 2026-07-27: skipping is right for the brain file's healed tail
+                # but WRONG for an export source, where a dropped line is a lost
+                # lesson reported as success -- strict callers surface it.
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError as exc:
+                    if strict:
+                        sys.exit(
+                            f"refuse: '{path}' line {lineno} is not valid JSON "
+                            f"({exc.msg}); refusing to export a file with a "
+                            "corrupt line rather than silently dropping a lesson"
+                        )
+                    continue
+    except UnicodeDecodeError as exc:
+        sys.exit(
+            f"refuse: '{path}' is not valid UTF-8 (byte {exc.start}: "
+            f"{exc.reason}); expected a UTF-8 JSON/JSONL file"
+        )
     return out
 
 
@@ -424,11 +455,32 @@ def _lessons_from_adapter():
 
 def _lessons_from_file(path):
     full = _safe_path(path)
-    if full.endswith(".jsonl"):
-        recs = _read_jsonl(full)
+    # A typo'd --from path used to traceback rather than refuse: a missing
+    # `.json` hit FileNotFoundError inside open() (above the list guard below),
+    # while a missing `.jsonl` silently read nothing and printed success for an
+    # export that never happened. Refuse both, cleanly and non-zero (2026-07-27).
+    if not os.path.exists(full):
+        sys.exit(f"refuse: --from file '{path}' does not exist")
+    # Accept a case-variant extension: FOO.JSONL is still JSONL. The old
+    # case-sensitive endswith(".jsonl") routed it to the json.load() branch,
+    # which tracebacked with a JSONDecodeError on the first newline between
+    # records (2026-07-27).
+    if full.lower().endswith(".jsonl"):
+        recs = _read_jsonl(full, strict=True)
     else:
-        with open(full) as f:
-            blob = json.load(f)
+        # A non-.jsonl --from used to json.load() with no guard, so a
+        # newline-delimited file mislabelled `.json`, a non-UTF-8 file, or any
+        # invalid JSON raised a raw traceback. Refuse each cleanly (2026-07-27).
+        try:
+            with open(full, encoding="utf-8") as f:
+                blob = json.load(f)
+        except UnicodeDecodeError as exc:
+            sys.exit(f"refuse: '{path}' is not valid UTF-8 (byte {exc.start}: "
+                     f"{exc.reason}); expected a UTF-8 JSON file")
+        except json.JSONDecodeError as exc:
+            sys.exit(f"refuse: '{path}' is not valid JSON ({exc.msg} at line "
+                     f"{exc.lineno} column {exc.colno}); if it is newline-"
+                     "delimited JSON, name it with a .jsonl extension")
         recs = blob.get("records", blob) if isinstance(blob, dict) else blob
         if isinstance(recs, dict):
             recs = list(recs.values())

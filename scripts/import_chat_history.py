@@ -43,9 +43,38 @@ CREDENTIAL_REPLACEMENT = "[REDACTED_CREDENTIAL]"
 # there is no anchor left for the whole-block pattern, and the key BODY would
 # survive in the report. Detection is still brain.py's; this only widens the
 # span.
+#
+# The lazy body stops at the FIRST of: the END footer (a complete block), a
+# blank line, or end-of-text. That last two cases are what redact a TRUNCATED
+# block -- a BEGIN header with NO END footer. Before, only whole BEGIN...END
+# blocks matched here; brain.py's header-only `-----BEGIN ... KEY-----` pattern
+# then redacted just that one line and the base64 body survived verbatim in the
+# report (audit 2026-07-27). Stopping at a blank line / EOS is fail-closed: it
+# may over-redact text glued to the key with no blank-line break after it, but
+# it never LEAKS the body.
 SPAN_WIDENER_PATTERNS = [
-    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S), "[REDACTED_PRIVATE_KEY]"),
+    (re.compile(
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----"
+        r"[\s\S]*?"
+        r"(?:-----END [A-Z ]*PRIVATE KEY-----|(?=\r?\n[ \t]*\r?\n)|\Z)",
+        re.S), "[REDACTED_PRIVATE_KEY]"),
 ]
+
+# The shared list's generic keyword catch-all -- (api_key|secret|password|
+# passwd|token|bearer) + separator + 6+ non-space chars -- has no vendor shape
+# to anchor on, so ordinary prose like "the secret: happiness comes from
+# within" trips it and the redactor eats a real sentence. A live credential
+# VALUE is one opaque, high-entropy token; a prose value is a natural-language
+# word. Mirror the brain-side gate that stopped {"auth_token": "rotate
+# quarterly per runbook"} from being REFUSED (2026-07-26): skip a match that is
+# a keyword + separator + a single plain alphabetic word. Only the generic
+# catch-all can ever produce that exact shape -- every vendor pattern's match
+# carries digits, symbols, or a non-keyword prefix -- so this can never
+# un-redact a vendor key (audit 2026-07-27). The 15-char cap keeps a long
+# all-letter passphrase (unusual, but possible) on the redacted side.
+_KEYWORD_PROSE_MATCH = re.compile(
+    r"(?:api[_-]?key|secret|password|passwd|token|bearer)\s*[:=]\s*"
+    r"[A-Za-z]{1,15}\Z", re.I)
 
 # Personal data the shared credential list does not carry. No vendor
 # credential shape may be defined here, because that is what drifts.
@@ -136,6 +165,10 @@ def _sub_whole_tokens(text: str, pattern, replacement: str):
     spans = []
     hits = 0
     for match in pattern.finditer(text):
+        # Ordinary prose that merely reads "keyword: word" is not a credential;
+        # skip it so a real sentence survives the report (audit 2026-07-27).
+        if _KEYWORD_PROSE_MATCH.match(match.group(0)):
+            continue
         start, end = match.span()
         # Both scans are bounded by the previous span's end, which is always a
         # whitespace index (or end of text). Without that bound a long
