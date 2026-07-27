@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import subprocess
 from pathlib import Path
 
 
@@ -83,6 +84,41 @@ def merge_gitignore(src: Path, dst: Path, force: bool, dry_run: bool = False) ->
     separator = "" if existing.endswith("\n") else "\n"
     dst.write_text(f"{existing}{separator}\n{GITIGNORE_MARKER}\n" + "\n".join(missing_lines) + "\n", encoding="utf-8")
     return f"merged Project OS ignore rules into {dst}"
+
+
+def committed_memory_index_warning(target: Path) -> list[str]:
+    """Warn when the target's git already TRACKS memory/mneme_index.json.
+
+    Merging scripts/project-os.gitignore only PREVENTS committing the semantic
+    memory index; it says nothing to a user whose earlier install already
+    committed it. That index stores lesson excerpts from every project the
+    brain has seen, so a tracked copy puts one client's notes inside another
+    client's repo (cross-project leak, audit 2026-07-26). This is remediation
+    advice, never a gate: if git is absent, the target is not a repo, or git
+    fails for any reason, stay silent (fail open).
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(target), "ls-files", "--", "memory/mneme_index.json"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return []
+    return [
+        "WARNING: this project's git already tracks memory/mneme_index.json.",
+        "That file is the semantic memory index; it carries lesson excerpts from",
+        "every project this brain has seen, so committing it leaks cross-project",
+        "notes into this repo. The merged .gitignore only blocks FUTURE commits.",
+        "To stop tracking it:",
+        "  git rm --cached memory/mneme_index.json",
+        "  git commit -m 'Stop tracking Project OS memory index'",
+        "Note: earlier commits still contain the file. If this repo is shared,",
+        "rewrite history or treat the index contents as disclosed.",
+    ]
 
 
 def bootstrap(target: Path, force: bool, dry_run: bool = False) -> list[str]:
@@ -183,6 +219,11 @@ def main() -> int:
         print("Project OS setup complete.")
     for result in results:
         print(f"- {result}")
+    warning = committed_memory_index_warning(args.target.expanduser().resolve())
+    if warning:
+        print()
+        for line in warning:
+            print(line)
     print()
     print("Next:")
     print("1. Open the target project in Codex, Claude, or your AI coding tool.")
