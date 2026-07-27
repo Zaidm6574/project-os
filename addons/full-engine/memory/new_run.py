@@ -107,8 +107,54 @@ def template_sources():
     return dirs
 
 
+def _fallback_template_dir():
+    """The shipped schema, used only to fill prefixes the live sources lack.
+
+    `blackboard/` is the working copy, so it can be partially populated. Because
+    `_has_numbered_templates` only asks whether ANY numbered file is there, a
+    blackboard holding a single numbered file (other tooling writes into it) was
+    accepted as the whole template — scaffolding then copied that one file, or
+    for `--tier solo` nothing at all, and still exited 0 (audit 2026-07-26).
+    """
+    return os.path.join(ROOT, "blackboard-template")
+
+
+def _search_dirs():
+    """Every dir a template file may come from, highest priority last."""
+    dirs = list(template_sources())
+    fallback = _fallback_template_dir()
+    if fallback not in dirs:
+        dirs.insert(0, fallback)
+    return dirs
+
+
+def _numbered_names(d, wanted):
+    """Numbered `.md` files in `d` that belong to the tier, sorted."""
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        if not name.endswith(".md"):
+            continue
+        prefix = name[:2]
+        if not prefix.isdigit():
+            continue
+        if wanted is None or prefix in wanted:
+            out.append(name)
+    return out
+
+
 def numbered_templates(tier):
-    """Return {filename: source_path} for a tier, addons overriding the base."""
+    """Return {filename: source_path} for a tier, addons overriding the base.
+
+    Any schema slot (leading two digits) that no live source provides is filled
+    from `blackboard-template/`. The fill is per-PREFIX and last-resort, so a
+    healthy blackboard is unaffected: the addon's `21-agent-roster.md` still
+    lands alongside the blackboard's own `21-*`, and a live `10-vector-memory.md`
+    does not drag in the template's differently-named `10-*`.
+    """
     wanted = TIER_FILES.get(tier, None)
     if not os.path.isdir(BLACKBOARD):
         raise SystemExit(
@@ -119,15 +165,71 @@ def numbered_templates(tier):
         )
     out = {}
     for src in template_sources():
-        for name in sorted(os.listdir(src)):
-            if not name.endswith(".md"):
-                continue
-            prefix = name[:2]
-            if not prefix.isdigit():
-                continue
-            if wanted is None or prefix in wanted:
-                out[name] = os.path.join(src, name)
+        for name in _numbered_names(src, wanted):
+            out[name] = os.path.join(src, name)
+    fallback = _fallback_template_dir()
+    if os.path.isdir(fallback) and fallback not in template_sources():
+        have = set(n[:2] for n in out)
+        for name in _numbered_names(fallback, wanted):
+            # A canonical file is filled by NAME even when its slot looks
+            # covered: "00-project-goal.archived.md" occupies slot 00 and used
+            # to suppress the fill, so the run shipped without the one file
+            # every consumer opens literally.
+            if name[:2] not in have or (name in CANONICAL_FILES
+                                        and name not in out):
+                out[name] = os.path.join(fallback, name)
     return dict(sorted(out.items()))
+
+
+# Every tier ships at least the solo schema -- that is the repo's own definition
+# of a "slim but closable run". A scaffold that cannot supply it is not a run.
+REQUIRED_PREFIXES = TIER_FILES["solo"]
+
+# Files that consumers open by EXACT NAME rather than by schema slot:
+# regenerate_index(), memory/validate_run.py, memory/goal_guard.py and
+# memory/adopt_project.py all open "00-project-goal.md" literally. A slot-only
+# check cannot see that contract -- an adversarial pass renamed one file to
+# "00-project-goal.archived.md" and the prefix "00" still read as covered, so
+# the scaffold reported success while every one of those consumers failed
+# (adopt_project with a raw FileNotFoundError). A required slot is satisfied by
+# the slot; a required FILE is satisfied only by the file.
+CANONICAL_FILES = ("00-project-goal.md",)
+
+
+def _missing_prefixes(tier, names):
+    """Schema slots AND canonical filenames the tier requires but `names` lacks.
+
+    Returns slot numbers for uncovered slots and full filenames for a canonical
+    file that is absent, so the refusal message names exactly what to supply.
+    """
+    wanted = TIER_FILES.get(tier, None)
+    required = set(REQUIRED_PREFIXES if wanted is None else wanted)
+    have = set(names)
+    missing = required - set(n[:2] for n in names)
+    missing |= {f for f in CANONICAL_FILES
+                if f[:2] in required and f not in have}
+    return sorted(missing)
+
+
+def _refuse_incomplete(slug, tier, missing):
+    sys.stderr.write(
+        "new_run: refusing to scaffold an incomplete run %r (tier=%s).\n"
+        "  missing schema files: %s\n"
+        "  searched: %s\n"
+        "An empty run directory is worse than no run: restore the numbered "
+        "blackboard schema (copy blackboard-template/ into blackboard/) and "
+        "re-run.\n"
+        % (
+            slug,
+            tier,
+            # A canonical entry is already a filename; only a bare slot number
+            # needs the "-*.md" gloss.
+            ", ".join(p if p.endswith(".md") else "%s-*.md" % p
+                      for p in missing) or "(none found)",
+            ", ".join(_search_dirs()),
+        )
+    )
+    return 2
 
 
 SOLO_PACKETS_WAIVER = (
@@ -177,9 +279,27 @@ def scaffold(slug, tier="full"):
     if os.path.exists(dest):
         sys.stderr.write("runs/%s/ already exists — refusing to overwrite.\n" % slug)
         return 1
+    templates = numbered_templates(tier)
+    # Refuse BEFORE creating anything: exiting 0 on a run directory with no
+    # schema in it is the one outcome that must be impossible. The user follows
+    # the README, sees success, and only finds the empty run much later
+    # (audit 2026-07-26).
+    missing = _missing_prefixes(tier, templates)
+    if missing:
+        return _refuse_incomplete(slug, tier, missing)
     os.makedirs(dest)
-    for name, src in numbered_templates(tier).items():
-        shutil.copy2(src, os.path.join(dest, name))
+    try:
+        for name, src in templates.items():
+            shutil.copy2(src, os.path.join(dest, name))
+        # Verify on the FILESYSTEM, not on our intent: a copy that silently
+        # produced nothing must not leave a half-run behind.
+        landed = _missing_prefixes(tier, os.listdir(dest))
+        if landed:
+            raise RuntimeError(
+                "scaffold wrote no file for: %s" % ", ".join(landed))
+    except Exception:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
     if tier == "solo":
         # Solo == no subagents, so there is no empty packets/ to expect. Drop an
         # explicit waiver the validator recognizes instead of a hollow dir.
