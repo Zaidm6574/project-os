@@ -17,6 +17,13 @@ VECTOR_PACKAGES = ("osvec", "turbovec", "chromadb", "faiss", "lancedb", "sentenc
 BROWSER_COMMANDS = ("node", "npm", "npx")
 CONTAINER_COMMANDS = ("docker", "podman")
 
+# Status label for "the file is on disk, and that is ALL we checked". Distinct
+# from "Verified", which this script only earns by finding an executable on
+# PATH or an importable package. Deliberately reuses the label vocabulary
+# already documented in blackboard/17-capability-preflight.md instead of
+# inventing an eighth status word.
+PRESENT_UNVERIFIED = "Claimed but unverified"
+
 
 def has_command(name: str) -> bool:
     return shutil.which(name) is not None
@@ -85,6 +92,15 @@ def local_graphos_status(target: Path | None) -> tuple[str, str] | None:
 
 
 def local_osvec_status(target: Path | None) -> tuple[str, str] | None:
+    """Status derived from adapter files being on disk.
+
+    This is a file-existence check and nothing more: it never imports the
+    adapter, never runs its selftest, and cannot know whether numpy is
+    installed or the vector store is usable. Reporting that as "Verified" told
+    users a capability was proven when only a filename had been seen
+    (audit 2026-07-26), so every branch here reports PRESENT_UNVERIFIED and
+    names the command that would actually verify it.
+    """
     if target is None:
         return None
     adapter = target / "memory" / "osvec_adapter.py"
@@ -92,15 +108,19 @@ def local_osvec_status(target: Path | None) -> tuple[str, str] | None:
     if adapter.exists():
         sidecar = target / "memory" / "store" / "project.sidecar.json"
         if sidecar.exists():
-            return "Verified", "Local OSVec helper and vector sidecar found: memory/osvec_adapter.py, memory/store/project.sidecar.json."
+            return (
+                PRESENT_UNVERIFIED,
+                "Local OSVec helper and vector sidecar found: memory/osvec_adapter.py, memory/store/project.sidecar.json. "
+                "Files only — confirm with `python3 memory/osvec_adapter.py selftest` before claiming vector recall works.",
+            )
         return (
-            "Verified",
+            PRESENT_UNVERIFIED,
             "Local OSVec helper found: memory/osvec_adapter.py; vector store not populated yet. "
             "Activate with `python3 memory/osvec_adapter.py selftest`, then add approved lessons/preferences.",
         )
     if legacy_adapter.exists():
         return (
-            "Verified",
+            PRESENT_UNVERIFIED,
             "Legacy OSVec/TurboVec adapter found: memory/turbovec_adapter.py; prefer memory/osvec_adapter.py for new projects. "
             "Do not treat OSVec as unavailable; run the adapter selftest before claiming vector recall is active.",
         )
@@ -185,6 +205,7 @@ def build_report(target: Path | None = None) -> str:
             "- Project OS core works without GraphOS or OSVec tools.",
             "- GraphOS and OSVec become active only when a real tool is installed, connected, or the local helper scripts are present and run.",
             "- Do not tell the user GraphOS/OSVec are unavailable when these local scripts exist; say they are available but may need a graph build or vector population step.",
+            f"- `{PRESENT_UNVERIFIED}` means the capability was only asserted — an env var is set, or a helper file is on disk — and nothing was executed to prove it. Run the command in the Recommendation column before reporting that capability as working.",
             "- Model routing is configured in the AI tool, not through `PROJECT_OS_GRAPHOS_CMD` or `PROJECT_OS_OSVEC_CMD`.",
             "- If a capability is `Not configured`, the assistant should say that honestly and keep using the markdown blackboard.",
             "- To connect custom tools, set `PROJECT_OS_GRAPHOS_CMD` and/or `PROJECT_OS_OSVEC_CMD` before running this check.",

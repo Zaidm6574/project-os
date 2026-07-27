@@ -78,6 +78,12 @@ def main():
     def flag(name, default=None):
         if name in args:
             i = args.index(name)
+            # 2026-07-26: a bare trailing flag (`... --task` with nothing after
+            # it) indexed past the end and died with a raw IndexError traceback.
+            if i + 1 >= len(args):
+                print(f"promptsmith: {name} needs a value — nothing followed it.",
+                      file=sys.stderr)
+                sys.exit(2)
             v = args[i + 1]
             del args[i:i + 2]
             return v
@@ -85,6 +91,13 @@ def main():
 
     task = flag("--task")
     if not task:
+        # 2026-07-26: this printed the whole docstring to STDOUT and exited 2
+        # with an EMPTY stderr, so copying the README's `--brief-file
+        # examples/sample-brief.md` line looked like success in a pipeline and
+        # said nothing about what was wrong. Name the missing flag on stderr.
+        print("promptsmith: --task \"<what to build>\" is required.\n"
+              "e.g. python3 scripts/promptsmith.py --task \"build the hero section\" "
+              "--brief-file examples/sample-brief.md", file=sys.stderr)
         print(__doc__)
         sys.exit(2)
     query = flag("--query", task)
@@ -95,7 +108,23 @@ def main():
     no_index = "--no-index" in args
 
     if brief_file:
-        brief_md, source = open(brief_file, encoding="utf-8").read().strip(), f"pre-fetched: {brief_file}"
+        # 2026-07-26: an unreadable --brief-file (typo, wrong cwd) raised a raw
+        # OSError traceback here. Same command, same class of ordinary mistake
+        # as a missing --task: refuse with the path that could not be read.
+        # UnicodeDecodeError is a ValueError, NOT an OSError, so a brief pasted
+        # out of Word (cp1252 smart quotes) still tracebacked at this exact
+        # line after the OSError guard landed (adversary 2026-07-26).
+        try:
+            brief_md = open(brief_file, encoding="utf-8").read().strip()
+        except OSError as e:
+            print(f"promptsmith: cannot read --brief-file {brief_file!r}: "
+                  f"{e.strerror or e}", file=sys.stderr)
+            sys.exit(2)
+        except UnicodeDecodeError as e:
+            print(f"promptsmith: --brief-file {brief_file!r} is not UTF-8 "
+                  f"text ({e.reason}); re-save it as UTF-8.", file=sys.stderr)
+            sys.exit(2)
+        source = f"pre-fetched: {brief_file}"
     else:
         brief_md, source = fetch_brief(query)
 

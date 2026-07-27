@@ -33,6 +33,12 @@ knowledge-graph/
 graphify-out/
 **/shared-brain.jsonl
 brain/shared-brain.jsonl
+# scripts/brain_archive.py moves records OUT of the brain into a sibling
+# `-archive.jsonl` and leaves a `.pre-archive-<stamp>` copy of the original
+# next to it. Both hold the same lesson text as the file above, and neither
+# was covered by it (audit 2026-07-26).
+**/shared-brain-archive.jsonl
+**/shared-brain.jsonl.pre-archive-*
 **/*.sidecar.json
 **/store/*.tvim
 central-brain/
@@ -97,6 +103,14 @@ build/
 *.log
 *.tvim
 node_modules/
+# `memory/code_graph.py build` writes its graph to <--root>/code-graph.json by
+# default, and --root defaults to the project root — so the shipped tool drops a
+# generated file into a stranger's repo that nothing ignores (audit 2026-07-26).
+# Unlike `mneme_index.json` this is NOT a cross-project data leak: the graph is
+# derived from the user's OWN source and holds nothing they don't already track.
+# It is regenerable build noise, ignored for the same reason `dist/` is.
+# Unanchored on purpose: --root can point at any directory, at any depth.
+code-graph.json
 
 # Project OS run working directories.
 # `runs/` and `outputs/` hold transient per-run working state and can get large;

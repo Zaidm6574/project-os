@@ -9,7 +9,20 @@ Usage:
   python3 memory/build_verify.py <project_path> [--timeout SECONDS]
   python3 memory/build_verify.py --selftest
 
-Standard library only. No network access (subprocess only).
+Standard library only; this module itself opens no network connections.
+
+SECURITY -- read before pointing this at a repo you did not write. This tool
+EXECUTES the target project's own build/test command (`npm test`, `pytest`,
+`make test`) as you. It is NOT a sandbox and never has been.
+
+``--isolated`` buys exactly one property: the SOURCE TREE is protected from
+modification, because the command runs against a disposable copy and the
+source is digest-verified before/after. It does NOT contain execution -- the
+project's command still has your filesystem outside the copy, your network and
+your credentials. The banner used to leave that gap to the reader's
+imagination; overclaiming a security property is worse than claiming none, so
+every run now prints a BUILD-VERIFY-SCOPE line saying what is and is not
+covered (audit 2026-07-26). Only verify projects you already trust.
 """
 from __future__ import annotations
 
@@ -23,6 +36,28 @@ import sys
 import tempfile
 
 DEFAULT_TIMEOUT = 120
+
+# Honesty banner (audit 2026-07-26). ASCII only: this prints on every run,
+# including from cron/CI under a non-UTF-8 locale.
+SCOPE_ISOLATED = (
+    "BUILD-VERIFY-SCOPE: source-tree protection only - NOT a sandbox. The "
+    "project's own command still executes with your full user privileges "
+    "(filesystem outside the copy, network, credentials). Only verify "
+    "projects you trust."
+)
+SCOPE_IN_PLACE = (
+    "BUILD-VERIFY-SCOPE: none - NOT a sandbox. The project's own command "
+    "executes with your full user privileges and may modify this source tree. "
+    "Pass --isolated to protect the source tree. Only verify projects you "
+    "trust."
+)
+ISOLATED_HELP = (
+    "run the command against a disposable copy so the project cannot modify "
+    "the source tree (proven by a before/after digest; packet contract lines: "
+    "BUILD-VERIFY-MODE / BUILD-VERIFY-SCOPE / SOURCE-TREE). This protects the "
+    "source tree ONLY -- it is NOT a sandbox, and the project's own command "
+    "still executes with your full user privileges."
+)
 
 
 def _safe_path(path: str) -> str:
@@ -131,15 +166,33 @@ def _tree_fingerprint(root: str) -> dict:
     return out
 
 
-def _kill_process_group(proc):
+def _kill_process_group(proc, pgid=None):
     """Best-effort kill of the child's entire process group."""
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        os.killpg(pgid if pgid is not None else os.getpgid(proc.pid),
+                  signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):
         try:
             proc.kill()
         except OSError:
             pass
+
+
+def _sweep_process_group(pgid):
+    """Kill whatever the verify command left running in its process group.
+
+    Cheap, REAL containment (2026-07-26) -- not a sandbox, just cleanup we
+    already owed. Only the timeout path used to sweep, so a command that
+    exited 0 after backgrounding a dev server or a watcher left it alive with
+    the user's privileges, still holding (and able to write into) the scratch
+    copy we are about to delete. Sweeping before the source digest is re-taken
+    also closes the window where a straggler mutates the tree between the
+    command finishing and the "SOURCE-TREE: unchanged" claim being made.
+    """
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
 
 
 def verify(project_path: str, timeout: int = DEFAULT_TIMEOUT,
@@ -173,11 +226,17 @@ def verify(project_path: str, timeout: int = DEFAULT_TIMEOUT,
     # runs against a DISPOSABLE copy, so a test/build step that writes files
     # cannot mutate the tree under verification. The source is fingerprinted
     # before and after so "unchanged" is proven, not assumed.
+    #
+    # What this is NOT (audit 2026-07-26): containment. The copy protects the
+    # SOURCE; the command still runs unrestricted as the user. State the scope
+    # on stdout next to the mode so the reader of a pasted receipt cannot
+    # mistake "isolated-copy" for "sandboxed".
     scratch = None
     run_dir = full
     before = None
     if isolated:
         print("BUILD-VERIFY-MODE: isolated-copy")
+        print(SCOPE_ISOLATED)
         before = _tree_fingerprint(full)
         scratch = tempfile.mkdtemp(prefix="build-verify-isolated-")
         run_dir = os.path.join(scratch, "worktree")
@@ -187,6 +246,9 @@ def verify(project_path: str, timeout: int = DEFAULT_TIMEOUT,
             shutil.rmtree(scratch, ignore_errors=True)
             print("BUILD-VERIFY: FAIL (could not create isolated copy: %s)" % exc)
             return 1
+    else:
+        print("BUILD-VERIFY-MODE: in-place")
+        print(SCOPE_IN_PLACE)
 
     def _finish(code: int) -> int:
         if scratch is not None:
@@ -218,16 +280,21 @@ def verify(project_path: str, timeout: int = DEFAULT_TIMEOUT,
     except FileNotFoundError as exc:
         print("BUILD-VERIFY: FAIL (%s)" % exc)
         return _finish(1)
+    # start_new_session makes the child a session (and process-group) leader,
+    # so its pgid IS its pid. Capture it now: looking it up after the child has
+    # been reaped races with PID reuse and could signal an unrelated group.
+    pgid = proc.pid
     try:
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        _kill_process_group(proc)
+        _kill_process_group(proc, pgid)
         try:
             proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:
             pass
         print("BUILD-VERIFY: FAIL (timeout after %ss)" % timeout)
         return _finish(1)
+    _sweep_process_group(pgid)
     if proc.returncode == 0:
         rc = _finish(0)
         if rc != 0:
@@ -267,13 +334,14 @@ def selftest() -> int:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Run cheapest build/test verify for a project.")
+    ap = argparse.ArgumentParser(
+        description="Run cheapest build/test verify for a project. This "
+                    "EXECUTES the project's own build/test command with your "
+                    "full user privileges; it is NOT a sandbox. Only verify "
+                    "projects you trust.")
     ap.add_argument("path", nargs="?", help="project directory")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
-    ap.add_argument("--isolated", action="store_true",
-                    help="run against a disposable copy; the source tree is "
-                         "digest-verified unchanged (packet contract lines: "
-                         "BUILD-VERIFY-MODE / SOURCE-TREE)")
+    ap.add_argument("--isolated", action="store_true", help=ISOLATED_HELP)
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
     if args.selftest:

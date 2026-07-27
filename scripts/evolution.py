@@ -74,6 +74,13 @@ def main():
     def flag(name, default=None):
         if name in args:
             i = args.index(name)
+            # 2026-07-26: a bare trailing flag (`evolution.py best --run` with
+            # nothing after it) indexed past the end of argv and died with a raw
+            # IndexError traceback instead of a usage refusal.
+            if i + 1 >= len(args):
+                print(f"evolution: {name} needs a value — nothing followed it.",
+                      file=sys.stderr)
+                sys.exit(2)
             v = args[i + 1]
             del args[i:i + 2]
             return v

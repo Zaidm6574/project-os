@@ -116,6 +116,18 @@ def write_entry(lines):
 
 
 def main():
+    # 2026-07-26: on a fresh clone `blackboard/` does not exist yet (the
+    # installer creates it from blackboard-template/), so write_entry's
+    # open(LOG, "w") died with a raw FileNotFoundError traceback after the
+    # heartbeat had already done all of its work. Say what is missing and how
+    # to fix it instead.
+    bb_dir = os.path.dirname(LOG)
+    if not os.path.isdir(bb_dir):
+        print(f"FAILED: no blackboard directory at {bb_dir} — this workspace is "
+              "not initialized. Run `./install.sh <target>` (or copy "
+              "blackboard-template/ to blackboard/) and re-run the nightly.",
+              file=sys.stderr)
+        sys.exit(2)
     lines = []
     try:
         gauge, code = run_gauge()
