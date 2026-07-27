@@ -216,7 +216,31 @@ class _BruteForceIndex:
         return len(self._ids)
 
     def write(self, path):
-        np.savez(path + ".npz", ids=np.array(self._ids, dtype=np.uint64), vecs=self._vecs)
+        # Atomic write (audit 2026-07-27): np.savez opens the target zip in "w"
+        # mode, truncating it, and streams the archive out over one or more
+        # write() syscalls. A crash, a full disk, or a concurrent rebuild that
+        # dies partway therefore used to leave project.tvim.npz TORN -- a
+        # half-written zip that np.load() cannot read -- destroying the whole
+        # index. save() already serialises writers under an exclusive flock, so
+        # this closes the *interruption* half: build the new archive under a
+        # sibling temp name, then swap it in with a single os.replace(). A
+        # reader (or the next load()) sees either the previous complete index
+        # or the new one, never a truncated file.
+        final = path + ".npz"
+        directory = os.path.dirname(final) or "."
+        fd, tmp = tempfile.mkstemp(prefix=".project.tvim.", suffix=".npz",
+                                   dir=directory)
+        os.close(fd)
+        try:
+            # tmp already ends in ".npz", so np.savez writes exactly `tmp`
+            # instead of appending a second extension.
+            np.savez(tmp, ids=np.array(self._ids, dtype=np.uint64),
+                     vecs=self._vecs)
+            os.replace(tmp, final)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
 
     @classmethod
     def load(cls, path, dim=DIM):

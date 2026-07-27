@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -45,6 +46,73 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # module look like it did its own field-level scan when it did not.
 from brain import SECRET_PATTERNS, record_secret_hit  # noqa: E402
 sys.path.pop(0)
+
+
+# --------------------------------------------------------------------------- #
+# Concurrent-write lock (audit 2026-07-27)
+# --------------------------------------------------------------------------- #
+# append_new() below is an UNLOCKED read-modify-append on shared-brain.jsonl:
+# it reads the existing id set, decides which records are new, then appends
+# them. scripts/brain_archive.py rewrites that SAME file and guards every
+# mutation with scripts/bb_lock.py (an O_CREAT|O_EXCL lockfile keyed by the
+# file's realpath). This writer took no lock at all, so two concurrent agents
+# (a push racing another push, or a push racing brain_archive) each read the
+# pre-append snapshot, both judge the same record "new", and both append it --
+# a duplicated record and an over-counted return in the CROSS-PROJECT brain.
+#
+# We deliberately reuse bb_lock rather than a bare fcntl.flock on the data
+# file: bb_lock serialises through a *separate* lockfile, so a flock on the
+# JSONL itself would not be mutually exclusive with brain_archive's lock and
+# the two would still race. Reusing bb_lock is the only way the two "don't
+# fight". bb_lock lives in the base Project OS `scripts/` dir (a prerequisite
+# of the full-engine add-on), which sits at a different depth in the repo than
+# in an installed project, so we search upward for it rather than hard-coding a
+# relative path. If it cannot be found or loaded (e.g. a non-POSIX target with
+# no fcntl), locking degrades to best-effort and never blocks the caller.
+def _load_bb_lock():
+    try:
+        here = Path(__file__).resolve()
+        for parent in here.parents:
+            candidate = parent / "scripts" / "bb_lock.py"
+            if candidate.is_file():
+                spec = importlib.util.spec_from_file_location(
+                    "project_os_central_brain_bb_lock", candidate)
+                module = importlib.util.module_from_spec(spec)
+                # Not registered in sys.modules on purpose: keeps the module's
+                # env-derived LOCK_DIR re-readable if the process re-imports us
+                # under a changed BB_LOCK_DIR (the tests rely on this).
+                spec.loader.exec_module(module)
+                return module
+    except Exception:
+        pass
+    return None
+
+
+_BB_LOCK = _load_bb_lock()
+
+
+def _acquire_brain_lock(path: Path):
+    """Take the shared-brain lock for `path`; return a fencing token or None.
+
+    Best-effort: a missing/unloadable bb_lock, or a wait that times out under
+    contention, returns None and the caller proceeds unlocked rather than
+    raising -- append_new() must still return an int count."""
+    if _BB_LOCK is None:
+        return None
+    try:
+        token = _BB_LOCK.acquire(str(path), agent="central-brain", wait=30)
+    except Exception:
+        return None
+    return token or None
+
+
+def _release_brain_lock(path: Path, token) -> None:
+    if _BB_LOCK is None or not token:
+        return
+    try:
+        _BB_LOCK.release(str(path), agent="central-brain", force=True, token=token)
+    except Exception:
+        pass
 
 
 def looks_like_secret(text: str) -> bool:
@@ -100,28 +168,36 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 def append_new(path: Path, records: list[dict]) -> int:
-    existing = {record.get("id") for record in read_jsonl(path)}
-    added = 0
-    with path.open("a", encoding="utf-8") as handle:
-        # Never weld onto a crash-truncated last line: appending to a partial
-        # JSON fragment makes ONE unparseable line, destroying the damaged
-        # record AND the one being written, while read_jsonl skips it silently
-        # and this function reports success. scripts/brain_append.py was healed
-        # in d71aeca; this writer -- which serves BOTH push and pull, i.e. the
-        # CROSS-PROJECT brain -- was not (adversarial verify 2026-07-26).
-        if handle.tell():
-            with path.open("rb") as probe:
-                probe.seek(-1, os.SEEK_END)
-                if probe.read(1) != b"\n":
-                    handle.write("\n")
-        for record in records:
-            rid = record.get("id")
-            if not rid or rid in existing:
-                continue
-            handle.write(json.dumps(record, sort_keys=True) + "\n")
-            existing.add(rid)
-            added += 1
-    return added
+    # The read (existing id set) MUST be inside the lock together with the
+    # append: that read-then-append is the exact window two agents race on.
+    # Same lock scripts/brain_archive.py holds for this file, so a push here
+    # and an archive rewrite there also serialise against each other.
+    token = _acquire_brain_lock(path)
+    try:
+        existing = {record.get("id") for record in read_jsonl(path)}
+        added = 0
+        with path.open("a", encoding="utf-8") as handle:
+            # Never weld onto a crash-truncated last line: appending to a partial
+            # JSON fragment makes ONE unparseable line, destroying the damaged
+            # record AND the one being written, while read_jsonl skips it silently
+            # and this function reports success. scripts/brain_append.py was healed
+            # in d71aeca; this writer -- which serves BOTH push and pull, i.e. the
+            # CROSS-PROJECT brain -- was not (adversarial verify 2026-07-26).
+            if handle.tell():
+                with path.open("rb") as probe:
+                    probe.seek(-1, os.SEEK_END)
+                    if probe.read(1) != b"\n":
+                        handle.write("\n")
+            for record in records:
+                rid = record.get("id")
+                if not rid or rid in existing:
+                    continue
+                handle.write(json.dumps(record, sort_keys=True) + "\n")
+                existing.add(rid)
+                added += 1
+        return added
+    finally:
+        _release_brain_lock(path, token)
 
 
 def project_brain_path(project: Path) -> Path:
