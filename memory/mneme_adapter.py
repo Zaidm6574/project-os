@@ -186,6 +186,55 @@ def _gather():
     return items
 
 
+def _scanned_sources():
+    """Every path _gather() reads, for reporting. Keep in sync with _gather()."""
+    return [SHARED_BRAIN,
+            SHARED_BRAIN.replace(".jsonl", "-archive.jsonl"),
+            os.path.join(ROOT, "runs", "*", "00-project-goal.md")]
+
+
+def _empty_index_note():
+    """Why an empty index is empty, naming where we looked.
+
+    2026-07-27: three independent cold-clone reviewers ran the README's
+    "Optional: smarter memory search" block and got `built ... 0 vectors`
+    then `[]`, both exit 0, no stderr. That is a success-shaped report of
+    "nothing happened": indistinguishable from a broken install, a wrong
+    working directory, or a brain bound somewhere the reader did not expect.
+
+    Deliberately NOT an error. A fresh install genuinely has no lessons yet,
+    and an empty corpus SHOULD produce an empty index -- failing here would
+    break the documented first run for every new user. The defect was the
+    silence, so the remedy is to name the scanned paths and the next action,
+    and keep the exit code at 0.
+    """
+    lines = ["[mneme] nothing to index -- the index is EMPTY (this is not an error).",
+             "[mneme] scanned:"]
+    for p in _scanned_sources():
+        exists = "" if ("*" in p or os.path.exists(p)) else "  (does not exist)"
+        lines.append("[mneme]   %s%s" % (p, exists))
+    lines.append("[mneme] add an approved lesson with "
+                 "`python3 scripts/brain_append.py`, or point "
+                 "PROJECT_OS_SHARED_BRAIN at an existing brain, then rebuild.")
+    return "\n".join(lines)
+
+
+USAGE = """mneme_adapter - local semantic recall over the shared brain and run goals.
+
+Usage:
+  python3 memory/mneme_adapter.py build            rebuild the index from all sources
+  python3 memory/mneme_adapter.py query "<text>" [k]   top-k matches as JSON on stdout
+  python3 memory/mneme_adapter.py stats            index size, dimension, embedder
+
+Environment:
+  MNEME_INDEX                 index path (default: memory/mneme_index.json)
+  PROJECT_OS_SHARED_BRAIN     brain path to index
+  OSVEC_EMBEDDER=lexical      force the dependency-free embedder instead of Ollama
+
+An empty corpus produces an empty index and exits 0 -- that is correct on a
+fresh install, and `build` says so explicitly rather than reporting silence."""
+
+
 def build():
     embedder = pick_embedder()
     gathered = [(i, s, t) for i, s, t in _gather() if (t or "").strip()]
@@ -263,6 +312,17 @@ def query(text, k=5):
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "build"
+    # `--help` fell through every branch below and exited 0 having printed
+    # nothing, so the one command a stranger tries first looked like a no-op
+    # (cold-clone reviewer, 2026-07-27). An unknown subcommand did the same,
+    # which made a typo indistinguishable from a successful run.
+    if cmd in ("-h", "--help", "help"):
+        print(USAGE)
+        sys.exit(0)
+    if cmd not in ("build", "stats", "query"):
+        print("[mneme] unknown subcommand %r\n" % cmd, file=sys.stderr)
+        print(USAGE, file=sys.stderr)
+        sys.exit(2)
     if cmd == "build":
         try:
             i = build()
@@ -275,10 +335,18 @@ if __name__ == "__main__":
             sys.exit(f"[mneme] REFUSED: cannot read a brain source — {e}\n"
                      f"[mneme] {INDEX} was left untouched; repair the source, then rebuild")
         print(f"[mneme] built {INDEX} — {i['count']} vectors (dim {i['dim']}, {i['embedder']})")
+        if not i["count"]:
+            print(_empty_index_note(), file=sys.stderr)
     elif cmd == "stats":
         i = load()
         print(json.dumps({"count": i["count"], "dim": i["dim"], "embedder": i["embedder"]} if i else {"count": 0}, indent=2))
     elif cmd == "query":
         text = sys.argv[2] if len(sys.argv) > 2 else ""
         k = int(sys.argv[3]) if len(sys.argv) > 3 else 5
-        print(json.dumps(query(text, k), indent=2))
+        hits = query(text, k)
+        # JSON stays on STDOUT and the explanation goes to STDERR: README shows
+        # this as a JSON-producing command, so prose on stdout would break any
+        # caller piping it into jq.
+        print(json.dumps(hits, indent=2))
+        if not hits and not (load() or {}).get("count"):
+            print(_empty_index_note(), file=sys.stderr)

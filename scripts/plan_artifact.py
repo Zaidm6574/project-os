@@ -1086,10 +1086,38 @@ def main():
             # build the full packet body BEFORE touching disk, then write
             # atomically (temp + rename) so no failure path can leave a
             # partial or zero-byte packet behind (audit finding F2, 2026-07-17)
+            # 2026-07-27 (cold-clone reviewer): validate() REFUSES a multi-step
+            # plan unless a work-dependent checker declares verification with a
+            # nonempty, non-placeholder method AND expected (see :732-736) --
+            # and then compile interpolated role/task/depends_on/outputs and
+            # dropped the very strings the gate had just forced the author to
+            # write. A checker received "Task: check the form submits" with no
+            # criteria at all. Collecting a requirement and discarding it at the
+            # one point it could do work is a fail-open gate: it reads as
+            # enforced because the plan is refused without it, while the
+            # document a worker actually executes never carries it.
+            #
+            # Reuse _real_verification_value rather than testing truthiness, so
+            # "-", "n/a", "todo", "tbd" stay ONE definition of "declared".
+            # A looser rule here would print placeholder text into the packet
+            # while the gate upstream considers the same value absent.
+            _v = s.get("verification")
+            _v = _v if isinstance(_v, dict) else {}
+            _vm = _v.get("method") if _real_verification_value(_v.get("method")) else None
+            _ve = _v.get("expected") if _real_verification_value(_v.get("expected")) else None
+            # Emitted only when something real was declared: an unconditional
+            # block would put "Verification method: (none declared)" on every
+            # builder packet in every plan, training readers to skip the line
+            # that matters on the packets where it is load-bearing.
+            verification_block = ""
+            if _vm or _ve:
+                verification_block = ("Verification method: %s\nExpected: %s\n"
+                                      % (_vm or "(none declared)",
+                                         _ve or "(none declared)"))
             body = f"""Packet ID: {plan['id']}-{s['id']}
 Agent: {s['role']}{f" (model hint: {s['model_hint']})" if s.get('model_hint') else ""}
 Task: {s['task']}
-Evidence: (fill during run)
+{verification_block}Evidence: (fill during run)
 Conclusion: (fill during run)
 Confidence: (fill during run)
 Risks: (fill during run)
