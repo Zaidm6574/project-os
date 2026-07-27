@@ -37,7 +37,7 @@ to the digest recorded at approve time, and it appends an audit record to
 plan["migrations"]. Anything else — edited steps, a backwards schema, a plan
 approved before content digests were recorded — needs the human gate again.
 """
-import os, sys, json, re, datetime, hashlib, copy
+import os, sys, json, re, datetime, hashlib, copy, tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project-os/
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
@@ -63,7 +63,50 @@ class PlanInputError(ValueError):
 # Writing the plan FILE to an explicit path stays supported — the CLI documents
 # `<id>` as accepting a path and callers rely on it — but the id recorded
 # INSIDE the artifact is always the slugified basename.
-SAFE_PLAN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+#
+# \A...\Z, not ^...$: '$' also matches just BEFORE a trailing newline, so
+# "p1\n" satisfied ^[A-Za-z0-9][A-Za-z0-9._-]*$ and carried a newline straight
+# into a filename. Same anchors as the run-slug validator in memory/new_run.py
+# (audit 2026-07-26).
+SAFE_PLAN_ID = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+# The id shares ONE filename with each step id ("<plan-id>-<step-id>.md"), and
+# a filename is capped at 255 bytes on every filesystem this runs on. Refuse an
+# over-long id up front, with a message, instead of discovering it as a
+# half-written packet run and an ENAMETOOLONG on step 7.
+MAX_PLAN_ID_LEN = 120
+
+
+def _short(value, limit=80):
+    """repr() that cannot flood stderr with a megabyte-long hostile id."""
+    text = repr(value)
+    return text if len(text) <= limit else text[:limit] + "...(truncated)"
+
+
+def require_path_safe_plan_id(pid):
+    """Refuse a STORED plan id that is anything but a single file name.
+
+    compile() interpolates plan["id"] into every worker-packet filename, so an
+    id of "../../../../tmp/x" — or an absolute one, or one carrying a newline
+    or a NUL — makes os.path.join walk out of blackboard/packets/ and write
+    wherever it points. `create` slugifies the id it records, but a plan file
+    is plain JSON that gets hand-edited and pasted in from another agent or a
+    teammate, so a create-time check is bypassable: the id has to be validated
+    where it is CONSUMED as a path (audit 2026-07-26). Same rule, shape and
+    voice as _reject_unsafe_slug() in memory/new_run.py.
+    """
+    if (not isinstance(pid, str) or not SAFE_PLAN_ID.match(pid)
+            or pid != os.path.basename(pid) or ".." in pid):
+        raise PlanInputError(
+            "refusing plan id %s: a plan id is a single file name under "
+            "blackboard/plans/, matching [A-Za-z0-9][A-Za-z0-9._-]* — not a "
+            "path. It becomes part of every worker-packet filename."
+            % _short(pid))
+    if len(pid) > MAX_PLAN_ID_LEN:
+        raise PlanInputError(
+            "refusing plan id %s: %d characters is over the %d-character "
+            "limit, and the id shares one filename with each step id."
+            % (_short(pid), len(pid), MAX_PLAN_ID_LEN))
+    return pid
 
 
 def safe_plan_id(pid):
@@ -71,13 +114,35 @@ def safe_plan_id(pid):
     slug = os.path.basename((pid or "").strip())
     if slug.endswith(".json"):
         slug = slug[: -len(".json")]
-    if not SAFE_PLAN_ID.match(slug) or ".." in slug:
+    return require_path_safe_plan_id(slug)
+
+
+def packet_path(packets_dir, name):
+    """Path for one worker packet, refusing anything that escapes packets_dir.
+
+    Second layer behind require_path_safe_plan_id(): step ids land in the same
+    filename and validate() only requires them to be nonempty strings, and
+    packets_dir can itself be reached through a symlink. Comparing the RESOLVED
+    path against the RESOLVED directory is what makes "packets stay under
+    packets/" verified rather than assumed (same realpath/commonpath idiom as
+    brain.py and wt.py).
+    """
+    fp = os.path.join(packets_dir, name)
+    try:
+        base = os.path.realpath(packets_dir)
+        real = os.path.realpath(fp)
+        contained = (os.path.commonpath([real, base]) == base
+                     and os.path.dirname(real) == base)
+    except (OSError, ValueError) as e:
+        # realpath() raises ValueError on an embedded NUL and commonpath()
+        # raises on paths it cannot compare — both are refusals, not crashes.
         raise PlanInputError(
-            "unsafe plan id %r: the name must match %s (no path separators, "
-            "no '..') because it becomes part of every worker-packet filename."
-            % (pid, SAFE_PLAN_ID.pattern)
-        )
-    return slug
+            "refusing packet name %s: %s" % (_short(name), e)) from None
+    if not contained:
+        raise PlanInputError(
+            "refusing packet name %s: it resolves to %s, outside the packets "
+            "directory %s" % (_short(name), _short(real), _short(base)))
+    return fp
 
 
 def plan_path(pid):
@@ -98,6 +163,9 @@ def load(pid):
             plan = json.load(f)
     except OSError as e:
         raise PlanInputError(f"cannot read plan file: {e}") from None
+    except UnicodeDecodeError as e:
+        # a stray binary file in plans/ is a malformed plan, not a crash
+        raise PlanInputError(f"plan file is not valid UTF-8 text: {e}") from None
     except json.JSONDecodeError as e:
         raise PlanInputError(f"invalid JSON in plan file: {e.msg} "
                              f"(line {e.lineno}, column {e.colno})") from None
@@ -676,6 +744,25 @@ def topo_order(plan):
     return order
 
 
+def list_row(plan):
+    """One `list` line for a plan, or PlanInputError naming what is malformed.
+
+    blackboard/plans/ is a directory of hand-editable JSON, so a half-written
+    draft, an empty {} or a JSON list is a normal thing to find there — and
+    indexing straight into it made `list` die on the first one.
+    """
+    missing = [k for k in ("id", "status", "goal", "steps") if k not in plan]
+    if missing:
+        raise PlanInputError("not a plan artifact (missing %s)"
+                             % ", ".join(missing))
+    steps = plan["steps"]
+    if not isinstance(steps, list):
+        raise PlanInputError("steps must be a JSON array")
+    done = sum(1 for s in steps if isinstance(s, dict) and s.get("done"))
+    return "%s  [%s]  %d/%d steps  — %s" % (
+        plan["id"], plan["status"], done, len(steps), str(plan["goal"])[:60])
+
+
 def run_migration(pid):
     """CLI half of `migrate`: refuse loudly, or re-pin under the plan lock."""
     plan = load(pid)
@@ -813,10 +900,24 @@ def main():
     if cmd == "list":
         if os.path.isdir(PLANS):
             for f in sorted(os.listdir(PLANS)):
-                if f.endswith(".json"):
-                    p = load(os.path.join(PLANS, f))
-                    done = sum(1 for s in p["steps"] if s.get("done"))
-                    print(f"{p['id']}  [{p['status']}]  {done}/{len(p['steps'])} steps  — {p['goal'][:60]}")
+                if not f.endswith(".json"):
+                    continue
+                # One unreadable/partial file in plans/ used to abort the whole
+                # listing with a raw KeyError/TypeError, hiding every healthy
+                # plan behind it. Report it and keep going (audit 2026-07-26).
+                # The print must sit INSIDE the guard: a plan id holding a lone
+                # surrogate builds a row fine and then raises UnicodeEncodeError
+                # at print() time, which put the traceback and the hidden-plans
+                # failure straight back (adversary 2026-07-26).
+                try:
+                    print(list_row(load(os.path.join(PLANS, f))))
+                except PlanInputError as e:
+                    print(f"{f}: skipped — {e}", file=sys.stderr)
+                    continue
+                except (UnicodeError, ValueError) as e:
+                    print(f"{f}: skipped — unprintable plan ({e})",
+                          file=sys.stderr)
+                    continue
         sys.exit(0)
 
     if not args and cmd not in ("list",):
@@ -869,6 +970,24 @@ def main():
             print("cannot compile, INVALID:\n- " + "\n- ".join(probs),
                   file=sys.stderr)
             sys.exit(1)
+        # The plan's own id is about to become a path component. Check it HERE,
+        # at consumption, before any side effect (the --force backup, the
+        # packets mkdir, the first packet write): the file on disk may have been
+        # hand-edited since `create` slugified it.
+        # Step ids get the SAME check, not a weaker one: they share the packet
+        # filename with the plan id, and they are interpolated into the packet
+        # BODY -- the document a worker agent is told to execute. A step id
+        # carrying a newline needs no path separator to do damage; it forged
+        # extra "On completion run:" command lines into that document while the
+        # compile exited 0 (adversary 2026-07-26).
+        try:
+            require_path_safe_plan_id(plan.get("id"))
+            for _s in plan.get("steps") or []:
+                require_path_safe_plan_id(
+                    _s.get("id") if isinstance(_s, dict) else _s)
+        except PlanInputError as e:
+            print("cannot compile: %s" % e, file=sys.stderr)
+            sys.exit(1)
         if plan["status"] != "approved" and "--force" not in args:
             if plan["status"] == "planned":
                 print("plan is not approved (planOnly). Run `approve` first, or --force.",
@@ -905,8 +1024,17 @@ def main():
         except ValueError as e:
             print(f"cannot compile: {e}", file=sys.stderr)
             sys.exit(1)
+        # Resolve EVERY packet path before writing the first one, so a step id
+        # that escapes packets/ (step ids are only checked for being nonempty
+        # strings) refuses the whole compile instead of stopping half-written.
+        try:
+            packet_paths = [packet_path(packets_dir, f"{plan['id']}-{s['id']}.md")
+                            for s in ordered_steps]
+        except PlanInputError as e:
+            print("cannot compile: %s" % e, file=sys.stderr)
+            sys.exit(1)
         for i, s in enumerate(ordered_steps, 1):
-            fp = os.path.join(packets_dir, f"{plan['id']}-{s['id']}.md")
+            fp = packet_paths[i - 1]
             # build the full packet body BEFORE touching disk, then write
             # atomically (temp + rename) so no failure path can leave a
             # partial or zero-byte packet behind (audit finding F2, 2026-07-17)
@@ -923,14 +1051,29 @@ Status: Draft
 Plan: {plan['id']} · step {i}/{len(plan['steps'])} · expected outputs: {", ".join(s['outputs']) or "(unspecified)"}
 {f"Isolation: WORKTREE — before touching code run: python3 scripts/wt.py create {plan['id']}-{s['id']}  (work + commit there; merge via wt.py merge)" + chr(10) if s.get('isolation') == 'worktree' else ""}On completion run: python3 scripts/plan_artifact.py complete {plan['id']} --step {s['id']}
 """
-            tmp = fp + ".tmp"
+            # The packet path itself is validated above, but the write went
+            # through the SIBLING `fp + ".tmp"` with a symlink-following
+            # open(), so a link planted at that predictable name redirected
+            # the write outside the tree while stdout still printed the
+            # contained packets/ path (adversary 2026-07-26). A hard link
+            # defeats realpath/commonpath entirely -- containment checks
+            # cannot see one -- so the tmp file is created with an
+            # unpredictable name and O_CREAT|O_EXCL|O_NOFOLLOW semantics,
+            # which refuse BOTH a symlink and any pre-existing path.
+            # Same defect and same remedy as scripts/brain_archive.py.
+            tmp = None
             try:
-                with open(tmp, "w", encoding="utf-8") as f:
+                fd, tmp = tempfile.mkstemp(
+                    dir=os.path.dirname(fp),
+                    prefix=os.path.basename(fp) + ".",
+                    suffix=".tmp")
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(body)
                 os.replace(tmp, fp)
             except OSError as e:
                 try:
-                    os.unlink(tmp)
+                    if tmp:
+                        os.unlink(tmp)
                 except OSError:
                     pass
                 print(f"cannot compile: failed writing packet "
