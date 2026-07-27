@@ -76,6 +76,16 @@ def osvec_group_status() -> tuple[str, str]:
 
 
 def local_graphos_status(target: Path | None) -> tuple[str, str] | None:
+    """Status derived from the builder script being on disk.
+
+    Like local_osvec_status, this is a file-existence check and nothing more:
+    it never runs memory/build_graph.py, never confirms the file is a usable
+    helper, and cannot know whether the graph artifact is valid. Reporting that
+    as "Verified" told users a capability was proven when only a filename had
+    been seen (audit 2026-07-26); "Verified" is reserved for an executable on
+    PATH or an importable package. So every branch here reports
+    PRESENT_UNVERIFIED and names the command that would actually verify it.
+    """
     if target is None:
         return None
     builder = target / "memory" / "build_graph.py"
@@ -83,9 +93,13 @@ def local_graphos_status(target: Path | None) -> tuple[str, str] | None:
         return None
     graph = target / "graphify-out" / "graph.json"
     if graph.exists():
-        return "Verified", "Local GraphOS helper and graph artifact found: memory/build_graph.py, graphify-out/graph.json."
+        return (
+            PRESENT_UNVERIFIED,
+            "Local GraphOS helper and graph artifact found: memory/build_graph.py, graphify-out/graph.json. "
+            "Files only — confirm with `python3 memory/build_graph.py --root blackboard` before claiming graph recall works.",
+        )
     return (
-        "Verified",
+        PRESENT_UNVERIFIED,
         "Local GraphOS helper found: memory/build_graph.py; graph artifact not built yet. "
         "Activate with `python3 memory/build_graph.py --root blackboard` or `python3 memory/build_graph.py --root runs/<slug>`.",
     )

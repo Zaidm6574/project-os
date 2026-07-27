@@ -57,7 +57,14 @@ class GraphContractTests(unittest.TestCase):
             self.assertTrue(graph["nodes"])
 
             status, detail = tool_check.local_graphos_status(project)
-            self.assertEqual(status, "Verified")
+            # The builder really ran above, but local_graphos_status itself only
+            # stats the file — it cannot tell this genuine graph from a
+            # `touch graphify-out/graph.json`. Per audit 2026-07-26 that check no
+            # longer calls itself "Verified" (a word this script reserves for an
+            # executable on PATH or an importable package), matching the sibling
+            # local_osvec_status. Recognition — the substance of this contract —
+            # is still asserted via `detail` below.
+            self.assertEqual(status, tool_check.PRESENT_UNVERIFIED)
             self.assertIn("graph artifact found", detail)
             self.assertTrue(validator._has_graph_or_memory(str(run)))
 
