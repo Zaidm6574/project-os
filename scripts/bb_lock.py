@@ -19,7 +19,7 @@ Env: BB_LOCK_DIR (default ~/.project-os/locks), BB_LOCK_STALE (default 60 second
 
 Exit codes: 0 ok · 1 could not acquire / not held · 2 usage error
 """
-import os, sys, json, time, hashlib, subprocess, fcntl, math, uuid
+import errno, os, sys, json, time, hashlib, subprocess, fcntl, math, uuid
 from contextlib import contextmanager
 
 LOCK_DIR = os.environ.get("BB_LOCK_DIR", os.path.expanduser("~/.project-os/locks"))
@@ -36,12 +36,41 @@ def lock_path(target):
     return os.path.join(LOCK_DIR, _key(target) + ".lock")
 
 
+class _GuardTimeout(Exception):
+    """Deadline expired while waiting for a lock's serialization guard."""
+
+
 @contextmanager
-def _guard(lp):
-    """Serialize all transitions for one stable lock pathname."""
+def _guard(lp, deadline=None):
+    """Serialize all transitions for one stable lock pathname.
+
+    With ``deadline=None`` (release/renew/reap) this blocks until the guard
+    is ours — those transitions must not fail spuriously. ``acquire()``
+    passes its ``--wait`` deadline (``time.monotonic()`` based): the guard is
+    then polled with LOCK_NB and ``_GuardTimeout`` is raised once the
+    deadline passes. Before 2026-07-26 this was an unbounded LOCK_EX and
+    acquire() only checked its deadline AFTER the guard block, so one
+    stopped/hung process inside a guard critical section wedged every other
+    agent indefinitely and ``--wait N`` did not actually bound the wait.
+    """
     os.makedirs(LOCK_DIR, exist_ok=True)
     with open(lp + ".guard", "a+", encoding="utf-8") as guard:
-        fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
+        if deadline is None:
+            fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
+        else:
+            while True:
+                try:
+                    fcntl.flock(guard.fileno(),
+                                fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError as exc:
+                    if exc.errno not in (errno.EAGAIN, errno.EACCES,
+                                         errno.EWOULDBLOCK):
+                        raise
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise _GuardTimeout(lp) from None
+                    time.sleep(min(POLL_SEC, remaining))
         try:
             yield
         finally:
@@ -89,19 +118,24 @@ def acquire(target, agent="unknown", wait=10.0):
     lp = lock_path(target)
     deadline = time.monotonic() + wait
     while True:
-        with _guard(lp):
-            _reap_locked(lp)
-            try:
-                fd = os.open(lp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                token = uuid.uuid4().hex
-                with os.fdopen(fd, "w") as f:
-                    json.dump({"path": os.path.realpath(target), "agent": agent,
-                               "pid": os.getpid(), "ts": time.time(),
-                               "token": token}, f)
-                _HELD_TOKENS[lp] = token
-                return token
-            except FileExistsError:
-                pass
+        try:
+            with _guard(lp, deadline=deadline):
+                _reap_locked(lp)
+                try:
+                    fd = os.open(lp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    token = uuid.uuid4().hex
+                    with os.fdopen(fd, "w") as f:
+                        json.dump({"path": os.path.realpath(target), "agent": agent,
+                                   "pid": os.getpid(), "ts": time.time(),
+                                   "token": token}, f)
+                    _HELD_TOKENS[lp] = token
+                    return token
+                except FileExistsError:
+                    pass
+        except _GuardTimeout:
+            # Same timeout failure shape as a lock held past the deadline:
+            # a wedged guard holder must not block us beyond --wait.
+            return False
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
