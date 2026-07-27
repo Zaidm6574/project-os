@@ -72,6 +72,31 @@ def slug(s, n=32):
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")[:n].strip("-") or "task"
 
 
+def _path_within(base_dir, target):
+    """True iff `target` resolves to a file DIRECTLY inside base_dir.
+
+    --packet-id is interpolated straight into the output filename and is only
+    slugged for the DEFAULT; an explicit `--packet-id ../../etc/x`, an absolute
+    path, or one with symlink/.. components would otherwise redirect the write
+    OUTSIDE --out-dir while the JSON summary still printed a benign-looking
+    path. Comparing the RESOLVED path against the RESOLVED directory is the same
+    realpath/commonpath idiom, fail-closed, as scripts/plan_artifact.py
+    (packet_path). Requiring dirname(real) == base also contains any SIBLING the
+    writer derives from this path (e.g. a `<file>.tmp` temp for an atomic
+    write): a sibling shares this exact resolved directory, so it cannot escape
+    once the final path is pinned here.
+    """
+    try:
+        base = os.path.realpath(base_dir)
+        real = os.path.realpath(target)
+        # realpath() raises ValueError on an embedded NUL; commonpath() raises
+        # on paths it cannot compare (e.g. different drives) — both are refusals.
+        return (os.path.commonpath([real, base]) == base
+                and os.path.dirname(real) == base)
+    except (OSError, ValueError):
+        return False
+
+
 def main():
     args = sys.argv[1:]
 
@@ -141,6 +166,20 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     wp = os.path.join(out_dir, f"{pid}-worker-prompt.md")
     rp = os.path.join(out_dir, f"{pid}-rubric.md")
+    # 2026-07-27: containment guard for --packet-id (pid). pid lands verbatim in
+    # both output filenames above and, for an explicit value, is otherwise
+    # unvalidated — a crafted id (../.., an absolute path, symlink/.. parts)
+    # escaped --out-dir. Same bug class already fixed in plan_artifact.py.
+    # Validate BOTH paths BEFORE opening either file so an escaping id refuses
+    # the whole run and writes NOTHING (no partial/first-file leak). dirname==
+    # base inside _path_within also covers any `.tmp` sibling of these paths.
+    for _label, _fp in (("worker prompt", wp), ("rubric", rp)):
+        if not _path_within(out_dir, _fp):
+            print(f"promptsmith: refusing --packet-id {pid!r}: the {_label} file "
+                  f"would resolve to {_fp!r}, outside the --out-dir {out_dir!r}. "
+                  f"Use a plain packet id (no '/', '..', or absolute path).",
+                  file=sys.stderr)
+            sys.exit(2)
 
     dont_block = ("\n".join(f"- [ ] {d}" for d in donts) if donts else
                   "- [ ] Extract every DON'T from the brief above; each is a hard constraint."
