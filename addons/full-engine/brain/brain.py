@@ -79,6 +79,29 @@ SECRET_PATTERNS = [
     re.compile(r"(?i)(api[_-]?key|secret|password|passwd|token|bearer)\s*[:=]\s*\S{6,}"),
 ]
 
+# A value that is nothing but a redaction marker carries no secret by
+# construction, so exempting it cannot hide one: the match must consume the
+# WHOLE value, and "REDACTEDsk-ant-api03..." is therefore still scanned.
+_PLACEHOLDER_VALUE = re.compile(
+    r"^[\W_]*(?:redacted|removed|omitted|scrubbed|todo|tbd|changeme|"
+    r"placeholder|example|sample|none|null|nil|unset|empty|n/?a|x+|\*+|\.+)"
+    r"[\W_]*$", re.I)
+
+
+def _could_be_credential(value):
+    """Could this VALUE be the secret a keyword pattern is hunting for?
+
+    Only used to gate the "key=value" spelling of the split-credential scan
+    (see _iter_scannable_items). A live credential is one opaque token: prose
+    ("rotate quarterly per runbook") contains whitespace, and a redaction
+    marker ("REDACTED", "***") carries no secret. Both were being REFUSED,
+    which blocks legitimate saves. The bare key+value concatenation is still
+    yielded unconditionally, so prefix reassembly is unaffected by this gate.
+    """
+    return bool(value.strip()) and not (
+        re.search(r"\s", value) or _PLACEHOLDER_VALUE.match(value))
+
+
 # Historical allowlist of the fields a human was expected to paste text into.
 # KEPT FOR REFERENCE ONLY -- record_secret_hit() no longer consults it. The
 # 2026-07-26 audit found the allowlist WAS the hole: a credential in any field
@@ -219,6 +242,35 @@ def _iter_scannable_items(value, root: str = ""):
                 if isinstance(key, str):
                     kpath = _child_path(path, key)
                     yield kpath, key
+                    # 2026-07-26 audit: a credential SPLIT across a key and its
+                    # value defeats per-string scanning -- key "sk-ant-api03"
+                    # plus the remaining 40 chars as the value each match no
+                    # pattern alone, so the pair walked straight in. Scan the
+                    # joined pair too: bare (prefix tokens reassemble across
+                    # the boundary) and with "=" (the keyword catch-all and
+                    # AccountKey patterns require their separator, and
+                    # {"api_key": "..."} is the JSON spelling of "api_key=...").
+                    # Extra yields only ADD ways to refuse; nothing that was
+                    # scanned before is skipped because of them.
+                    #
+                    # The "=" spelling is GATED on the value looking like a
+                    # credential, because the keyword catch-all only needs six
+                    # non-space characters after the separator: ungated, it
+                    # refused {"auth_token": "rotate quarterly per runbook"}
+                    # and {"client_secret": "REDACTED"} -- ordinary notes a
+                    # user is entitled to save (judge round 2026-07-26). A
+                    # value with whitespace or no entropy cannot BE the secret
+                    # the pattern is looking for.
+                    if isinstance(sub, str):
+                        joined = sub
+                    elif isinstance(sub, (bytes, bytearray)):
+                        joined = sub.decode("utf-8", "replace")
+                    else:
+                        joined = None
+                    if joined is not None:
+                        yield kpath, key + joined
+                        if _could_be_credential(joined):
+                            yield kpath, key + "=" + joined
                 elif isinstance(key, _SAFE_SCALARS):
                     kpath = _child_path(path, repr(key))
                 else:
