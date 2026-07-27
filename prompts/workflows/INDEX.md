@@ -21,6 +21,7 @@ Every Project OS workflow lives here in runtime-neutral form.
 | `kickoff` | <your rough idea> | Start a new Project OS project from a rough idea (CEO interviews you, picks tier + cost mode) |
 | `memory-sync` | ['optional: a lesson/preference to remember'] | Update memory — refresh the GraphOS graph and store durable lessons in OSVec |
 | `new-run` | — | Start a new, isolated project run cloned from the blackboard template. |
+| `project` | <what you want to build, review, or audit> | Route a rough idea into the right Project OS workflow (the general entry point) |
 | `save-chat` | <approved summary to remember> | Save an approved chat summary, lesson, preference, or decision into the local Project OS shared brain. |
 | `status` | — | Show the current Project OS state from the blackboard |
 | `ui-review` | <path, artifact, or UI goal> | Review or plan a Project OS user interface with UI/UX, responsive layout, accessibility, and browser QA checks |

@@ -179,5 +179,23 @@ fi
 
 printf '%s\n' ""
 printf '%s\n' "Install path finished."
-printf '%s\n' "Open the target project in Codex, Claude, or your AI coding tool, then say:"
-printf '%s\n' "  /project <your idea>"
+# 2026-07-27: this closed by telling every user to type "/project <your idea>",
+# which is a slash command -- and a starter install writes no .claude/ directory
+# at all, so the command did not exist in the target. Cold-clone reviewers hit a
+# dead end on the FIRST thing they were told to do. Say what actually works for
+# the install that just ran, and name the flag that installs the commands.
+printf '%s\n' "Open the target project in Codex, Claude, or your AI coding tool."
+if [ "${CLAUDE_ENGINE:-0}" = "1" ]; then
+  printf '%s\n' "Slash commands are installed. Start with:"
+  printf '%s\n' "  /project <what you want to build>"
+elif [ "${CODEX_ENGINE:-0}" = "1" ]; then
+  printf '%s\n' "Codex skills are installed. Start with the 'project' skill,"
+  printf '%s\n' "or just describe your idea -- AGENTS.md is read automatically."
+else
+  printf '%s\n' "Then describe your idea in plain words -- your assistant reads"
+  printf '%s\n' "CLAUDE.md / AGENTS.md automatically and will route it from there."
+  printf '%s\n' ""
+  printf '%s\n' "For slash commands (/project, /kickoff, /status, ...) reinstall with:"
+  printf '%s\n' "  ./install.sh <target> --full-engine --claude-engine   # Claude"
+  printf '%s\n' "  ./install.sh <target> --full-engine --codex-engine    # Codex"
+fi

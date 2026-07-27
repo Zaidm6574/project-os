@@ -523,7 +523,13 @@ def main() -> int:
     print()
     print("Next:")
     print("1. Open the target project in Codex, Claude, or your AI coding tool.")
-    print("2. Say: /project <your idea>")
+    # 2026-07-27: this said `Say: /project <your idea>`. This function runs for
+    # the STARTER install, which writes no .claude/ directory -- so it named a
+    # slash command that does not exist in the target it just created, as the
+    # very first thing a new user is told to do.
+    print("2. Describe your idea in plain words — CLAUDE.md / AGENTS.md is read")
+    print("   automatically. For slash commands, reinstall with --full-engine")
+    print("   --claude-engine (Claude) or --codex-engine (Codex).")
     print("3. Build graph context when useful: python3 memory/build_graph.py --root blackboard")
     print("4. Optional: run scripts/import_chat_history.py on a local chat export.")
     print("5. Before committing, run: git status --short --ignored")
