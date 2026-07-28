@@ -38,7 +38,7 @@ Every load-bearing claim in this README has a command a stranger can run on a fr
 | Chat-derived memory never syncs to the shared brain without explicit approval | `python3 -m unittest tests.test_brain_privacy -v` |
 | The installer fails closed below Python 3.10 and names the interpreter it found | `PATH=/usr/bin:/bin sh install.sh /tmp/demo --dry-run` (on a machine whose only `python3` is older than 3.10, e.g. stock macOS: exits 1, prints `found python3 = 3.9.6 (/usr/bin/python3); ...`) |
 
-![Fresh clone, full test suite green, a sham plan rejected, a real plan accepted — 20 seconds, no dependencies](docs/proof.gif)
+![Fresh clone, the full suite green with zero dependencies, a sham plan rejected, a real plan accepted — a real terminal, played back time-compressed](docs/proof.gif)
 
 The plan gate, live — the checker's `verification.method`/`expected` are placeholders, so the plan never gets created:
 
