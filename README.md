@@ -217,8 +217,10 @@ Run a quick check before pushing:
 
 ```bash
 git status --short --ignored
-rg -n --hidden --no-ignore -S "/Users|sk-|ghp_|github_pat_|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|BEGIN [A-Z ]*PRIVATE KEY" .
+python3 scripts/prepublish_check.py
 ```
+
+`prepublish_check.py` imports the same credential denylist the brain's privacy gate uses, so the check you run before publishing is never weaker than the one running inside the tools. It prints the file and line of every match and never the matched value; `--list` shows the patterns it checked.
 
 ## Status
 
