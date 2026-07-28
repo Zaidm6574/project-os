@@ -379,6 +379,12 @@ def bootstrap(target: Path, force: bool, dry_run: bool = False,
                                    root=target, refusals=refusals))
     results.extend(copy_tree(TEMPLATE_ROOT / "prompts", target / "prompts"))
     results.extend(copy_tree(TEMPLATE_ROOT / "scripts", target / "scripts"))
+    # README states promptsmith "runs end-to-end without any personal setup via
+    # --brief-file examples/sample-brief.md". That was true in a clone and FALSE
+    # in an installed project until this line: examples/ was never copied, so the
+    # documented command failed with "cannot read --brief-file" in the one place
+    # the tool is actually meant to be used (2026-07-28).
+    results.extend(copy_tree(TEMPLATE_ROOT / "examples", target / "examples"))
     results.extend(copy_tree(TEMPLATE_ROOT / "addons" / "full-engine", target / "addons" / "full-engine"))
     results.extend(copy_tree(TEMPLATE_ROOT / "blackboard-template", target / "blackboard"))
     results.extend(copy_tree(TEMPLATE_ROOT / "runs-template", target / "runs"))

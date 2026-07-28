@@ -132,10 +132,13 @@ cd project-os
 ./install.sh ../my-new-project --check-tools
 ```
 
-Then open `../my-new-project` in your AI tool and say:
+Then open `../my-new-project` in your AI tool and describe what you want to build. `CLAUDE.md` and `AGENTS.md` are read automatically, so no special command is needed.
 
-```
-/project I want to build...
+If you want the workflows as slash commands (`/project`, `/kickoff`, `/status`, …), add the engine flag for your tool — the plain install above deliberately writes no `.claude/` directory:
+
+```bash
+./install.sh ../my-new-project --full-engine --claude-engine   # Claude
+./install.sh ../my-new-project --full-engine --codex-engine    # Codex
 ```
 
 To install the full engine add-on:
@@ -156,12 +159,14 @@ The first lines look like this:
 
 ```text
 Project OS setup dry run complete.
-- would create /tmp/project-os-demo
-- would write /tmp/project-os-demo/AGENTS.md
-- would write /tmp/project-os-demo/CLAUDE.md
-- would write /tmp/project-os-demo/.gitignore
-- would write /tmp/project-os-demo/prompts/project-os-kickoff.md
+- would create /path/to/demo-project
+- would write /path/to/demo-project/AGENTS.md
+- would write /path/to/demo-project/CLAUDE.md
+- would write /path/to/demo-project/.gitignore
+- would write /path/to/demo-project/prompts/project-os-kickoff.md
 ```
+
+(`../demo-project` is resolved to an absolute path, so you will see your own directory there.)
 
 Nothing is written until you run it without the flag.
 
@@ -192,6 +197,7 @@ my-new-project/
   .gitignore
   addons/              # full-engine add-on sources, always copied
   blackboard/
+  examples/            # sample-brief.md, used by promptsmith --brief-file
   memory/
   outputs/
   prompts/
