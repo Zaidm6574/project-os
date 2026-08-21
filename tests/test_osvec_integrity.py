@@ -110,7 +110,13 @@ def _numpy_python():
 
 
 def numpy_runtime_test(test_method):
-    """Run here with NumPy, otherwise delegate this exact unittest by name."""
+    """Run with NumPy, delegate when available, or skip with a clear reason.
+
+    The public suite is intentionally zero-dependency. A machine with no
+    NumPy-capable interpreter must still pass while naming the optional
+    coverage it could not execute; a machine that *does* advertise NumPy must
+    run the test and fail normally if that delegated execution is broken.
+    """
     @functools.wraps(test_method)
     def run(self, *args, **kwargs):
         if NUMPY_AVAILABLE:
@@ -123,7 +129,7 @@ def numpy_runtime_test(test_method):
             )
         interpreter = _numpy_python()
         if interpreter is None:
-            self.fail(
+            self.skipTest(
                 "OSVec integrity test %s requires a Python interpreter that can "
                 "import numpy; probed sys.executable, PATH, Homebrew, /usr/local, "
                 "and Python Framework locations" % exact_test

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import importlib
 import json
 import os
 import subprocess
@@ -25,6 +26,21 @@ def load_module(name: str, path: Path):
 
 
 class PublicTunabilityTests(unittest.TestCase):
+    def test_osvec_integrity_suite_skips_when_no_numpy_runtime_exists(self):
+        integrity = importlib.import_module("tests.test_osvec_integrity")
+
+        @integrity.numpy_runtime_test
+        def optional_check(case):
+            case.fail("optional check should not run without NumPy")
+
+        case = unittest.TestCase()
+        with mock.patch.object(integrity, "NUMPY_AVAILABLE", False), \
+                mock.patch.object(integrity, "_numpy_python", return_value=None):
+            with self.assertRaises(unittest.SkipTest) as skipped:
+                optional_check(case)
+        self.assertIn("requires a Python interpreter that can import numpy",
+                      str(skipped.exception))
+
     def test_osvec_help_works_without_numpy_and_data_command_is_actionable(self):
         script = ROOT / "addons/full-engine/memory/osvec_adapter.py"
         help_result = subprocess.run(
