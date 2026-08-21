@@ -13,7 +13,15 @@ Usage:
   python3 memory/build_graph.py                    # scan blackboard/ + all runs/
   python3 memory/build_graph.py --root blackboard  # scan one dir (or a run folder)
   python3 memory/build_graph.py --stats            # build + print node/edge counts
+  python3 memory/build_graph.py --ontology-graph path/to/graph.json
+
+The ontology graph is opt-in.  Set PROJECT_OS_ONTOLOGY_GRAPH (and, when the
+graph uses them, PROJECT_OS_ONTOLOGY_SCHEMA and PROJECT_OS_ONTOLOGY_NAMESPACE)
+or pass the corresponding flags.  With no graph configured this builder only
+reads the local blackboard/runs and does not assume a project-specific path,
+schema, or identifier namespace.
 """
+import argparse
 import os, re, json, glob, sys, hashlib
 from datetime import datetime, timezone
 
@@ -24,7 +32,11 @@ OUT_MMD = os.path.join(OUT_DIR, "graph.mmd")
 
 
 class DamagedSource(RuntimeError):
-    """A blackboard source exists but could not be read as UTF-8 text."""
+    """A required source exists but could not be safely read or validated."""
+
+
+class DamagedOptionalGraph(DamagedSource):
+    """The configured optional ontology graph is unsafe to merge."""
 
 
 def read(p):
@@ -156,7 +168,75 @@ def discover_run_dirs(root_arg=None):
     return dirs
 
 
-def build(root_arg=None):
+def _read_optional_ontology_graph(source_path, expected_schema=None, namespace=None):
+    """Read an explicitly configured ontology graph.
+
+    The public builder deliberately has no ontology default.  A caller that
+    wants to merge a graph supplies its path and, when the graph has a schema
+    or identifier namespace contract, supplies those values as configuration.
+    This keeps the reusable template independent of any private project's
+    filesystem layout, schema name, or URN vocabulary.
+    """
+    if not source_path:
+        return [], []
+    source_path = os.path.abspath(os.path.expanduser(source_path))
+    if expected_schema is not None and not expected_schema:
+        raise DamagedOptionalGraph("ontology schema must not be empty")
+    if namespace is not None and not namespace:
+        raise DamagedOptionalGraph("ontology namespace must not be empty")
+    if not os.path.exists(source_path):
+        raise DamagedOptionalGraph("%s: file not found" % source_path)
+    try:
+        with open(source_path, encoding="utf-8") as f:
+            candidate = json.load(f)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DamagedOptionalGraph("%s: %s" % (source_path, exc))
+    if not isinstance(candidate, dict) or not isinstance(candidate.get("nodes"), list) or not isinstance(candidate.get("edges"), list):
+        raise DamagedOptionalGraph("%s: invalid top-level contract" % source_path)
+    if expected_schema is not None and candidate.get("schema") != expected_schema:
+        raise DamagedOptionalGraph(
+            "%s: expected schema %s" % (source_path, expected_schema)
+        )
+    if "schema" in candidate and not isinstance(candidate["schema"], str):
+        raise DamagedOptionalGraph("%s: schema must be a string" % source_path)
+    nodes, edges, ids = [], [], set()
+    for index, node in enumerate(candidate["nodes"]):
+        allowed = {"id", "type", "label", "color", "run"}
+        if not isinstance(node, dict) or set(node) - allowed or not all(isinstance(node.get(key), str) and node[key] for key in ("id", "type", "label")):
+            raise DamagedOptionalGraph("%s: malformed node %d" % (source_path, index))
+        if namespace is not None and not node["id"].startswith(namespace):
+            raise DamagedOptionalGraph(
+                "%s: node id %s is outside configured namespace %s"
+                % (source_path, node.get("id"), namespace)
+            )
+        if node["id"] in ids:
+            raise DamagedOptionalGraph("%s: duplicate node id %s" % (source_path, node.get("id")))
+        if "color" in node and not re.fullmatch(r"#[0-9a-fA-F]{6}", node["color"]):
+            raise DamagedOptionalGraph("%s: invalid node color" % source_path)
+        ids.add(node["id"]); nodes.append(node)
+    seen_edges = set()
+    for index, edge in enumerate(candidate["edges"]):
+        if not isinstance(edge, dict) or set(edge) != {"source", "target", "type"} or not all(isinstance(edge.get(key), str) and edge[key] for key in ("source", "target", "type")):
+            raise DamagedOptionalGraph("%s: malformed edge %d" % (source_path, index))
+        if edge["source"] not in ids or edge["target"] not in ids:
+            raise DamagedOptionalGraph("%s: dangling edge %s -> %s" % (source_path, edge["source"], edge["target"]))
+        key = (edge["source"], edge["type"], edge["target"])
+        if key in seen_edges:
+            raise DamagedOptionalGraph("%s: duplicate edge" % source_path)
+        seen_edges.add(key); edges.append(edge)
+    return sorted(nodes, key=lambda node: node["id"]), sorted(edges, key=lambda edge: (edge["source"], edge["type"], edge["target"]))
+
+
+def _ontology_config(ontology_path=None, ontology_schema=None, ontology_namespace=None):
+    """Resolve optional ontology settings from explicit args, then env."""
+    return (
+        ontology_path or os.environ.get("PROJECT_OS_ONTOLOGY_GRAPH"),
+        ontology_schema or os.environ.get("PROJECT_OS_ONTOLOGY_SCHEMA"),
+        ontology_namespace or os.environ.get("PROJECT_OS_ONTOLOGY_NAMESPACE"),
+    )
+
+
+def build(root_arg=None, ontology_path=None, ontology_schema=None, ontology_namespace=None):
     nodes = [{"id": "project-os", "type": "os", "label": "Project OS", "color": "#4da3ff"}]
     edges = []
     for run_id, d in discover_run_dirs(root_arg):
@@ -170,11 +250,22 @@ def build(root_arg=None):
                   "risk", "#f76d6d", ["ID", "id", "#"], ["Risk", "risk", "Description"])
         add_cards(nodes, edges, run_id, read(os.path.join(d, "06-open-questions.md")),
                   "question", "#f5b545", ["#", "ID", "id"], ["Question", "question"])
+    ontology_path, ontology_schema, ontology_namespace = _ontology_config(
+        ontology_path, ontology_schema, ontology_namespace
+    )
+    ontology_nodes, ontology_edges = _read_optional_ontology_graph(
+        ontology_path, ontology_schema, ontology_namespace
+    )
+    existing_ids = {node["id"] for node in nodes}
+    collisions = existing_ids.intersection(node["id"] for node in ontology_nodes)
+    if collisions:
+        raise DamagedOptionalGraph("ontology graph id collision: %s" % sorted(collisions)[0])
+    nodes.extend(ontology_nodes); edges.extend(ontology_edges)
     graph = {
         "nodes": nodes,
         "edges": edges,
         "built_at": datetime.now(timezone.utc).isoformat(),
-        "source": "blackboard",
+        "source": "blackboard+ontology" if ontology_nodes else "blackboard",
     }
     os.makedirs(OUT_DIR, exist_ok=True)
     with open(OUT, "w", encoding="utf-8") as f:
@@ -185,24 +276,25 @@ def build(root_arg=None):
 
 
 if __name__ == "__main__":
-    root_arg = None
-    if "--root" in sys.argv:
-        i = sys.argv.index("--root")
-        if i + 1 >= len(sys.argv):
-            sys.exit("[arachne] --root needs a directory argument")
-        root_arg = sys.argv[i + 1]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", help="blackboard or run directory to scan")
+    parser.add_argument("--ontology-graph", help="optional ontology JSON to merge")
+    parser.add_argument("--ontology-schema", help="expected ontology JSON schema")
+    parser.add_argument("--ontology-namespace", help="required prefix for ontology node ids")
+    parser.add_argument("--stats", action="store_true", help="print node/edge counts")
+    args = parser.parse_args()
     try:
-        g = build(root_arg)
+        g = build(args.root, args.ontology_graph, args.ontology_schema, args.ontology_namespace)
     except DamagedSource as exc:
         # Non-zero and legible rather than a raw traceback, and the previous
         # graph.json is left exactly as it was: build() writes only after every
         # source has been read, so a refusal here cannot publish a graph that
         # is missing the cards it could not read (same contract as
         # mneme_adapter's "INDEX was left untouched").
-        sys.exit(f"[arachne] REFUSED: cannot read a blackboard source — {exc}\n"
+        sys.exit(f"[arachne] REFUSED: cannot read or validate a graph source — {exc}\n"
                  f"[arachne] {OUT} was left untouched; repair the source, "
                  f"then rebuild")
     print(f"[arachne] wrote {OUT}")
     print(f"[arachne] wrote {OUT_MMD}  (paste into any Mermaid viewer)")
-    if "--stats" in sys.argv:
+    if args.stats:
         print(f"[arachne] {len(g['nodes'])} nodes, {len(g['edges'])} edges")

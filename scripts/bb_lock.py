@@ -124,10 +124,17 @@ def acquire(target, agent="unknown", wait=10.0):
                 try:
                     fd = os.open(lp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                     token = uuid.uuid4().hex
-                    with os.fdopen(fd, "w") as f:
-                        json.dump({"path": os.path.realpath(target), "agent": agent,
-                                   "pid": os.getpid(), "ts": time.time(),
-                                   "token": token}, f)
+                    # Keep lock acquisition independent of content-writer
+                    # wrappers: a stalled writer may instrument os.fdopen,
+                    # but that must not stall the fencing transition itself.
+                    payload = json.dumps({
+                        "path": os.path.realpath(target), "agent": agent,
+                        "pid": os.getpid(), "ts": time.time(), "token": token,
+                    }).encode("utf-8")
+                    try:
+                        os.write(fd, payload)
+                    finally:
+                        os.close(fd)
                     _HELD_TOKENS[lp] = token
                     return token
                 except FileExistsError:

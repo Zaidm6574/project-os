@@ -45,15 +45,15 @@ def load_validator(name="validate_run_approved_gate"):
 
 FULL_SWARM_GOAL = (
     "## Definition of Done\n- [x] Ship it\n\n"
-    "## Execution Level\n```text\nTier: Full Swarm\nLocked: yes\n```\n"
+    "## Execution Level\nTier: Full Swarm\nLocked: yes\n"
 )
 SOLO_GOAL = (
     "## Definition of Done\n- [x] Ship it\n\n"
-    "## Execution Level\n```text\nTier: Solo Agent Loop\nLocked: yes\n```\n"
+    "## Execution Level\nTier: Solo Agent Loop\nLocked: yes\n"
 )
 MINI_GOAL = (
     "## Definition of Done\n- [x] Ship it\n\n"
-    "## Execution Level\n```text\nTier: Mini Swarm\nLocked: yes\n```\n"
+    "## Execution Level\nTier: Mini Swarm\nLocked: yes\n"
 )
 
 

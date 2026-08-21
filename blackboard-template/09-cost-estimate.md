@@ -18,6 +18,15 @@ Chosen by:
 | Product/app cost |  |  |  | Hosting, database, storage, domains, subscriptions. |
 | Human time cost |  |  |  | Review, verification, support, maintenance. |
 
+## Actuals (estimate vs measured)
+
+Filled by `memory/cost_actuals.py --write` at closeout. Keep the markers; the tool replaces everything between them.
+
+<!-- ACTUALS:START -->
+| Model | Est $ | Measured $ | Variance |
+|---|---|---|---|
+<!-- ACTUALS:END -->
+
 ## Context Cache Budget
 
 Use this section for long sessions or expensive loops.
@@ -40,21 +49,6 @@ Use provider request logs, API logs, usage dashboards, request IDs, token column
 
 | Date | Time Window | Attribution Filter | Model | Input | Output | Cached Read | Cached Write | Cost | Source | Confidence |
 |---|---|---|---|---|---|---|---|---|---|---|
-
-## Actuals (estimate vs measured)
-
-<!-- These two markers are REQUIRED and must not be renamed or deleted.
-     `memory/cost_actuals.py --write` replaces everything between them with the
-     measured table it parses from the session transcript. The template used to
-     ship without them, so the /deliver step-5 command raised
-     "Markers not found" on any freshly scaffolded run, and validate_run could
-     never pass its Actuals check (audit 2026-07-25). -->
-
-<!-- ACTUALS:START -->
-| Model | Est $ | Measured $ | Variance |
-|---|---|---|---|
-| _(run `memory/cost_actuals.py --write --target <this file>` at run close)_ | — | — | — |
-<!-- ACTUALS:END -->
 
 ### Codex local session logs
 

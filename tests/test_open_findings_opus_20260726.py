@@ -56,9 +56,19 @@ class InstalledProjectsIgnoreTheRetrievalIndex(unittest.TestCase):
                     self._check_ignore(path),
                     "%s would be committed into a user's project" % path)
 
+    def test_the_retrieval_build_lock_is_ignored_at_any_depth(self):
+        """The persistent flock sibling is generated state, not source."""
+        for path in ("memory/mneme_index.json.build.lock",
+                     "nested/deeper/memory/mneme_index.json.build.lock"):
+            with self.subTest(path=path):
+                self.assertTrue(
+                    self._check_ignore(path),
+                    "%s would be committed into a user's project" % path)
+
     def test_a_users_own_json_under_memory_is_still_tracked(self):
         """The control. Restoring a blanket `memory/*.json` would untrack real work."""
-        for path in ("memory/my_own_notes.json", "app/index.json"):
+        for path in ("memory/my_own_notes.json", "app/index.json",
+                     "memory/my_own_notes.json.build.lock"):
             with self.subTest(path=path):
                 self.assertFalse(
                     self._check_ignore(path),

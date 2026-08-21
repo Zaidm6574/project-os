@@ -17,16 +17,49 @@ Extraction sources, in order:
 
 Dedupe: normalized (lowercase alnum) containment either way vs every shared-brain line.
 """
-import os, re, sys, json, glob, datetime, subprocess
+import os, re, sys, json, glob, datetime, secrets, stat, subprocess
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project-os/
-HOME = os.path.expanduser("~")
-SHARED_BRAIN = os.environ.get(
-    "PROJECT_OS_SHARED_BRAIN",
-    os.path.join(HOME, ".project-os", "central-brain", "shared-brain.jsonl"))
+_SCRIPTS = os.path.join(ROOT, "scripts")
+if os.path.isfile(os.path.join(_SCRIPTS, "brain_paths.py")):
+    if _SCRIPTS not in sys.path:
+        sys.path.insert(0, _SCRIPTS)
+    import brain_paths
+    SHARED_BRAIN = str(brain_paths.resolve_shared_brain(ROOT))
+else:
+    # The portable harvester copy must remain usable without core scripts.
+    SHARED_BRAIN = os.environ.get(
+        "PROJECT_OS_SHARED_BRAIN",
+        os.path.join(os.path.expanduser("~"), ".project-os", "central-brain",
+                     "shared-brain.jsonl"))
 RUNS = os.path.join(ROOT, "runs")
+
+
+def _run_roots():
+    """Every runs/ tree this harvester should see.
+
+    The public template defaults to its own runs directory. Configure any
+    additional, private workspaces with PROJECT_OS_RUN_ROOTS (an
+    os.pathsep-separated list) in the environment used by both the scheduler
+    and interactive shell. The variable replaces the default list so every
+    execution context sees the same roots.
+    """
+    env = os.environ.get("PROJECT_OS_RUN_ROOTS")
+    if env:
+        cands = [p for p in env.split(os.pathsep) if p.strip()]
+    else:
+        cands = [RUNS]
+    roots, seen = [], set()
+    for c in cands:
+        c = os.path.abspath(os.path.expanduser(c))
+        if c in seen or not os.path.isdir(c):
+            continue
+        seen.add(c)
+        roots.append(c)
+    return roots or [os.path.abspath(RUNS)]
 PACKETS = os.path.join(ROOT, "blackboard", "packets")
 MARKER = ".harvested"
+SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 SECTION_TYPES = {  # 19-memory-harvest.md heading prefix -> shared-brain type
     # Three heading dialects exist in the wild: plural ("## Lessons"), singular
@@ -414,7 +447,10 @@ def brain_norms():
 
 
 # Below this many normalized characters a row carries no lesson to speak of.
-MIN_LESSON_CHARS = 20
+# A terse operational lesson (for example, "Back up first") is still useful;
+# retain it while filtering punctuation and slogan fragments that carry no
+# durable guidance.
+MIN_LESSON_CHARS = 8
 
 
 def skip_reason(text, norms):
@@ -441,7 +477,46 @@ def skip_reason(text, norms):
 
 def is_dupe(text, norms):
     """True when the row must not be staged. See skip_reason() for WHY."""
-    return skip_reason(text, norms) is not None
+    # Punctuation-only input carries no candidate at all; callers distinguish
+    # that from a short but real lesson such as "short".
+    return bool(norm(text)) and skip_reason(text, norms) is not None
+
+
+STATUS_TOKEN = re.compile(
+    r"^(?:status\s*[:=]\s*)?"
+    r"(reject(?:ed)?|private[-\s]only|do[-\s]not[-\s]harvest"
+    r"|approved(?:\s+for\s+reuse)?|yes|no|promote(?:d)?|reuse|keep|pending|draft)"
+    r"\s*[.!]?$", re.I)
+REJECT_STATUS = re.compile(r"\breject(?:ed)?\b|\bprivate[- ]only\b", re.I)
+_STATUS_POSITIONS = (
+    r"^\s*(?:status\s*[:=]\s*)?(?P<tok>[^:]{1,32}?)\s*:\s+(?P<rest>\S.*)$",
+    r"^(?P<rest>.*?)\s*[(\[]\s*(?P<tok>[^)\]]{1,32}?)\s*[)\]]\s*$",
+    r"^(?P<rest>.*\S)\s+(?:--|[|–—-])\s+(?P<tok>[^|–—]{1,32}?)\s*$",
+)
+
+
+def bullet_status(text):
+    """Return an explicit bullet status and the lesson text without it."""
+    whole = STATUS_TOKEN.match(text.strip())
+    if whole:
+        return whole.group(1).strip(), ""
+    for pattern in _STATUS_POSITIONS:
+        found = re.match(pattern, text)
+        if found:
+            token = found.group("tok").strip()
+            if STATUS_TOKEN.match(token):
+                return token, found.group("rest").strip()
+    return "", text.strip()
+
+
+def recognized_sections(md):
+    """Return headings that map to a durable memory type."""
+    found = []
+    for line in md.splitlines():
+        heading = _HEADING.match(line)
+        if heading and _heading_key(line):
+            found.append(heading.group(1).strip().lower())
+    return found
 
 
 def _skip_summary(dupes, short):
@@ -450,7 +525,7 @@ def _skip_summary(dupes, short):
     if dupes:
         parts.append(f"{dupes} already in the brain")
     if short:
-        parts.append(f"{short} with too little content to be a lesson "
+        parts.append(f"{short} too short / with no harvestable text "
                      f"(under {MIN_LESSON_CHARS} characters)")
     return ", ".join(parts)
 
@@ -474,7 +549,7 @@ def _heading_key(line):
 
 def _recognized_sections(md):
     """True when at least one '## ' heading maps to a SECTION_TYPES key."""
-    return any(_heading_key(line) for line in md.splitlines())
+    return bool(recognized_sections(md))
 
 
 # A bullet or a table row: the two shapes bullets_by_section can harvest.
@@ -532,6 +607,13 @@ def bullets_by_section(md):
                 DROPPED.append(line.strip()[:120])
                 continue
             raw = b.group(1).strip()
+            status, remainder = bullet_status(raw)
+            if status and (REJECT_STATUS.search(status)
+                           or REJECT_DIRECTIVE.search(status)):
+                DROPPED.append(line.strip()[:120])
+                continue
+            if status and remainder:
+                raw = remainder
             # The bullet branch used to yield unconditionally while the table
             # branch enforced REJECT_ROW per cell -- a bullet like "Private-only:
             # ..." harvested straight through with no exclusion at all
@@ -630,11 +712,200 @@ def eval_log_candidates(md):
                 yield "lesson", " — ".join(cells)[:400]
 
 
+def _safe_component(value, field="run"):
+    if (not isinstance(value, str) or value in (".", "..")
+            or not SAFE_COMPONENT.fullmatch(value)):
+        raise ValueError(f"{field} must be a safe name inside runs/ (got {value!r})")
+    return value
+
+
 def run_dir(run):
-    d = run if os.path.isdir(run) else os.path.join(RUNS, run)
-    if not os.path.isdir(d):
-        sys.exit(f"no such run: {run}")
-    return d
+    """Resolve one direct child of runs without following namespace links.
+
+    Searches every configured run root (see _run_roots) but applies the same
+    symlink/escape checks per root — multi-root must not mean weaker guards.
+    """
+    slug = _safe_component(run)
+    roots = _run_roots()
+    for root_abs in roots:
+        if os.path.islink(root_abs):
+            raise ValueError(f"unsafe symlinked runs root: {root_abs}")
+        root_real = os.path.realpath(root_abs)
+        candidate = os.path.join(root_abs, slug)
+        if os.path.islink(candidate):
+            raise ValueError(f"unsafe symlinked run: {candidate}")
+        if os.path.commonpath((root_real, os.path.realpath(candidate))) != root_real:
+            raise ValueError(f"run escapes runs root: {run!r}")
+        if os.path.isdir(candidate):
+            return candidate
+    root_abs = roots[0]
+    root_real = os.path.realpath(root_abs)
+    directory = os.path.join(root_abs, slug)
+    if not os.path.isdir(directory):
+        raise ValueError(f"no such run: {run}")
+    return directory
+
+
+def _validate_marker_leaf(directory_fd, marker_path):
+    """Refuse an existing marker that could alias or block a private write."""
+    try:
+        marker_stat = os.stat(MARKER, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(marker_stat.st_mode):
+        raise ValueError(f"unsafe symlinked harvest marker: {marker_path}")
+    if not stat.S_ISREG(marker_stat.st_mode):
+        raise ValueError(f"harvest marker is not a regular file: {marker_path}")
+    if marker_stat.st_nlink != 1:
+        raise ValueError(f"unsafe hard-linked harvest marker: {marker_path}")
+
+
+def _open_marker_directory(run_path):
+    """Open and pin a run directory before inspecting its marker leaf."""
+    run_abs = os.path.abspath(run_path)
+    marker_path = os.path.join(run_abs, MARKER)
+    run_stat = os.lstat(run_abs)
+    if stat.S_ISLNK(run_stat.st_mode) or not stat.S_ISDIR(run_stat.st_mode):
+        raise ValueError(f"unsafe harvest marker directory: {run_abs}")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(run_abs, flags)
+    try:
+        opened = os.fstat(directory_fd)
+        if (opened.st_dev, opened.st_ino) != (run_stat.st_dev, run_stat.st_ino):
+            raise ValueError(f"harvest marker directory changed while opening: {run_abs}")
+        _validate_marker_leaf(directory_fd, marker_path)
+        return directory_fd
+    except Exception:
+        os.close(directory_fd)
+        raise
+
+
+def _write_marker(directory_fd, marker_path, value):
+    """Atomically replace a marker without following an existing leaf."""
+    _validate_marker_leaf(directory_fd, marker_path)
+    temporary = None
+    try:
+        for _ in range(10):
+            temporary = f".{MARKER}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+            try:
+                fd = os.open(
+                    temporary,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+                break
+            except FileExistsError:
+                temporary = None
+        else:
+            raise ValueError("could not allocate a unique harvest marker temporary file")
+        with os.fdopen(fd, "w", encoding="utf-8") as marker:
+            marker.write(value)
+            marker.flush()
+            os.fsync(marker.fileno())
+        _validate_marker_leaf(directory_fd, marker_path)
+        os.replace(temporary, MARKER, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        temporary = None
+        os.fsync(directory_fd)
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+
+
+def _packets_dir_fd():
+    """Open/create the proposal directory without traversing symlinks."""
+    packets = os.path.abspath(PACKETS)
+    parent, name = os.path.split(packets)
+    # Standalone Project OS copies may not have a blackboard yet. Create the
+    # known in-project parent first, then still validate every directory entry
+    # before publishing a proposal below it.
+    os.makedirs(parent, mode=0o755, exist_ok=True)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    parent_stat = os.lstat(parent)
+    if stat.S_ISLNK(parent_stat.st_mode):
+        raise ValueError(f"unsafe symlinked proposals parent: {parent}")
+    if not stat.S_ISDIR(parent_stat.st_mode):
+        raise ValueError(f"proposals parent is not a directory: {parent}")
+    parent_fd = os.open(parent, flags)
+    try:
+        opened_parent = os.fstat(parent_fd)
+        if (opened_parent.st_dev, opened_parent.st_ino) != (parent_stat.st_dev, parent_stat.st_ino):
+            raise ValueError(f"proposals parent changed while opening: {parent}")
+        try:
+            os.mkdir(name, 0o755, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        packet_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if stat.S_ISLNK(packet_stat.st_mode):
+            raise ValueError(f"unsafe symlinked proposals directory: {packets}")
+        if not stat.S_ISDIR(packet_stat.st_mode):
+            raise ValueError(f"proposals path is not a directory: {packets}")
+        packet_fd = os.open(name, flags, dir_fd=parent_fd)
+        opened_packets = os.fstat(packet_fd)
+        if (opened_packets.st_dev, opened_packets.st_ino) != (packet_stat.st_dev, packet_stat.st_ino):
+            os.close(packet_fd)
+            raise ValueError(f"proposals directory changed while opening: {packets}")
+        return packet_fd
+    finally:
+        os.close(parent_fd)
+
+
+def _publish_proposals(filename, rows):
+    """Atomically publish new proposals; never replace or follow a leaf."""
+    directory_fd = _packets_dir_fd()
+    temporary = None
+    try:
+        for _ in range(10):
+            temporary = f".{filename}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+            try:
+                fd = os.open(
+                    temporary,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+                break
+            except FileExistsError:
+                temporary = None
+        else:
+            raise ValueError("could not allocate a unique proposal temporary file")
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            for row in rows:
+                output.write(json.dumps(row, ensure_ascii=False) + "\n")
+            output.flush()
+            os.fsync(output.fileno())
+        try:
+            os.link(temporary, filename, src_dir_fd=directory_fd, dst_dir_fd=directory_fd,
+                    follow_symlinks=False)
+        except FileExistsError as exc:
+            raise ValueError(
+                "proposal output already exists; refusing to overwrite: "
+                f"{os.path.join(PACKETS, filename)}") from exc
+        os.fsync(directory_fd)
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+        os.close(directory_fd)
+
+
+def _secret_reason(candidate):
+    """Use the append gate when bundled; retain scan-only portability otherwise."""
+    scripts = os.path.join(ROOT, "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    try:
+        import brain_append
+    except ModuleNotFoundError as exc:
+        if exc.name == "brain_append":
+            return None
+        raise
+    return brain_append.secret_reason(candidate)
 
 
 def read(p):
@@ -656,7 +927,10 @@ def read(p):
 
 def unharvested():
     out = []
-    for d in sorted(glob.glob(os.path.join(RUNS, "*"))):
+    candidates = []
+    for root in _run_roots():
+        candidates.extend(glob.glob(os.path.join(root, "*")))
+    for d in sorted(candidates):
         if not os.path.isdir(d):
             continue
         done = os.path.isfile(os.path.join(d, "13-delivery-report.md"))
@@ -696,14 +970,18 @@ def _refuse(slug, why):
     run whose source could not actually be harvested is a SILENT loss of the
     discovery signal, so these paths have to exit loud and non-zero instead.
     """
-    print(f"{slug}: REFUSED — {why}")
+    print(f"{slug}: REFUSED — {why}", file=sys.stderr)
     print("  nothing staged and the run was NOT marked harvested; "
-          "fix the source and re-run `scan`.")
+          "fix the source and re-run `scan`.", file=sys.stderr)
     return 2
 
 
 def cmd_scan(run):
-    d = run_dir(run)
+    try:
+        d = run_dir(run)
+    except ValueError as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 2
     slug = os.path.basename(d)
     # DROPPED is module state; a scan reports only its OWN filtered rows.
     del DROPPED[:]
@@ -724,8 +1002,8 @@ def cmd_scan(run):
         if not _recognized_sections(harvest_md) and _has_rows(harvest_md):
             return _refuse(
                 slug,
-                "19-memory-harvest.md has rows but no recognized '## ' section"
-                " heading (recognized: "
+                "fallback skipped: 19-memory-harvest.md has rows but no recognized section heading"
+                " (recognized: "
                 + ", ".join(sorted(SECTION_TYPES)) + ")")
         cands = list(bullets_by_section(harvest_md))
     else:
@@ -754,6 +1032,11 @@ def cmd_scan(run):
             "project_id": slug, "project_name": slug, "source": "harvest.py",
             "tags": [typ, "harvest"], "text": text, "ts": today, "type": typ,
         })
+        secret = _secret_reason(fresh[-1])
+        if secret:
+            print(f"REFUSED: secret/sensitive harvest candidate {i} ({secret})",
+                  file=sys.stderr)
+            return 2
     if not fresh:
         # "no harvest sources found" was printed even when sources existed and
         # every row was filtered out -- a false report of the one outcome an
@@ -772,13 +1055,23 @@ def cmd_scan(run):
         print(f"{slug}: {why} — nothing to stage")
         _report_dropped()
         # nothing new is still a completed harvest
-        open(os.path.join(d, MARKER), "w", encoding="utf-8").write(today + "\n")
+        try:
+            marker_fd = _open_marker_directory(d)
+            try:
+                _write_marker(marker_fd, os.path.join(d, MARKER), today + "\n")
+            finally:
+                os.close(marker_fd)
+        except (OSError, ValueError) as exc:
+            print(f"REFUSED: could not write harvest marker: {exc}", file=sys.stderr)
+            return 2
         return 0
-    os.makedirs(PACKETS, exist_ok=True)
-    out = os.path.join(PACKETS, f"harvest-{slug}-{today}.jsonl")
-    with open(out, "w", encoding="utf-8") as f:
-        for o in fresh:
-            f.write(json.dumps(o, ensure_ascii=False) + "\n")
+    filename = f"harvest-{slug}-{today}.jsonl"
+    out = os.path.join(PACKETS, filename)
+    try:
+        _publish_proposals(filename, fresh)
+    except (OSError, ValueError) as exc:
+        print(f"REFUSED: could not stage proposals: {exc}", file=sys.stderr)
+        return 2
     total_skipped = skipped_dupe + skipped_short
     note = (f" (skipped {total_skipped}: "
             f"{_skip_summary(skipped_dupe, skipped_short)})") if total_skipped else ""
@@ -788,48 +1081,116 @@ def cmd_scan(run):
     return 0
 
 
-def cmd_apply(path):
-    if not os.path.isfile(path):
-        sys.exit(f"no such proposals file: {path}")
-    ba = os.path.join(ROOT, "scripts", "brain_append.py")
-    # Parse EVERY line before appending any of them. The old loop parsed and
-    # appended in the same pass, so a malformed line N left lines 1..N-1
-    # already committed to the brain despite the docstring's promise to
-    # "refuse malformed before touching the brain" (audit 2026-07-25).
-    lines, slugs = [], []
-    with open(path, encoding="utf-8") as f:
-        for i, raw in enumerate(f, 1):
+def _reject_non_finite(value):
+    raise ValueError(f"non-finite number {value}")
+
+
+def _proposal_batch(path):
+    """Validate all proposal rows before touching the brain."""
+    rows, ids, project_ids = [], set(), set()
+    with open(path, encoding="utf-8") as handle:
+        for line_no, raw in enumerate(handle, 1):
             line = raw.strip()
             if not line:
                 continue
             try:
-                o = json.loads(line)
-            except ValueError as e:
-                sys.exit(f"malformed proposals line {i}, nothing appended: {e}")
-            lines.append(line)
-            slugs.append(o.get("project_id"))
-    n = 0
-    for line in lines:
-        r = subprocess.run([sys.executable, ba, "--line", line, "--agent", "harvest",
-                            "--no-reindex"], capture_output=True, text=True)
-        if r.returncode != 0:
-            sys.exit(f"brain_append failed on line {n + 1}: "
-                     f"{(r.stderr or r.stdout).strip()[:300]}")
-        n += 1
-    # one reindex for the whole batch
-    subprocess.run([sys.executable, os.path.join(ROOT, "memory", "mneme_adapter.py"), "build"],
-                   check=True)
-    # Mark EVERY contributing run harvested, not just the last project_id seen:
-    # a batch spanning proja/projb/projc used to leave proja and projb
-    # unmarked even though their lessons were appended (audit 2026-07-25).
-    marked = []
-    for slug in dict.fromkeys(s for s in slugs if s):
-        if os.path.isdir(os.path.join(RUNS, slug)):
-            with open(os.path.join(RUNS, slug, MARKER), "w", encoding="utf-8") as f:
-                f.write(datetime.date.today().isoformat() + "\n")
-            marked.append(slug)
-    print(f"appended {n} lessons + reindexed; marked {', '.join(marked) if marked else '?'} harvested")
-    return 0
+                row = json.loads(line, parse_constant=_reject_non_finite)
+                if not isinstance(row, dict):
+                    raise ValueError(f"expected JSON object, got {type(row).__name__}")
+                json.dumps(row, allow_nan=False)
+                record_id = row.get("id")
+                if not isinstance(record_id, str) or not record_id.strip():
+                    raise ValueError("proposal id must be a nonempty string")
+                if record_id in ids:
+                    raise ValueError(f"duplicate proposal id {record_id!r}")
+                ids.add(record_id)
+                project_ids.add(_safe_component(row.get("project_id"), "project_id"))
+                secret = _secret_reason(row)
+                if secret:
+                    raise ValueError(secret)
+            except (json.JSONDecodeError, ValueError) as exc:
+                print(f"REFUSED: invalid proposal line {line_no}: {exc}", file=sys.stderr)
+                return None
+            rows.append((line_no, line, row))
+    if len(project_ids) != 1:
+        print("REFUSED: proposals must name exactly one project_id", file=sys.stderr)
+        return None
+    return rows
+
+
+def _existing_brain_ids():
+    ids = set()
+    if not os.path.isfile(SHARED_BRAIN):
+        return ids
+    with open(SHARED_BRAIN, encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict) and isinstance(row.get("id"), str):
+                ids.add(row["id"])
+    return ids
+
+
+def cmd_apply(path):
+    if not os.path.isfile(path):
+        print(f"no such proposals file: {path}", file=sys.stderr)
+        return 2
+    proposals = _proposal_batch(path)
+    if proposals is None:
+        return 2
+    slug = proposals[0][2]["project_id"] if proposals else None
+    marker_fd = None
+    try:
+        marker_run = run_dir(slug) if slug else None
+        existing_ids = _existing_brain_ids()
+        if marker_run:
+            marker_fd = _open_marker_directory(marker_run)
+    except (OSError, UnicodeError, ValueError) as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 2
+    try:
+        appended = kept = 0
+        ba = os.path.join(ROOT, "scripts", "brain_append.py")
+        for line_no, line, row in proposals:
+            if row["id"] in existing_ids:
+                kept += 1
+                continue
+            result = subprocess.run(
+                [sys.executable, ba, "--line", line, "--agent", "harvest", "--no-reindex"],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                print(f"brain_append failed on line {line_no}: "
+                      f"{(result.stderr or result.stdout).strip()[:300]}", file=sys.stderr)
+                return 1
+            existing_ids.add(row["id"])
+            if (result.stdout or "").lstrip().startswith("kept existing id:"):
+                kept += 1
+            else:
+                appended += 1
+        rebuild = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "memory", "mneme_adapter.py"), "build"],
+            capture_output=True, text=True,
+        )
+        if rebuild.returncode != 0:
+            detail = (rebuild.stderr or rebuild.stdout or "no diagnostic").strip()[:300]
+            print(f"reindex failed after append; retry is idempotent: {detail}", file=sys.stderr)
+            return 1
+        if marker_fd is not None:
+            try:
+                _write_marker(marker_fd, os.path.join(marker_run, MARKER),
+                              datetime.date.today().isoformat() + "\n")
+            except (OSError, ValueError) as exc:
+                print(f"FAILED: could not write harvest marker: {exc}", file=sys.stderr)
+                return 1
+        print(f"appended {appended} lessons (kept {kept} existing) + reindexed; "
+              f"marked {slug or '?'} harvested")
+        return 0
+    finally:
+        if marker_fd is not None:
+            os.close(marker_fd)
 
 
 if __name__ == "__main__":

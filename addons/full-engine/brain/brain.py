@@ -33,67 +33,78 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
+import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
-BRAIN_FILE = os.path.join(HERE, "shared-brain.jsonl")
-# Secret shapes. The 2026-07-25 audit found the original `sk-[A-Za-z0-9]{16,}`
-# could not cross a hyphen or underscore, so every modern key format passed:
-# sk-ant-…, sk-proj-…, sk_live_… (Stripe), xoxb-… (Slack), figd_…, SG.… ,
-# Twilio AC…, JWTs, and postgres:// DSNs with inline credentials.
-#
-# EDITING THIS LIST: every entry needs a shape-only sample in PATTERN_SAMPLES
-# (tests/test_brain_privacy_gate.py), and the two lists here and in
-# memory/osvec_adapter.py must stay byte-identical. Until 2026-07-27 only 13 of
-# these 28 were exercised anywhere, so the private-key pattern could be deleted
-# from BOTH files with all 656 tests still green while gate_record() went on to
-# accept a PEM key. Add the sample in the same edit as the pattern; do not
-# delete the sample to quiet the test.
-SECRET_PATTERNS = [
-    re.compile(r"(?<![A-Za-z0-9_])sk-[A-Za-z0-9_\-]{16,}"),            # OpenAI/Anthropic incl. sk-ant-, sk-proj-
-    re.compile(r"(?<![A-Za-z0-9_])sk_(live|test)_[A-Za-z0-9]{16,}"),   # Stripe
-    re.compile(r"(?<![A-Za-z0-9_])rk_(live|test)_[A-Za-z0-9]{16,}"),   # Stripe restricted
-    re.compile(r"AKIA[0-9A-Z]{16}"),                  # AWS access key id
-    re.compile(r"ASIA[0-9A-Z]{16}"),                  # AWS session key
-    # gh[pours]_ is ONE family: personal (p), OAuth (o), server-to-server (s),
-    # user-to-server (u) and refresh (r). Only the first three were listed, so
-    # a GitHub App's ghu_/ghr_ tokens walked through the gate -- and through
-    # import_chat_history, which certifies its output as redacted (adversary
-    # 2026-07-26). Enumerating a vendor's prefixes one at a time is how this
-    # list has failed before; match the character class, not the examples.
-    re.compile(r"(?<![A-Za-z0-9_])gh[pousr]_[A-Za-z0-9]{20,}"),
-    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
-    re.compile(r"(?<![A-Za-z0-9_])AIza[0-9A-Za-z_\-]{20,}"),           # Google
-    re.compile(r"(?<![A-Za-z0-9_])ya29\.[A-Za-z0-9_\-]{20,}"),         # Google OAuth
-    re.compile(r"(?<![A-Za-z0-9_])xox[baprs]-[A-Za-z0-9\-]{10,}"),     # Slack
-    re.compile(r"(?<![A-Za-z0-9_])figd_[A-Za-z0-9_\-]{20,}"),          # Figma PAT
-    re.compile(r"SG\.[A-Za-z0-9_\-]{20,}"),           # SendGrid
-    re.compile(r"\bAC[0-9a-fA-F]{32}\b"),             # Twilio account SID
-    re.compile(r"\bSK[0-9a-fA-F]{32}\b"),             # Twilio API key
-    re.compile(r"(?<![A-Za-z0-9_])glpat-[A-Za-z0-9_\-]{16,}"),         # GitLab
-    re.compile(r"(?<![A-Za-z0-9_])dop_v1_[A-Za-z0-9]{32,}"),           # DigitalOcean
-    re.compile(r"(?<![A-Za-z0-9_])npm_[A-Za-z0-9]{30,}"),
-    # Added 2026-07-25: an adversarial pass found these pass the gate when
-    # pasted BARE, i.e. dropped into a lesson's prose with no `KEY=` label for
-    # the keyword catch-all to anchor on -- which is exactly how an accidental
-    # paste looks.
-    re.compile(r"(?<![A-Za-z0-9_])hf_[A-Za-z0-9]{30,}"),               # HuggingFace
-    re.compile(r"(?<![A-Za-z0-9_])ntn_[A-Za-z0-9]{40,}"),              # Notion
-    re.compile(r"(?<![A-Za-z0-9_])lin_api_[A-Za-z0-9]{30,}"),          # Linear
-    re.compile(r"(?<![A-Za-z0-9_])vercel_[A-Za-z0-9]{20,}"),           # Vercel
-    re.compile(r"(?i)https://[0-9a-f]{32}@[\w.\-]+/\d+"),              # Sentry DSN
-    re.compile(r"(?i)AccountKey\s*=\s*[A-Za-z0-9+/]{40,}={0,2}"),      # Azure storage
-    re.compile(r"https://hooks\.slack\.com/services/T[A-Za-z0-9/]{20,}"),
-    re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\."),  # JWT
-    re.compile(r"(?i)\b(postgres(ql)?|mysql|mongodb(\+srv)?|redis|amqp)://[^\s:@/]+:[^\s@/]+@"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-    re.compile(r"(?i)(api[_-]?key|secret|password|passwd|token|bearer)\s*[:=]\s*\S{6,}"),
-]
+
+
+def _core_scripts_dir():
+    """Locate the owning Project OS scripts directory from an add-on copy."""
+    current = HERE
+    while True:
+        scripts_dir = os.path.join(current, "scripts")
+        module = os.path.join(scripts_dir, "brain_paths.py")
+        if os.path.isfile(module) and not os.path.islink(module):
+            return scripts_dir
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+
+
+CORE_SCRIPTS = _core_scripts_dir()
+if CORE_SCRIPTS and CORE_SCRIPTS not in sys.path:
+    sys.path.insert(0, CORE_SCRIPTS)
+if CORE_SCRIPTS:
+    import brain_paths
+    ROOT = str(brain_paths.find_project_root(HERE))
+    BRAIN_FILE = str(brain_paths.resolve_shared_brain(ROOT))
+else:
+    brain_paths = None
+    ROOT = os.path.dirname(HERE)
+    BRAIN_FILE = os.path.join(HERE, "shared-brain.jsonl")
+
+
+def _load_from_scripts(module_name):
+    """Load a core shared module when this is a full Project OS layout."""
+    current = HERE
+    while True:
+        scripts = os.path.join(current, "scripts")
+        candidate = os.path.join(scripts, module_name + ".py")
+        if os.path.isfile(candidate) and not os.path.islink(candidate):
+            if scripts not in sys.path:
+                sys.path.insert(0, scripts)
+            return __import__(module_name)
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+
+
+# Full installations share one denylist.  A script-less portable copy cannot
+# silently treat records as clean, so it retains a deliberately broad
+# compatibility screen until its scripts/ directory is restored.
+_secret_patterns = _load_from_scripts("secret_patterns")
+if _secret_patterns is not None:
+    SECRET_PATTERNS = list(_secret_patterns.SECRET_PATTERNS)
+else:
+    SECRET_PATTERNS = [
+        re.compile(r"(?i)(?:api[_-]?key|secret|password|passwd|token|bearer)\s*[:=]\s*\S{6,}"),
+        re.compile(r"(?<![A-Za-z0-9_])[A-Za-z]{2,20}[-_][A-Za-z0-9._-]{16,}"),
+        re.compile(r"\b(?:AKIA|ASIA|AC|SK)[A-Za-z0-9]{16,}\b"),
+        re.compile(r"(?:eyJ[A-Za-z0-9_-]{10,}\.){2}"),
+        re.compile(r"(?:https?://[^\s:@/]+:[^\s@/]+@|https://hooks\.[^\s/]+/[^\s]{20,})", re.I),
+        re.compile(r"(?:AccountKey\s*=\s*|-----BEGIN [A-Z ]*PRIVATE KEY-----)", re.I),
+        re.compile(r"SG\.[A-Za-z0-9_-]{20,}"),
+    ]
+bb_lock = _load_from_scripts("bb_lock")
 
 # A value that is nothing but a redaction marker carries no secret by
 # construction, so exempting it cannot hide one: the match must consume the
-# WHOLE value, and "REDACTEDsk-ant-api03..." is therefore still scanned.
+# WHOLE value, and a redaction marker with appended credential text is still
+# scanned.
 _PLACEHOLDER_VALUE = re.compile(
     r"^[\W_]*(?:redacted|removed|omitted|scrubbed|todo|tbd|changeme|"
     r"placeholder|example|sample|none|null|nil|unset|empty|n/?a|x+|\*+|\.+)"
@@ -173,6 +184,10 @@ def _safe_path(path: str) -> str:
     return full
 
 
+class BrainFormatError(ValueError):
+    """The durable brain contains a row that is not a JSON object."""
+
+
 def _read_jsonl(path, *, strict=False):
     """Read a JSONL file into a list of parsed objects.
 
@@ -195,7 +210,8 @@ def _read_jsonl(path, *, strict=False):
         return out
     try:
         with open(path, encoding="utf-8") as f:
-            for lineno, raw in enumerate(f, 1):
+            lines = f.readlines()
+            for lineno, raw in enumerate(lines, 1):
                 line = raw.strip()
                 if not line:
                     continue
@@ -207,15 +223,30 @@ def _read_jsonl(path, *, strict=False):
                 # but WRONG for an export source, where a dropped line is a lost
                 # lesson reported as success -- strict callers surface it.
                 try:
-                    out.append(json.loads(line))
+                    record = json.loads(line)
                 except json.JSONDecodeError as exc:
+                    # An interrupted append leaves one unterminated final
+                    # fragment. It is safe to leave that fragment isolated and
+                    # append a new newline-delimited record; any complete bad
+                    # row is durable corruption and must stop the write.
+                    truncated_tail = (
+                        lineno == len(lines) and not raw.endswith("\n")
+                    )
+                    if strict and truncated_tail:
+                        continue
                     if strict:
-                        sys.exit(
-                            f"refuse: '{path}' line {lineno} is not valid JSON "
-                            f"({exc.msg}); refusing to export a file with a "
-                            "corrupt line rather than silently dropping a lesson"
+                        raise BrainFormatError(
+                            f"{path} line {lineno}: invalid JSON ({exc.msg})"
+                        ) from None
+                    continue
+                if not isinstance(record, dict):
+                    if strict:
+                        raise BrainFormatError(
+                            f"{path} line {lineno}: expected a JSON object, "
+                            f"got {type(record).__name__}"
                         )
                     continue
+                out.append(record)
     except UnicodeDecodeError as exc:
         sys.exit(
             f"refuse: '{path}' is not valid UTF-8 (byte {exc.start}: "
@@ -225,7 +256,45 @@ def _read_jsonl(path, *, strict=False):
 
 
 def _existing_ids(path):
-    return {r.get("id") for r in _read_jsonl(path)}
+    return {r.get("id") for r in _read_jsonl(path, strict=True)}
+
+
+def _append_new(path, records, agent):
+    """Gate, deduplicate, and append while a single lock covers the snapshot."""
+    gate_records(records, where=agent)
+
+    def append_locked():
+        existing = _existing_ids(path)
+        _create_private(path)
+        added = 0
+        with open(path, "a", encoding="utf-8") as handle:
+            _heal_truncated_tail(handle, path)
+            for record in records:
+                rid = record.get("id")
+                if not rid or rid in existing:
+                    continue
+                handle.write(json.dumps(record, sort_keys=True) + "\n")
+                existing.add(rid)
+                added += 1
+            handle.flush()
+            os.fsync(handle.fileno())
+        return added
+
+    if bb_lock is None:
+        return append_locked()
+    token = bb_lock.acquire(path, agent=agent, wait=10)
+    if not token:
+        raise RuntimeError("could not lock shared-brain.jsonl")
+    try:
+        lock_file = bb_lock.lock_path(path)
+        with bb_lock._guard(lock_file):
+            info = bb_lock.read_lock(lock_file)
+            if not isinstance(info, dict) or info.get("token") != token:
+                raise RuntimeError("shared-brain lock lease was lost before append")
+            return append_locked()
+    finally:
+        if not bb_lock.release(path, agent=agent, token=token):
+            raise RuntimeError("shared-brain append completed, but lock release failed")
 
 
 def _heal_truncated_tail(handle, path):
@@ -316,7 +385,7 @@ def _iter_scannable_items(value, root: str = ""):
                     kpath = _child_path(path, key)
                     yield kpath, key
                     # 2026-07-26 audit: a credential SPLIT across a key and its
-                    # value defeats per-string scanning -- key "sk-ant-api03"
+                    # value defeats per-string scanning -- a token prefix key
                     # plus the remaining 40 chars as the value each match no
                     # pattern alone, so the pair walked straight in. Scan the
                     # joined pair too: bare (prefix tokens reassemble across
@@ -477,6 +546,16 @@ def _lessons_from_adapter():
         return []
     with open(sidecar) as f:
         blob = json.load(f)
+    # A current sidecar is one member of OSVec's committed three-file store.
+    # Exporting it without its manifest would publish records from a partial or
+    # interrupted write as trusted durable lessons.
+    if blob.get("schema") == getattr(tv, "SIDECAR_SCHEMA", None):
+        manifest = getattr(tv, "MANIFEST_PATH", None)
+        if not manifest or not os.path.isfile(manifest):
+            raise SystemExit(
+                "refuse: osvec sidecar has no matching manifest; repair or "
+                "rebuild the OSVec store before export"
+            )
     out = []
     for rec in blob.get("records", {}).values():
         if rec.get("memory_type") == "lesson":
@@ -489,6 +568,15 @@ def _lessons_from_adapter():
                 "tags": rec.get("tags", []) or [],
             })
     return out
+
+
+def _adapter_search_paths():
+    """Installed adapter first, source add-on adapter second."""
+    candidates = (
+        os.path.join(ROOT, "memory"),
+        os.path.join(ROOT, "addons", "full-engine", "memory"),
+    )
+    return tuple(dict.fromkeys(os.path.abspath(path) for path in candidates))
 
 
 def _lessons_from_file(path):
@@ -539,7 +627,14 @@ def _lessons_from_file(path):
                      f"{type(r).__name__}, not a JSON object; every lesson "
                      "must be a JSON object like "
                      '{"id": ..., "type": "lesson", "text": ...}')
-        if r.get("type") == "lesson" or r.get("memory_type") == "lesson":
+        if brain_paths is not None:
+            try:
+                typ = brain_paths.record_type(r)
+            except brain_paths.BrainRecordError as exc:
+                raise BrainFormatError(f"{full}: {exc}") from None
+        else:
+            typ = r.get("type") or r.get("kind") or r.get("memory_type")
+        if typ == "lesson":
             out.append({
                 "id": r.get("id") or r.get("memory_id"),
                 "ts": r.get("ts") or r.get("created_at", "") or time.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -595,29 +690,8 @@ def cmd_export(args):
     # save-chat refuses could be smuggled in via `export --from` (audit 07-25).
     gate_records(lessons, where="export")
     _refuse_idless(lessons, args.from_file or "osvec_adapter")
-    have = _existing_ids(BRAIN_FILE)
-    added = skipped = 0
-    # open("a") CREATES at 0666 & ~umask; these records just cleared the
-    # credential gate above and must not be born world-readable.
-    _create_private(BRAIN_FILE)
-    with open(BRAIN_FILE, "a") as f:
-        _heal_truncated_tail(f, BRAIN_FILE)
-        for l in lessons:
-            # `not l.get("id")` used to sit in this same condition, so a lesson
-            # with NO id was dropped by the identical `continue` that dedupes a
-            # lesson already in the brain -- one is a no-op, the other is a lost
-            # lesson, and both printed "export: N new lesson(s) appended" and
-            # exited 0 (audit 2026-07-27). _refuse_idless above now stops that
-            # export before a single byte is written; only real dedupe is left
-            # here, and it is COUNTED so "0 new" can be told apart from
-            # "0 read".
-            if l["id"] in have:
-                skipped += 1
-                continue
-            f.write(json.dumps(l) + "\n")
-            have.add(l["id"])
-            added += 1
-    note = f" ({skipped} already present)" if skipped else ""
+    added = _append_new(BRAIN_FILE, lessons, "brain-export")
+    note = ""
     print(f"export: {added} new lesson(s) appended to "
           f"{os.path.relpath(BRAIN_FILE, ROOT)}{note}")
     return 0
@@ -669,62 +743,56 @@ def cmd_save_chat(args):
     # not just the chat text.
     gate_record(record, where="save-chat")
 
-    have = _existing_ids(BRAIN_FILE)
-    if rid in have:
+    added = _append_new(BRAIN_FILE, [record], "brain-save-chat")
+    if not added:
         print(f"save-chat: kept existing {rid}")
         return 0
-    # Same as cmd_export: the append must not be what creates a 0644 brain.
-    _create_private(BRAIN_FILE)
-    with open(BRAIN_FILE, "a", encoding="utf-8") as f:
-        _heal_truncated_tail(f, BRAIN_FILE)
-        f.write(json.dumps(record, sort_keys=True) + "\n")
     print(f"save-chat: appended {rid} to {os.path.relpath(BRAIN_FILE, ROOT)}")
     return 0
 
 
 def _selftest():
-    global BRAIN_FILE
-    syn = {"id": "selftest-%d" % int(time.time()),
-           "ts": _now(), "source": "codex",
-           "type": "lesson", "text": "round-trip self-test lesson", "tags": ["selftest"]}
-    tmp = os.path.join(HERE, ".selftest-from.jsonl")
-    with open(tmp, "w") as f:
-        f.write(json.dumps(syn) + "\n")
-    # 2026-07-25 audit: this used to run cmd_export/cmd_save_chat/cmd_import
-    # against the module-level BRAIN_FILE with no override, so --selftest
-    # appended synthetic "selftest-*" records into the real, live
-    # shared-brain.jsonl every time it ran. Swap BRAIN_FILE to a scratch
-    # file inside HERE (must stay inside ROOT for _safe_path) for the
-    # duration of the test, same isolation central_brain.py's selftest
-    # gets via tempfile.TemporaryDirectory.
-    real_brain_file = BRAIN_FILE
-    BRAIN_FILE = os.path.join(HERE, ".selftest-brain.jsonl")
-    try:
-        cmd_export(argparse.Namespace(from_file=tmp))
-        cmd_save_chat(
-            argparse.Namespace(
-                summary="Save chat memories as approved summaries, not raw logs.",
-                summary_file=None,
-                id="selftest-chat-save",
-                kind="lesson",
-                tag=["selftest", "chat"],
-                source=None,
-                mode="summary",
+    global ROOT, BRAIN_FILE
+    original_root, original_brain_file = ROOT, BRAIN_FILE
+    original_lock_dir = bb_lock.LOCK_DIR if bb_lock is not None else None
+    with tempfile.TemporaryDirectory(prefix="project-os-brain-selftest-") as temp_root:
+        temp_brain_dir = os.path.join(temp_root, "brain")
+        os.makedirs(temp_brain_dir)
+        temp_source = os.path.join(temp_brain_dir, "source.jsonl")
+        ROOT, BRAIN_FILE = temp_root, os.path.join(temp_brain_dir, "shared-brain.jsonl")
+        if bb_lock is not None:
+            bb_lock.LOCK_DIR = os.path.join(temp_root, "locks")
+        try:
+            # Keep synthetic IDs free of token-like separators: the durable
+            # gate intentionally treats opaque `prefix-<long-token>` values as
+            # possible credentials.
+            syn = {"id": "selftestexport" + uuid.uuid4().hex,
+                   "ts": _now(), "source": "codex", "type": "lesson",
+                   "text": "round-trip self-test lesson", "tags": ["selftest"]}
+            with open(temp_source, "w", encoding="utf-8") as source_file:
+                source_file.write(json.dumps(syn) + "\n")
+            cmd_export(argparse.Namespace(from_file=temp_source))
+            cmd_save_chat(
+                argparse.Namespace(
+                    summary="Save chat memories as approved summaries, not raw logs.",
+                    summary_file=None,
+                    id="selftestchat" + uuid.uuid4().hex,
+                    kind="lesson",
+                    tag=["selftest", "chat"],
+                    source=None,
+                    mode="summary",
+                    approved=True,
+                )
             )
-        )
-        roundtripped = {r["id"] for r in _read_jsonl(BRAIN_FILE)}
-        assert syn["id"] in roundtripped, "export did not persist synthetic lesson"
-        assert "selftest-chat-save" in roundtripped, "save-chat did not persist synthetic chat summary"
-        cmd_import(argparse.Namespace(into=None))
-        print("selftest: OK")
-        return 0
-    finally:
-        BRAIN_FILE = real_brain_file
-        if os.path.exists(tmp):
-            os.remove(tmp)
-        scratch = os.path.join(HERE, ".selftest-brain.jsonl")
-        if os.path.exists(scratch):
-            os.remove(scratch)
+            roundtripped = {r["id"] for r in _read_jsonl(BRAIN_FILE)}
+            assert syn["id"] in roundtripped, "export did not persist synthetic lesson"
+            cmd_import(argparse.Namespace(into=None))
+            print("selftest: OK")
+            return 0
+        finally:
+            ROOT, BRAIN_FILE = original_root, original_brain_file
+            if bb_lock is not None:
+                bb_lock.LOCK_DIR = original_lock_dir
 
 
 def main():
@@ -752,6 +820,8 @@ def main():
         default="summary",
         help="summary is the safe default; raw must be explicit and still refuses secret-looking text",
     )
+    ps.add_argument("--approved", action="store_true",
+                    help="record explicit approval for summary-mode central sync")
     pi = sub.add_parser("import", help="read the shared brain; print or write with --into")
     pi.add_argument("--into", default=None, help="write lessons to this file for another AI tool")
     args = p.parse_args()
@@ -768,4 +838,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BrainFormatError as exc:
+        print(f"refuse: {exc}", file=sys.stderr)
+        sys.exit(2)

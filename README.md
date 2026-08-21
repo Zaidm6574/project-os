@@ -1,5 +1,7 @@
 # Project OS
 
+> **Where the live work is:** this repo is the METHOD (doctrine, scripts, templates). Keep live run ledgers private and untracked; create and register new runs with `memory/new_run.py`.
+
 [![Tests](https://github.com/Zaidm6574/project-os/actions/workflows/test.yml/badge.svg)](https://github.com/Zaidm6574/project-os/actions/workflows/test.yml)
 
 A workflow template for AI coding assistants — a goal file, a shared blackboard, and operating rules the assistant reads at the start of every session — plus the Python that keeps the template from lying to you: file locks with fencing tokens, a plan gate that refuses a plan which never says how the result will be checked, atomic writes that survive a crash mid-rewrite, and a secret gate that fails closed before chat memory syncs anywhere.
@@ -33,7 +35,7 @@ Every load-bearing claim in this README has a command a stranger can run on a fr
 | Claim | Check it |
 |---|---|
 | The full suite passes with zero dependencies | `python3 -m unittest discover -s tests` |
-| Two agents can't silently overwrite each other's work — locks are token-fenced and survive process suspension | `python3 -m unittest tests.test_bb_lock_hardening -v` |
+| Cooperative agents cannot silently overwrite each other's work — token-fenced locks surface a stale holder for recovery | `python3 -m unittest tests.test_bb_lock_hardening -v` |
 | A plan whose verification step is empty or a placeholder (`-`, `n/a`, `tbd`, …) is rejected, with the reason — structural proof the plan *declares* a check, never proof the check ran | the two commands below |
 | Chat-derived memory never syncs to the shared brain without explicit approval | `python3 -m unittest tests.test_brain_privacy -v` |
 | The installer fails closed below Python 3.10 and names the interpreter it found | `PATH=/usr/bin:/bin sh install.sh /tmp/demo --dry-run` (on a machine whose only `python3` is older than 3.10, e.g. stock macOS: exits 1, prints `found python3 = 3.9.6 (/usr/bin/python3); ...`) |
@@ -211,16 +213,18 @@ my-new-project/
 
 ## Privacy rules
 
-Never commit: raw chat exports, API keys, private notes, vector indexes, local memory databases, screenshots with personal data, browser/session data. The `.gitignore` blocks the common private folders by default.
+Never commit: raw chat exports, API keys, private notes, vector indexes, local memory databases, screenshots with personal data, browser/session data, or live run ledgers. The `.gitignore` blocks these common private paths by default.
 
 Run a quick check before pushing:
 
 ```bash
 git status --short --ignored
-python3 scripts/prepublish_check.py
+python3 scripts/prepublish_check.py --tracked
 ```
 
 `prepublish_check.py` imports the same credential denylist the brain's privacy gate uses, so the check you run before publishing is never weaker than the one running inside the tools. It prints the file and line of every match and never the matched value; `--list` shows the patterns it checked.
+
+This repository's redaction tests intentionally contain synthetic credential-shaped fixtures, so the check is a fail-closed review gate rather than a command expected to exit cleanly. Treat every non-test-source match as a release blocker; review test-source matches before publishing.
 
 ## Status
 

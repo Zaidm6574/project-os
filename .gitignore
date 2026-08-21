@@ -89,11 +89,21 @@ node_modules/
 command-center/
 *.tsbuildinfo
 
-# Working data — the remote is the PUBLIC template; real run/brain data never ships
+# Working data — the remote is the PUBLIC template; real run/brain data never
+# ships. Keep every live run artifact out of the public repository.
 blackboard/
-runs/
+/runs/
+# Run ledgers are private at any project depth. The one shipped full-engine
+# index is deliberately re-included below as public template source.
+**/runs/
+!addons/
+!addons/full-engine/
+!addons/full-engine/runs/
+addons/full-engine/runs/*
+!addons/full-engine/runs/INDEX.md
 outputs/
 memory/*.json
+**/mneme_index.json.build.lock
 memory/self-improvement-loop.md
 CLAUDE.md.pre-symlink.bak
 
@@ -106,3 +116,4 @@ code-graph.json
 # Run deliverable moved to its own repo; local compat symlink stays untracked
 app
 app/
+brain/shared-brain-binding.jsonl

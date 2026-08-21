@@ -42,26 +42,40 @@ def _slugify(name: str) -> str:
     return s or "adopted-project"
 
 
+def _safe_project_file(project_path: str, filename: str) -> str | None:
+    """Return a real direct child file, never a symlink or resolved escape."""
+    path = os.path.join(project_path, filename)
+    if os.path.islink(path) or not os.path.isfile(path):
+        return None
+    project_root = os.path.realpath(project_path)
+    resolved = os.path.realpath(path)
+    if os.path.dirname(resolved) != project_root:
+        return None
+    return path
+
+
 def _infer_goal(project_path: str) -> tuple[str, str]:
     """Return (one-line goal, source hint)."""
     for fname in ("README.md", "readme.md", "README"):
-        p = os.path.join(project_path, fname)
-        if os.path.isfile(p):
+        p = _safe_project_file(project_path, fname)
+        if p is not None:
             with open(p, encoding="utf-8", errors="replace") as fh:
                 for line in fh:
                     s = line.strip().lstrip("#").strip()
                     if s and not s.startswith("!["):
                         return s[:200], fname
     for fname in ("package.json", "pyproject.toml"):
-        p = os.path.join(project_path, fname)
-        if os.path.isfile(p):
+        p = _safe_project_file(project_path, fname)
+        if p is not None:
             if fname.endswith(".json"):
                 try:
                     with open(p, encoding="utf-8") as fh:
                         blob = json.load(fh)
-                    desc = (blob.get("description") or blob.get("name") or "").strip()
-                    if desc:
-                        return desc[:200], fname
+                    if isinstance(blob, dict):
+                        for field in ("description", "name"):
+                            value = blob.get(field)
+                            if isinstance(value, str) and value.strip():
+                                return value.strip()[:200], fname
                 except (json.JSONDecodeError, OSError):
                     pass
             else:
@@ -147,8 +161,32 @@ def _write_goal_stub(run_dir: str, goal: str, source: str, project_path: str) ->
     with open(goal_path, encoding="utf-8") as fh:
         text = fh.read()
 
+    missing = []
+    if not any(line.strip().startswith("## Canonical Goal") for line in text.splitlines()):
+        missing.append("canonical-goal anchor")
+    if not any(line.strip().lower().startswith("## definition of done") for line in text.splitlines()):
+        missing.append("definition-of-done anchor")
+    if missing:
+        sys.stderr.write(
+            "adopt: %s not found in %s — appending goal/DoD block instead\n"
+            % (" and ".join(missing), goal_path)
+        )
+
     text = _replace_canonical_goal(text, goal, source)
     text = _add_adoption_criteria(text, project_path)
+    if missing:
+        text = text.replace(
+            "## Canonical Goal\n", "## Canonical Goal (one sentence)\n", 1
+        )
+        text += "\n<!-- appended by adopt_project.py: template anchors were missing -->\n"
+    done_items = (
+        "- [x] Adopted project at `%s` meets its stated purpose\n"
+        "- [x] Run closed with /deliver and VALIDATE: PASS" % project_path
+    )
+    if "- [ ] TBD\n- [ ] TBD" in text:
+        text = text.replace("- [ ] TBD\n- [ ] TBD", done_items, 1)
+    elif "definition-of-done anchor" in missing:
+        text += "\n## Definition of Done\n\n" + done_items + "\n"
 
     _replace_goal_file_atomically(goal_path, text, goal)
 
@@ -260,12 +298,11 @@ def adopt(project_path: str, slug: str | None = None, tier: str = "solo") -> int
     # slug was passed through _slugify, so `--slug ../../../../tmp/x` scaffolded
     # a run outside runs/ entirely. Slugify every slug, then prove containment
     # (audit 2026-07-25, reproduced end-to-end).
-    slug = _slugify(slug) if slug else _slugify(os.path.basename(full))
-    runs_root = os.path.realpath(os.path.join(ROOT, "runs"))
+    slug = slug if slug is not None else _slugify(os.path.basename(full))
+    if new_run._reject_unsafe_slug(slug):
+        return 2
+    runs_root = os.path.join(ROOT, "runs")
     dest = os.path.join(runs_root, slug)
-    if os.path.dirname(os.path.realpath(dest)) != runs_root:
-        sys.stderr.write("adopt: refusing slug that escapes runs/: %r\n" % slug)
-        return 1
     if os.path.exists(dest):
         sys.stderr.write("runs/%s/ already exists — refusing to overwrite.\n" % slug)
         return 1

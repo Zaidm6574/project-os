@@ -23,7 +23,7 @@ Try it without any brain configured (uses the bundled sample brief):
 Rejections feed back: the rubric instructs the Evaluator to write a lesson line to
 memory/self-improvement-loop.md and record the variant via scripts/evolution.py.
 """
-import os, re, sys, json, subprocess, datetime
+import os, re, sys, json, subprocess, datetime, tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project-os/
 # Personal-brain CLI location. Point PROJECT_OS_BRAIN_DIR at any directory
@@ -72,29 +72,57 @@ def slug(s, n=32):
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")[:n].strip("-") or "task"
 
 
-def _path_within(base_dir, target):
-    """True iff `target` resolves to a file DIRECTLY inside base_dir.
-
-    --packet-id is interpolated straight into the output filename and is only
-    slugged for the DEFAULT; an explicit `--packet-id ../../etc/x`, an absolute
-    path, or one with symlink/.. components would otherwise redirect the write
-    OUTSIDE --out-dir while the JSON summary still printed a benign-looking
-    path. Comparing the RESOLVED path against the RESOLVED directory is the same
-    realpath/commonpath idiom, fail-closed, as scripts/plan_artifact.py
-    (packet_path). Requiring dirname(real) == base also contains any SIBLING the
-    writer derives from this path (e.g. a `<file>.tmp` temp for an atomic
-    write): a sibling shares this exact resolved directory, so it cannot escape
-    once the final path is pinned here.
-    """
+def _publish_pair(worker_path, worker_text, rubric_path, rubric_text):
+    """Publish both new packet files or neither, never overwriting a path."""
+    parent = os.path.dirname(os.path.abspath(worker_path))
+    if parent != os.path.dirname(os.path.abspath(rubric_path)):
+        raise OSError("worker and rubric outputs must share one directory")
+    staged = []
+    published = []
     try:
-        base = os.path.realpath(base_dir)
-        real = os.path.realpath(target)
-        # realpath() raises ValueError on an embedded NUL; commonpath() raises
-        # on paths it cannot compare (e.g. different drives) — both are refusals.
-        return (os.path.commonpath([real, base]) == base
-                and os.path.dirname(real) == base)
-    except (OSError, ValueError):
-        return False
+        for label, text in (("worker", worker_text), ("rubric", rubric_text)):
+            fd, temp_path = tempfile.mkstemp(
+                prefix=f".promptsmith-{label}-", dir=parent, text=True)
+            staged.append(temp_path)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+        for temp_path, target in zip(staged, (worker_path, rubric_path)):
+            os.link(temp_path, target)
+            published.append((temp_path, target))
+    except Exception:
+        for temp_path, target in reversed(published):
+            try:
+                if os.path.samestat(os.lstat(temp_path), os.lstat(target)):
+                    os.unlink(target)
+            except FileNotFoundError:
+                pass
+        raise
+    finally:
+        for temp_path in staged:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
+
+
+def _preflight_output(out_dir, worker_path, rubric_path, index_path, no_index):
+    if os.path.lexists(out_dir) and os.path.islink(out_dir):
+        raise ValueError(f"--out-dir must not be a symlink: {out_dir}")
+    if os.path.exists(out_dir) and not os.path.isdir(out_dir):
+        raise ValueError(f"--out-dir is not a directory: {out_dir}")
+    for path in (worker_path, rubric_path):
+        if os.path.lexists(path):
+            kind = "symlink" if os.path.islink(path) else "existing path"
+            raise ValueError(f"refusing to overwrite {kind}: {path}")
+    if not no_index and os.path.lexists(index_path) and os.path.islink(index_path):
+        raise ValueError(f"packet index must not be a symlink: {index_path}")
+
+
+def _table_cell(value):
+    """Render untrusted text as one Markdown table cell."""
+    return " ".join(str(value).replace("|", " / ").split())
 
 
 def main():
@@ -103,11 +131,8 @@ def main():
     def flag(name, default=None):
         if name in args:
             i = args.index(name)
-            # 2026-07-26: a bare trailing flag (`... --task` with nothing after
-            # it) indexed past the end and died with a raw IndexError traceback.
             if i + 1 >= len(args):
-                print(f"promptsmith: {name} needs a value — nothing followed it.",
-                      file=sys.stderr)
+                print(f"usage error: missing value for {name}", file=sys.stderr)
                 sys.exit(2)
             v = args[i + 1]
             del args[i:i + 2]
@@ -116,38 +141,31 @@ def main():
 
     task = flag("--task")
     if not task:
-        # 2026-07-26: this printed the whole docstring to STDOUT and exited 2
-        # with an EMPTY stderr, so copying the README's `--brief-file
-        # examples/sample-brief.md` line looked like success in a pipeline and
-        # said nothing about what was wrong. Name the missing flag on stderr.
-        print("promptsmith: --task \"<what to build>\" is required.\n"
-              "e.g. python3 scripts/promptsmith.py --task \"build the hero section\" "
-              "--brief-file examples/sample-brief.md", file=sys.stderr)
+        print("usage error: --task is required", file=sys.stderr)
         print(__doc__)
         sys.exit(2)
     query = flag("--query", task)
     today = datetime.date.today().isoformat()
     pid = flag("--packet-id", f"psmith-{today}-{slug(task)}")
+    if "/" in pid or "\\" in pid or ".." in pid:
+        print(f"usage error: refusing --packet-id: must not contain path separators or '..' "
+              f"(got {pid!r}) — it is joined into output filenames", file=sys.stderr)
+        sys.exit(2)
     out_dir = flag("--out-dir", os.path.join(ROOT, "blackboard", "packets"))
     brief_file = flag("--brief-file")
     no_index = "--no-index" in args
+    wp = os.path.join(out_dir, f"{pid}-worker-prompt.md")
+    rp = os.path.join(out_dir, f"{pid}-rubric.md")
+    idx = os.path.join(ROOT, "blackboard", "05-agent-packets.md")
 
     if brief_file:
-        # 2026-07-26: an unreadable --brief-file (typo, wrong cwd) raised a raw
-        # OSError traceback here. Same command, same class of ordinary mistake
-        # as a missing --task: refuse with the path that could not be read.
-        # UnicodeDecodeError is a ValueError, NOT an OSError, so a brief pasted
-        # out of Word (cp1252 smart quotes) still tracebacked at this exact
-        # line after the OSError guard landed (adversary 2026-07-26).
         try:
-            brief_md = open(brief_file, encoding="utf-8").read().strip()
-        except OSError as e:
-            print(f"promptsmith: cannot read --brief-file {brief_file!r}: "
-                  f"{e.strerror or e}", file=sys.stderr)
-            sys.exit(2)
-        except UnicodeDecodeError as e:
-            print(f"promptsmith: --brief-file {brief_file!r} is not UTF-8 "
-                  f"text ({e.reason}); re-save it as UTF-8.", file=sys.stderr)
+            with open(brief_file, encoding="utf-8") as brief_handle:
+                brief_md = brief_handle.read().strip()
+        except OSError as exc:
+            detail = str(exc).replace("\n", " ")
+            print(f"usage error: could not read --brief-file {brief_file!r}: {detail}",
+                  file=sys.stderr)
             sys.exit(2)
         source = f"pre-fetched: {brief_file}"
     else:
@@ -163,31 +181,18 @@ def main():
         source = "unavailable"
     donts = extract_donts(brief_md) if available else []
 
-    os.makedirs(out_dir, exist_ok=True)
-    wp = os.path.join(out_dir, f"{pid}-worker-prompt.md")
-    rp = os.path.join(out_dir, f"{pid}-rubric.md")
-    # 2026-07-27: containment guard for --packet-id (pid). pid lands verbatim in
-    # both output filenames above and, for an explicit value, is otherwise
-    # unvalidated — a crafted id (../.., an absolute path, symlink/.. parts)
-    # escaped --out-dir. Same bug class already fixed in plan_artifact.py.
-    # Validate BOTH paths BEFORE opening either file so an escaping id refuses
-    # the whole run and writes NOTHING (no partial/first-file leak). dirname==
-    # base inside _path_within also covers any `.tmp` sibling of these paths.
-    for _label, _fp in (("worker prompt", wp), ("rubric", rp)):
-        if not _path_within(out_dir, _fp):
-            print(f"promptsmith: refusing --packet-id {pid!r}: the {_label} file "
-                  f"would resolve to {_fp!r}, outside the --out-dir {out_dir!r}. "
-                  f"Use a plain packet id (no '/', '..', or absolute path).",
-                  file=sys.stderr)
-            sys.exit(2)
+    try:
+        _preflight_output(out_dir, wp, rp, idx, no_index)
+    except ValueError as exc:
+        print(f"usage error: {exc}", file=sys.stderr)
+        sys.exit(2)
 
     dont_block = ("\n".join(f"- [ ] {d}" for d in donts) if donts else
                   "- [ ] Extract every DON'T from the brief above; each is a hard constraint."
                   if available else
                   "- [ ] BRAIN-UNAVAILABLE — no DON'T list; human gate must review everything.")
 
-    with open(wp, "w", encoding="utf-8") as f:
-        f.write(f"""# Worker Prompt — {pid}
+    worker_text = f"""# Worker Prompt — {pid}
 
 Packet ID: {pid}
 Agent: (assign)
@@ -217,10 +222,9 @@ Compiled: {today} by promptsmith (brief source: {source})
 - The artifact.
 - Evidence pack: screenshots (filmstrip if anything moves) + one line per DON'T
   stating how it was checked.
-""")
+"""
 
-    with open(rp, "w", encoding="utf-8") as f:
-        f.write(f"""# Evaluator Rubric — {pid}
+    rubric_text = f"""# Evaluator Rubric — {pid}
 
 Packet ID: {pid}
 Status: Draft
@@ -251,25 +255,37 @@ Compiled: {today} by promptsmith from the SAME brief as the worker prompt
    `python3 scripts/evolution.py record`.
 4. On Approve: forward to the human taste gate with the evidence pack. Approve is
    a recommendation, not a final pass — only the human gate closes taste.
-""")
+"""
+
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        _preflight_output(out_dir, wp, rp, idx, no_index)
+        _publish_pair(wp, worker_text, rp, rubric_text)
+    except (OSError, ValueError) as exc:
+        detail = str(exc).replace("\n", " ")
+        print(f"FAILED: could not publish promptsmith packet pair: {detail}",
+              file=sys.stderr)
+        sys.exit(2 if isinstance(exc, ValueError) or isinstance(exc, FileExistsError) else 1)
 
     if not no_index:
-        idx = os.path.join(ROOT, "blackboard", "05-agent-packets.md")
         if os.path.exists(idx):
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
             import bb_lock
-            # 2026-07-25: sanitize task before embedding in the markdown table row —
-            # an unescaped `|` or newline in --task could inject extra cells (e.g. a
-            # fake "Approved" status) into the shared blackboard index.
-            safe_task = task.replace("|", "/").replace("\n", " ").replace("\r", " ")
-            row = (f"| {pid} | promptsmith | {safe_task[:60]} | Draft | "
+            row = (f"| {pid} | promptsmith | {_table_cell(task)[:60]} | Draft | "
                    f"packets/{os.path.basename(wp)} |")
-            if bb_lock.acquire(idx, agent="promptsmith", wait=10):
+            token = bb_lock.acquire(idx, agent="promptsmith", wait=10)
+            if token:
                 try:
-                    with open(idx, "a", encoding="utf-8") as f:
+                    flags = os.O_WRONLY | os.O_APPEND
+                    if hasattr(os, "O_NOFOLLOW"):
+                        flags |= os.O_NOFOLLOW
+                    fd = os.open(idx, flags)
+                    with os.fdopen(fd, "a", encoding="utf-8") as f:
                         f.write(row + "\n")
+                        f.flush()
+                        os.fsync(f.fileno())
                 finally:
-                    bb_lock.release(idx, agent="promptsmith", force=True)
+                    bb_lock.release(idx, agent="promptsmith", token=token)
             else:
                 print(f"WARN: could not lock packet index; add row manually:\n{row}",
                       file=sys.stderr)

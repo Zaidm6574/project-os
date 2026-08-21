@@ -37,11 +37,34 @@ No network calls; stdlib only.
 
 import argparse
 import json
+import math
 import os
 import pathlib
+import re
 import stat as stat_module
 import sys
 import tempfile
+
+
+def _load_from_scripts(module_name, purpose):
+    """Import a required Project OS script from an installed or repo layout."""
+    here = pathlib.Path(__file__).resolve().parent
+    candidates = (here.parent / "scripts", here.parents[2] / "scripts")
+    for scripts_dir in candidates:
+        if not (scripts_dir / (module_name + ".py")).is_file():
+            continue
+        scripts_text = str(scripts_dir)
+        if scripts_text not in sys.path:
+            sys.path.insert(0, scripts_text)
+        return __import__(module_name)
+    raise RuntimeError(
+        "Project OS scripts/%s.py is required for %s" % (module_name, purpose))
+
+
+bb_lock = _load_from_scripts("bb_lock", "the cost-actuals writer fence")
+
+# How long a cost-actuals write waits before it refuses a competing owner.
+LOCK_WAIT_SEC = 10.0
 
 # Default price table (dollars per 1 million tokens).
 DEFAULT_PRICES = {
@@ -60,6 +83,21 @@ CODEX_TOKEN_FIELDS = (
     "reasoning_output_tokens",
     "total_tokens",
 )
+
+CLAUDE_TOKEN_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+
+
+class CostActualsError(ValueError):
+    """A user-correctable input or write-boundary error."""
+
+
+class CostActualsTargetError(CostActualsError):
+    """A requested write destination is absent before any report is rendered."""
 
 
 # ---------------------------------------------------------------------------
@@ -107,15 +145,43 @@ def _find_latest_jsonl():
 
 def _load_prices(prices_arg):
     """Load the price table from a JSON string or file path."""
-    if prices_arg is None:
-        return DEFAULT_PRICES
-    stripped = prices_arg.strip()
-    if stripped.startswith("{"):
-        raw = json.loads(stripped)
-    else:
-        with open(prices_arg) as fh:
-            raw = json.load(fh)
-    return {k.lower(): v for k, v in raw.items()}
+    source = "built-in price table"
+    try:
+        if prices_arg is None:
+            raw = DEFAULT_PRICES
+        else:
+            stripped = prices_arg.strip()
+            if stripped.startswith(("{", "[")):
+                source = "inline --prices JSON"
+                raw = json.loads(stripped)
+            else:
+                source = "price file %s" % prices_arg
+                with open(prices_arg, encoding="utf-8") as fh:
+                    raw = json.load(fh)
+    except json.JSONDecodeError as exc:
+        raise CostActualsError(
+            "invalid JSON in %s: %s" % (source, exc.msg)) from None
+    except (OSError, UnicodeError) as exc:
+        raise CostActualsError("cannot read %s: %s" % (source, exc)) from None
+
+    if not isinstance(raw, dict):
+        raise CostActualsError("%s must be a JSON object" % source)
+    prices = {}
+    for model, entry in raw.items():
+        if not isinstance(model, str) or not model.strip():
+            raise CostActualsError("price model keys must be nonempty strings")
+        if not isinstance(entry, dict):
+            raise CostActualsError("price entry for %s must be an object" % model)
+        missing = [field for field in ("in", "out") if field not in entry]
+        if missing:
+            raise CostActualsError(
+                "price entry for %s is missing %s" % (model, " and ".join(missing)))
+        for field in ("in", "out"):
+            if not _finite_nonnegative_number(entry[field]):
+                raise CostActualsError(
+                    "price %s.%s must be a finite nonnegative number" % (model, field))
+        prices[model.strip().lower()] = {"in": entry["in"], "out": entry["out"]}
+    return prices
 
 
 def _subagent_dir_candidates(transcript):
@@ -167,7 +233,7 @@ def _empty_counts():
     return {"input": 0, "output": 0, "cache_creation": 0, "cache_read": 0}
 
 
-def _parse_usage(files, main_file):
+def _parse_usage(files, main_file, strict=False):
     """Parse usage from JSONL files.
 
     Returns (main_totals, sub_totals, unreadable, malformed): dicts mapping
@@ -192,6 +258,7 @@ def _parse_usage(files, main_file):
     sub_totals  = {}
     unreadable  = []
     malformed   = []
+    saw_usage = False
 
     for fpath in files:
         target = main_totals if fpath == main_file else sub_totals
@@ -206,27 +273,75 @@ def _parse_usage(files, main_file):
                     except json.JSONDecodeError:
                         malformed.append((fpath, lineno))
                         continue
+                    if not isinstance(msg, dict):
+                        if not strict:
+                            continue
+                        raise CostActualsError(
+                            "%s:%s: JSONL record must be an object" % (fpath, lineno))
                     # usage may sit at the top level or inside a "message" key.
                     # Either key can be present-but-null or hold a non-dict
                     # value (e.g. "message": "hello"); .get() on those raises
                     # AttributeError, so guard with isinstance (2026-07-25).
                     message = msg.get("message")
                     message = message if isinstance(message, dict) else {}
-                    usage = msg.get("usage") or message.get("usage")
-                    if not isinstance(usage, dict):
+                    usage = msg.get("usage")
+                    if usage is None and message:
+                        usage = message.get("usage")
+                    if usage is None:
                         continue
-                    model = msg.get("model") or message.get("model", "unknown")
+                    if not isinstance(usage, dict):
+                        if not strict:
+                            continue
+                        raise CostActualsError(
+                            "%s:%s: usage must be an object" % (fpath, lineno))
+                    if not usage or not any(field in usage for field in CLAUDE_TOKEN_FIELDS):
+                        if not strict:
+                            continue
+                        raise CostActualsError(
+                            "%s:%s: usage must include at least one token field"
+                            % (fpath, lineno))
+                    model = msg.get("model") or message.get("model")
+                    if not isinstance(model, str) or not model.strip():
+                        if not strict:
+                            continue
+                        raise CostActualsError(
+                            "%s:%s: model must be a nonempty string" % (fpath, lineno))
+                    values = {}
+                    for field in CLAUDE_TOKEN_FIELDS:
+                        value = usage.get(field, 0)
+                        if not _finite_nonnegative_number(value):
+                            if not strict:
+                                values = None
+                                break
+                            raise CostActualsError(
+                                "%s:%s: %s must be a finite nonnegative number"
+                                % (fpath, lineno, field))
+                        values[field] = value
+                    if values is None:
+                        continue
+                    saw_usage = True
                     tier = _model_tier(model)
                     if tier not in target:
                         target[tier] = _empty_counts()
-                    target[tier]["input"]          += usage.get("input_tokens", 0)
-                    target[tier]["output"]         += usage.get("output_tokens", 0)
-                    target[tier]["cache_creation"] += usage.get("cache_creation_input_tokens", 0)
-                    target[tier]["cache_read"]     += usage.get("cache_read_input_tokens", 0)
+                    target[tier]["input"]          += values["input_tokens"]
+                    target[tier]["output"]         += values["output_tokens"]
+                    target[tier]["cache_creation"] += values["cache_creation_input_tokens"]
+                    target[tier]["cache_read"]     += values["cache_read_input_tokens"]
         except OSError:
             unreadable.append(fpath)
 
+    if strict and not saw_usage and not unreadable and not malformed:
+        raise CostActualsError("no usage records found in transcript input")
     return main_totals, sub_totals, unreadable, malformed
+
+
+def _finite_nonnegative_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, ValueError):
+        return False
 
 
 def unpriced_tiers(totals, prices):
@@ -556,7 +671,15 @@ def run_codex_sessions(sessions_dir):
         )
 
 
-def _build_table(main_costs, sub_costs, main_totals=None, sub_totals=None, prices=None):
+def _build_table(
+    main_costs,
+    sub_costs,
+    main_totals=None,
+    sub_totals=None,
+    prices=None,
+    subagents_measured=None,
+    main_measured=None,
+):
     """Return a markdown table string for the ACTUALS block.
 
     The **main session file is the orchestrator loop** (the CEO/Opus thread that
@@ -578,9 +701,33 @@ def _build_table(main_costs, sub_costs, main_totals=None, sub_totals=None, price
     main_total = sum(main_costs.values())
     sub_total  = sum(sub_costs.values())
     total = main_total + sub_total
-    lines.append("| **Subtotal — orchestrator** | — | $%.4f | — |" % main_total)
-    lines.append("| **Subtotal — subagents** | — | $%.4f | — |" % sub_total)
-    lines.append("| **Total** | — | **$%.4f** | — |" % total)
+    if main_measured is None:
+        main_measured = bool(main_totals if main_totals is not None else main_costs)
+    if subagents_measured is None:
+        subagents_measured = bool(sub_totals if sub_totals is not None else sub_costs)
+    if main_measured:
+        lines.append("| **Subtotal — orchestrator** | — | $%.4f | — |" % main_total)
+    else:
+        lines.append("| **Subtotal — orchestrator** | — | Not measured | — |")
+    if subagents_measured:
+        lines.append("| **Subtotal — subagents** | — | $%.4f | — |" % sub_total)
+    else:
+        lines.append("| **Subtotal — subagents** | — | Not measured | — |")
+    if main_measured and subagents_measured:
+        lines.append("| **Total** | — | **$%.4f** | — |" % total)
+    else:
+        lines.append("| **Total** | — | **Not fully measured** | — |")
+    measurement_notes = []
+    if not main_measured:
+        measurement_notes.append(
+            "_No usage record was found in the main session transcript; "
+            "the orchestrator subtotal is not measured._")
+    if not subagents_measured:
+        measurement_notes.append(
+            "_No sibling `subagents/*.jsonl` transcript usage was found; "
+            "the subagent subtotal is not measured._")
+    if measurement_notes:
+        lines += [""] + measurement_notes
 
     if main_totals is not None and sub_totals is not None and prices is not None:
         lines += [
@@ -596,34 +743,85 @@ def _build_table(main_costs, sub_costs, main_totals=None, sub_totals=None, price
     return "\n".join(lines)
 
 
-def _update_markers(dest, table_md):
-    """Replace content between ACTUALS markers in dest file."""
-    text = dest.read_text()
+def _unfenced_marker_positions(text, marker):
+    """Return marker offsets outside Markdown fences and whether a fence is open."""
+    positions = []
+    fence_char = None
+    fence_len = 0
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        stripped = content.lstrip()
+        if fence_char is not None:
+            if re.match(r"^%s{%d,}\s*$" % (re.escape(fence_char), fence_len), stripped):
+                fence_char = None
+                fence_len = 0
+            offset += len(line)
+            continue
+        match = re.match(r"^(`{3,}|~{3,})", stripped)
+        if match:
+            fence = match.group(1)
+            fence_char = fence[0]
+            fence_len = len(fence)
+            offset += len(line)
+            continue
+        start = 0
+        while True:
+            found = content.find(marker, start)
+            if found < 0:
+                break
+            positions.append(offset + found)
+            start = found + len(marker)
+        offset += len(line)
+    return positions, fence_char is not None
+
+
+def _read_text_preserving_eol(path):
+    with open(path, "r", encoding="utf-8", newline="") as fh:
+        return fh.read()
+
+
+def _detect_eol(text):
+    match = re.search(r"\r\n|\n|\r", text)
+    return match.group(0) if match else "\n"
+
+
+def _normalize_eol(text, eol):
+    return text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", eol)
+
+
+def _blank_line_suffix(text, eol):
+    if not text or text.endswith(eol + eol):
+        return ""
+    if text.endswith(eol):
+        return eol
+    return eol + eol
+
+
+def _marker_layout(text, dest):
     start_tag = "<!-- ACTUALS:START -->"
-    end_tag   = "<!-- ACTUALS:END -->"
-    si = text.find(start_tag)
-    ei = text.find(end_tag)
-    if si == -1 or ei == -1:
-        raise ValueError("Markers not found in %s" % dest)
-    if ei < si:
-        # Fail closed (2026-07-25): an END tag before START would otherwise
-        # splice table_md into the *middle* of unrelated text and duplicate
-        # both markers instead of replacing the block between them.
-        raise ValueError(
-            "ACTUALS:END appears before ACTUALS:START in %s; refusing to "
-            "write a corrupted splice" % dest
-        )
-    new_text = (
-        text[: si + len(start_tag)]
-        + "\n"
-        + table_md
-        + "\n"
-        + text[ei:]
-    )
-    _atomic_write_preserving_mode(dest, new_text)
+    end_tag = "<!-- ACTUALS:END -->"
+    starts, fence_open = _unfenced_marker_positions(text, start_tag)
+    ends, _ = _unfenced_marker_positions(text, end_tag)
+    if fence_open:
+        raise CostActualsError(
+            "unterminated Markdown code fence in %s — refusing to write" % dest)
+    if not starts and not ends:
+        return None
+    if len(starts) != 1 or len(ends) != 1:
+        raise CostActualsError(
+            "ACTUALS markers in %s must be absent or appear exactly once each" % dest)
+    if starts[0] >= ends[0]:
+        raise CostActualsError(
+            "ACTUALS markers in %s must be ordered START before END" % dest)
+    return starts[0], ends[0]
 
 
-def _atomic_write_preserving_mode(dest, new_text):
+class _LeaseLostError(Exception):
+    """The writer's lock lease was reaped and re-owned before commit."""
+
+
+def _atomic_write_preserving_mode(dest, new_text, commit_check=None):
     """Replace dest's contents atomically without changing its permissions.
 
     Write atomically (2026-07-25): a plain write_text() truncates dest before
@@ -657,8 +855,10 @@ def _atomic_write_preserving_mode(dest, new_text):
         dir=str(real_dest.parent), prefix=real_dest.name + ".", suffix=".tmp"
     )
     try:
-        with os.fdopen(fd, "w") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
             fh.write(new_text)
+            fh.flush()
+            os.fsync(fh.fileno())
         if dest_stat is not None:
             wanted_mode = stat_module.S_IMODE(dest_stat.st_mode)
             if hasattr(os, "chown"):
@@ -696,6 +896,8 @@ def _atomic_write_preserving_mode(dest, new_text):
             umask = os.umask(0)
             os.umask(umask)
             os.chmod(tmp_name, 0o666 & ~umask)
+        if commit_check is not None:
+            commit_check()
         os.replace(tmp_name, str(real_dest))
     except BaseException:
         try:
@@ -703,6 +905,71 @@ def _atomic_write_preserving_mode(dest, new_text):
         except OSError:
             pass
         raise
+
+
+def _update_markers(dest, table_md):
+    """Atomically update or append ACTUALS under a fenced writer lease.
+
+    Returns False rather than overwriting a replacement writer if this writer's
+    lease expires before its atomic commit.
+    """
+    token = bb_lock.acquire(str(dest), agent="cost-actuals", wait=LOCK_WAIT_SEC)
+    if not token:
+        raise CostActualsError(
+            "could not acquire the write lock for %s — another writer holds it" % dest)
+    lease_lost = False
+    committed = False
+    try:
+        text = _read_text_preserving_eol(dest)
+        start_tag = "<!-- ACTUALS:START -->"
+        end_tag = "<!-- ACTUALS:END -->"
+        eol = _detect_eol(text)
+        table_md = _normalize_eol(table_md, eol)
+        layout = _marker_layout(text, dest)
+
+        def _still_owner():
+            if not bb_lock.renew(str(dest), token=token):
+                raise _LeaseLostError()
+
+        if layout is None:
+            print(
+                "Warning: ACTUALS markers not found in %s; appending a "
+                "marker-wrapped Actuals section" % dest,
+                file=sys.stderr,
+            )
+            out_text = (
+                text
+                + _blank_line_suffix(text, eol)
+                + "## Actuals (estimate vs measured)" + eol + eol
+                + start_tag + eol + table_md + eol + end_tag + eol
+            )
+        else:
+            si, ei = layout
+            out_text = (
+                text[: si + len(start_tag)] + eol + table_md + eol + text[ei:])
+        try:
+            _atomic_write_preserving_mode(dest, out_text, commit_check=_still_owner)
+        except _LeaseLostError:
+            lease_lost = True
+            print(
+                "cost-actuals write lease lost for %s — a replacement writer "
+                "took ownership; nothing was written by this run" % dest,
+                file=sys.stderr,
+            )
+            return False
+        committed = True
+        return True
+    finally:
+        if not lease_lost:
+            released = bb_lock.release(str(dest), token=token)
+            if not released and committed:
+                print(
+                    "cost-actuals lock release FAILED for %s — the write landed, "
+                    "but a stale lock may linger; reap it with scripts/bb_lock.py "
+                    "reap" % dest,
+                    file=sys.stderr,
+                )
+                raise CostActualsError("lock release failed for %s" % dest)
 
 
 # ---------------------------------------------------------------------------
@@ -716,13 +983,36 @@ def run(transcript_path, prices, write, target_path):
     price table cannot price: --write then REFUSES rather than recording a
     knowingly-incomplete number as a measured actual.
     """
-    files      = _collect_jsonl_files(transcript_path)
-    main_t, sub_t, unreadable, malformed = _parse_usage(files, transcript_path)
-    main_costs = _compute_cost(main_t, prices)
-    sub_costs  = _compute_cost(sub_t,  prices)
-    table_md   = _build_table(main_costs, sub_costs, main_t, sub_t, prices)
+    if write:
+        if target_path is None:
+            here = pathlib.Path(__file__).parent
+            target_path = here.parent / "blackboard" / "09-cost-estimate.md"
+        if not target_path.is_file():
+            raise CostActualsTargetError(
+                "%s not found — check --target or run from an installed project" % target_path)
+        _marker_layout(_read_text_preserving_eol(target_path), target_path)
 
-    missing = sorted(set(unpriced_tiers(main_t, prices)) | set(unpriced_tiers(sub_t, prices)))
+    files = _collect_jsonl_files(transcript_path)
+    main_t, sub_t, unreadable, malformed = _parse_usage(
+        files, transcript_path, strict=write)
+    missing = sorted(
+        set(unpriced_tiers(main_t, prices)) | set(unpriced_tiers(sub_t, prices)))
+
+    if write and unreadable:
+        sys.stderr.write("error: transcript file(s) unreadable; actuals were not written\n")
+        return 2
+    if write and malformed:
+        sys.stderr.write("error: transcript line(s) could not be decoded; actuals were not written\n")
+        return 2
+    if write and missing:
+        sys.stderr.write(
+            "error: no complete pricing configured for %s; actuals were not written\n"
+            % ", ".join(missing))
+        return 2
+
+    main_costs = _compute_cost(main_t, prices)
+    sub_costs = _compute_cost(sub_t, prices)
+    table_md = _build_table(main_costs, sub_costs, main_t, sub_t, prices)
 
     block = (
         "## Actuals (estimate vs measured)\n\n"
@@ -762,31 +1052,10 @@ def run(transcript_path, prices, write, target_path):
         )
 
     if write:
-        if unreadable:
-            sys.stderr.write(
-                "REFUSING --write: transcript file(s) unreadable, actuals would be\n"
-                "incomplete. Nothing was written to the ACTUALS block.\n"
-            )
-            return 2
-        if malformed:
-            # Same contract as the unreadable-FILE gate above: a partial read is
-            # not a measurement, so it must not be recorded as one.
-            sys.stderr.write(
-                "REFUSING --write: transcript line(s) could not be decoded, so\n"
-                "the actuals would be understated. Nothing was written to the\n"
-                "ACTUALS block.\n"
-            )
-            return 2
-        if missing:
-            sys.stderr.write(
-                "REFUSING --write: cost actuals must be measured, not partial.\n"
-                "Nothing was written to the ACTUALS block.\n"
-            )
-            return 2
-        if target_path is None:
-            here = pathlib.Path(__file__).parent
-            target_path = here.parent / "blackboard" / "09-cost-estimate.md"
-        _update_markers(target_path, table_md)
+        if not _update_markers(target_path, table_md):
+            raise CostActualsError(
+                "did not update %s — the write lease was lost to another writer"
+                % target_path)
         print("\nUpdated %s" % target_path, file=sys.stderr)
 
     # A read-only run is a REPORT: unpriced tiers are printed loudly above, but
@@ -1179,4 +1448,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except CostActualsTargetError as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        sys.exit(1)
+    except (CostActualsError, FileNotFoundError) as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        sys.exit(2)

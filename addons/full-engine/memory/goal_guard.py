@@ -38,6 +38,8 @@ _PLACEHOLDER_GOALS = (
     "tbd",
     "one sentence",
 )
+_CANONICAL_GOAL_HEADING = re.compile(
+    r"^##\s+Canonical Goal(?:\s*\([^)]*\))?\s*$", re.IGNORECASE)
 
 
 def _is_placeholder(line):
@@ -61,11 +63,13 @@ def canonical_goal(goal_md_text):
     in_comment = False
     for line in goal_md_text.splitlines():
         s = line.strip()
-        if s.startswith("## Canonical Goal"):
+        if _CANONICAL_GOAL_HEADING.match(s):
             grab = True
             continue
         if not grab:
             continue
+        if s.startswith("## "):
+            break
 
         # Track HTML comment BLOCKS, not just lines that start with '<!--'.
         # The old check skipped only the opening line, so with the multi-line
@@ -266,7 +270,7 @@ def compare(goal_path, roster_path):
         line = canonical_goal(_read(goal_path))
     except GoalAnchorMissing as exc:
         # Exit 2 (not 1): this is "cannot check", which is distinct from DRIFT.
-        print("UNANCHORED: %s (%s)" % (exc, goal_path))
+        print("NOT-LOCKED: %s (%s)" % (exc, goal_path))
         return 2
     want = goal_hash(line)
     have = recorded_hash(_read(roster_path))

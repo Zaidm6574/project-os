@@ -8,7 +8,10 @@ says how close we are, so the Mneme (formerly TurboVec/OSVec) cutover happens be
 degrades — not after.
 
 Counts:
-  - shared-brain entries   (~/.project-os/central-brain/shared-brain.jsonl lines)
+  - shared-brain entries   (the project-local brain/shared-brain.jsonl by default;
+                            PROJECT_OS_SHARED_BRAIN may select an absolute path,
+                            or an ignored brain/shared-brain-binding.jsonl may
+                            bind an external file)
   - run pages              (runs/**/*.md)
   - blackboard pages       (blackboard/**/*.md)
   - mneme index entries    (memory/mneme_index.json)
@@ -25,15 +28,60 @@ Status: OK < 60% of ceiling · WATCH 60-85% · CUTOVER > 85%  (worst dimension w
 Exit codes: 0 OK · 1 WATCH · 2 CUTOVER · 3 n/a (shared brain missing)
 
 Usage: python3 scripts/brain_scale.py [--json]
+
+The shared-brain path follows scripts/brain_paths.py's fail-closed resolver;
+there is no implicit ~/.project-os/central-brain fallback. `--json` includes
+the resolved counts, while a missing project-local brain is reported as n/a.
 """
 import datetime as _dt
-import os, sys, json, glob
+import os, sys, json, glob, pathlib
+if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import brain_paths
+except ModuleNotFoundError:
+    # brain_scale is also a portable diagnostic: a byte-for-byte copied script
+    # with an explicit absolute brain path must still report capacity rather
+    # than crash because the source tree's helper module is absent.  Source
+    # installs use the stricter canonical resolver above.
+    class _StandaloneBrainPathError(ValueError):
+        pass
+
+    class _StandaloneBrainPaths:
+        BrainRecordError = _StandaloneBrainPathError
+
+        @staticmethod
+        def resolve_shared_brain(root):
+            raw = os.environ.get("PROJECT_OS_SHARED_BRAIN")
+            if raw:
+                if not os.path.isabs(raw):
+                    raise _StandaloneBrainPathError(
+                        "PROJECT_OS_SHARED_BRAIN must be absolute")
+                return pathlib.Path(raw)
+            return pathlib.Path(root) / "brain" / "shared-brain.jsonl"
+
+        @staticmethod
+        def record_type(record):
+            if not isinstance(record, dict):
+                raise _StandaloneBrainPathError("memory record must be an object")
+            found = []
+            for field in ("type", "kind", "memory_type"):
+                if field not in record:
+                    continue
+                value = record[field]
+                if not isinstance(value, str) or not value.strip():
+                    raise _StandaloneBrainPathError(
+                        f"memory record {field} must be a nonempty string")
+                found.append(value.strip())
+            if len(set(found)) > 1:
+                raise _StandaloneBrainPathError("memory type alias conflict")
+            return found[0] if found else None
+
+    brain_paths = _StandaloneBrainPaths()
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project-os/
 HOME = os.path.expanduser("~")
-SHARED_BRAIN = os.environ.get(
-    "PROJECT_OS_SHARED_BRAIN",
-    os.path.join(HOME, ".project-os", "central-brain", "shared-brain.jsonl"))
+SHARED_BRAIN = str(brain_paths.resolve_shared_brain(ROOT))
 OSVEC = os.path.join(ROOT, "memory", "mneme_index.json")
 # Optional taste-brain inventory (personal-brain integration). Point the env var
 # at your own node inventory JSON, or leave unset — the dimension reports n/a.
@@ -57,7 +105,8 @@ def count_lines(p):
 
 def count_json_entries(p):
     try:
-        d = json.load(open(p, encoding="utf-8"))
+        with open(p, encoding="utf-8") as f:
+            d = json.load(f)
         for k in ("entries", "items", "vectors", "nodes"):
             if isinstance(d, dict) and isinstance(d.get(k), (list, dict)):
                 return len(d[k])
@@ -74,9 +123,10 @@ def status_for(n, ceil):
 
 
 def count_stale_interest(p, days):
-    """interest-type entries older than `days` — archive candidates."""
+    """interest-type entries older than `days` — archive candidates.
+    Returns (count, skipped_malformed_lines); (None, 0) if the file is missing."""
     try:
-        n = 0
+        n = skipped = 0
         with open(p, encoding="utf-8", errors="replace") as f:
             for ln in f:
                 ln = ln.strip()
@@ -84,14 +134,18 @@ def count_stale_interest(p, days):
                     continue
                 try:
                     o = json.loads(ln)
-                except ValueError:
+                except json.JSONDecodeError:
+                    skipped += 1
                     continue
-                # 2026-07-25: a non-dict JSONL line (e.g. a bare int) has no
-                # .get() — crashed with an unhandled AttributeError and exit 1,
-                # indistinguishable from a real WATCH status. Skip it instead.
                 if not isinstance(o, dict):
+                    skipped += 1
                     continue
-                if (o.get("type") or o.get("kind")) != "interest":
+                try:
+                    typ = brain_paths.record_type(o)
+                except brain_paths.BrainRecordError:
+                    skipped += 1
+                    continue
+                if typ != "interest":
                     continue
                 ts = str(o.get("ts") or o.get("date") or "")[:10]
                 try:
@@ -100,34 +154,41 @@ def count_stale_interest(p, days):
                     continue
                 if (_dt.datetime.now() - then).days > days:
                     n += 1
-        return n
+        return n, skipped
     except FileNotFoundError:
-        return None
+        return None, 0
+
+
+def archive_path(brain):
+    p = pathlib.Path(brain)
+    if p.suffix == ".jsonl":
+        return str(p.with_name(p.stem + "-archive.jsonl"))
+    return str(p.with_name(p.name + "-archive.jsonl"))
 
 
 def main():
     shared = count_lines(SHARED_BRAIN)
-    archive = count_lines(SHARED_BRAIN.replace(".jsonl", "-archive.jsonl"))
+    archive = count_lines(archive_path(SHARED_BRAIN))
     run_pages = len(glob.glob(os.path.join(ROOT, "runs", "**", "*.md"), recursive=True))
     bb_pages = len(glob.glob(os.path.join(ROOT, "blackboard", "**", "*.md"), recursive=True))
     pages = run_pages + bb_pages
     mneme = count_json_entries(OSVEC)
     taste = count_json_entries(TASTE_INV)
-    stale_interest = count_stale_interest(SHARED_BRAIN, INTEREST_STALE_DAYS)
+    stale_interest, skipped_malformed = count_stale_interest(SHARED_BRAIN, INTEREST_STALE_DAYS)
 
     # Neural retrieval changes the entries calibration: agents query top-k
     # instead of flat-reading, so the active-file ceiling relaxes to 400.
     embedder = ""
     try:
         with open(OSVEC, encoding="utf-8") as f:
-            embedder = json.load(f).get("embedder", "")
+            stored_index = json.load(f)
+            if isinstance(stored_index, dict):
+                stored_embedder = stored_index.get("embedder", "")
+                if isinstance(stored_embedder, str):
+                    embedder = stored_embedder
     except (OSError, ValueError):
         pass
     neural = embedder.startswith("neural-")
-    # 2026-07-25: flat mode must calibrate shared-brain entries against
-    # SOURCES_CEIL (~100 sources), not PAGES_CEIL (~200 md pages) — the two
-    # dimensions count different things and reusing PAGES_CEIL here silently
-    # halved the reported retrieval-degradation risk in flat (non-neural) mode.
     entries_ceil = ENTRIES_CEIL_NEURAL if neural else SOURCES_CEIL
 
     dims = [
@@ -146,6 +207,7 @@ def main():
                     "run_pages": run_pages, "blackboard_pages": bb_pages,
                     "archive_entries": archive or 0,
                     "stale_interest_gt%dd" % INTEREST_STALE_DAYS: stale_interest,
+                    "skipped_malformed_lines": skipped_malformed,
                     "embedder": embedder or "none"},
         "overall": worst,
         "rule": (("CUTOVER: past even the neural soft ceiling — archive with scripts/brain_archive.py (entries stay searchable) and split md sprawl. "
@@ -167,6 +229,8 @@ def main():
         print(f"\n  context: mneme entries={mneme} · taste-brain nodes={taste} "
               f"· run pages={run_pages} · blackboard pages={bb_pages} "
               f"· archived={archive or 0} · stale interest(>{INTEREST_STALE_DAYS}d)={stale_interest}")
+        if skipped_malformed:
+            print(f"  skipped {skipped_malformed} malformed lines in {os.path.basename(SHARED_BRAIN)}")
         if stale_interest:
             print(f"  archive candidates: python3 scripts/brain_archive.py candidates")
         if worst == "n/a":

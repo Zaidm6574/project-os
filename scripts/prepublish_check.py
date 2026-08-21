@@ -17,6 +17,7 @@ the surface where it matters most. Importing the list means it cannot drift.
 
 Usage:
   python3 scripts/prepublish_check.py [PATH]     # default: repo root
+  python3 scripts/prepublish_check.py --tracked  # only files Git would publish
   python3 scripts/prepublish_check.py --list     # print the patterns in use
 
 Exit codes:
@@ -26,6 +27,7 @@ Exit codes:
      a scanner that silently checks nothing is worse than no scanner at all
 """
 import os
+import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -71,6 +73,40 @@ def iter_files(root):
             yield os.path.join(dirpath, name)
 
 
+def iter_tracked_files(root):
+    """Yield regular, tracked files below ``root``.
+
+    A release check must inspect the candidate payload, not arbitrary local
+    state such as ignored builds, private worktrees, or package caches.  Git's
+    index is the authority for that payload.  Refuse when the target is not a
+    Git worktree rather than quietly broadening the scan.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", root, "ls-files", "-z"],
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"cannot run git for --tracked: {exc}") from None
+    if result.returncode:
+        raise RuntimeError("--tracked requires a Git worktree")
+
+    root_real = os.path.realpath(root)
+    for raw in result.stdout.decode("utf-8", "surrogateescape").split("\0"):
+        if not raw:
+            continue
+        path = os.path.join(root, raw)
+        real = os.path.realpath(path)
+        try:
+            if os.path.commonpath((root_real, real)) != root_real:
+                continue
+        except ValueError:
+            continue
+        if os.path.isfile(path) and not path.lower().endswith(SKIP_SUFFIXES):
+            yield path
+
+
 def main():
     args = [a for a in sys.argv[1:]]
     patterns = load_patterns()
@@ -80,9 +116,24 @@ def main():
             print(getattr(p, "pattern", p))
         return 0
 
+    tracked = "--tracked" in args
+    if tracked:
+        args.remove("--tracked")
+    if len(args) > 1:
+        print("prepublish_check: expected at most one path", file=sys.stderr)
+        return 2
+
     target = args[0] if args else ROOT
     if not os.path.exists(target):
         print("prepublish_check: no such path: %s" % target, file=sys.stderr)
+        return 2
+    target = os.path.abspath(target)
+
+    try:
+        files = iter_tracked_files(target) if tracked else iter_files(target)
+        files = list(files)
+    except RuntimeError as exc:
+        print("prepublish_check: %s" % exc, file=sys.stderr)
         return 2
 
     # Two tiers, because they need different amounts of your attention.
@@ -102,7 +153,7 @@ def main():
     generic = [p for p in patterns
                if "api[_-]?key" in getattr(p, "pattern", "")]
 
-    for path in iter_files(target):
+    for path in files:
         try:
             with open(path, encoding="utf-8") as fh:
                 lines = fh.readlines()

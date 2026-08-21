@@ -175,6 +175,10 @@ class _InProcessLog(unittest.TestCase):
         # The lock is exercised by tests/test_bb_lock_*; here it must not
         # compete for the process-wide open()/os.fdopen patches below.
         self.calls = []
+        real_acquire = self.nightly.bb_lock.acquire
+        real_release = self.nightly.bb_lock.release
+        self.addCleanup(setattr, self.nightly.bb_lock, "acquire", real_acquire)
+        self.addCleanup(setattr, self.nightly.bb_lock, "release", real_release)
         self.nightly.bb_lock.acquire = lambda *a, **k: self.calls.append("acquire") or True
         self.nightly.bb_lock.release = lambda *a, **k: self.calls.append("release")
 

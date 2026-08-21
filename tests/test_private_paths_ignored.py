@@ -129,7 +129,12 @@ class PrivateWritePathsAreIgnored(unittest.TestCase):
             "memory/store/project.sidecar.json",
             "addons/full-engine/memory/store/project.sidecar.json",
             "addons/full-engine/memory/store/index.tvim",
+            "runs/closeout.md",
+            "some/deeply/nested/runs/closeout.md",
             "some/deeply/nested/path/shared-brain.jsonl",
+            "addons/full-engine/runs/demo/00-project-goal.md",
+            "memory/mneme_index.json.build.lock",
+            "addons/full-engine/memory/mneme_index.json.build.lock",
             "code-graph.json",
         ):
             with self.subTest(path=rel):
@@ -141,6 +146,7 @@ class PrivateWritePathsAreIgnored(unittest.TestCase):
             "addons/full-engine/brain/brain.py",
             "addons/full-engine/brain/README.md",
             "addons/full-engine/memory/osvec_adapter.py",
+            "addons/full-engine/runs/INDEX.md",
             "memory/code_graph.py",
             "AGENTS.md",
         ):

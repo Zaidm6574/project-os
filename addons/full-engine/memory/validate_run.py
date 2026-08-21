@@ -24,13 +24,22 @@ Usage:
 Standard library only. No network access.
 """
 import argparse
+import decimal
+import hashlib
 import json
 import os
 import re
+import stat
 import sys
 
 MARK_START = "<!-- ACTUALS:START -->"
 MARK_END = "<!-- ACTUALS:END -->"
+OSVEC_SIDECAR_SCHEMA = "osvec-sidecar/v2"
+OSVEC_MANIFEST_SCHEMA = "osvec-manifest/v1"
+OSVEC_VALID_TYPES = {
+    "user-preference", "project-pattern", "research-finding",
+    "decision", "risk", "agent-packet", "lesson",
+}
 
 
 def _read(path):
@@ -41,61 +50,104 @@ def _read(path):
         return None
 
 
+def _unfenced_lines(text):
+    """Yield Markdown lines outside backtick/tilde fenced code blocks."""
+    fence_char = None
+    fence_len = 0
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if fence_char is not None:
+            if re.match(
+                r"^%s{%d,}\s*$" % (re.escape(fence_char), fence_len),
+                stripped,
+            ):
+                fence_char = None
+                fence_len = 0
+            continue
+        match = re.match(r"^(`{3,}|~{3,})", stripped)
+        if match:
+            marker = match.group(1)
+            fence_char = marker[0]
+            fence_len = len(marker)
+            continue
+        yield line
+
+
 def _dod_no_tbd(goal_text):
-    """The Definition of Done block must contain no 'TBD'."""
+    """The Definition of Done must contain checkboxes and all must be checked."""
     if goal_text is None:
         return False
-    lines = goal_text.splitlines()
     in_dod = False
     saw_item = False
-    for line in lines:
+    for line in _unfenced_lines(goal_text):
         s = line.strip()
-        if s.startswith("## Definition of Done"):
+        if re.fullmatch(
+            r"##[ \t]+definition of done(?:[ \t]+#+)?",
+            s,
+            flags=re.IGNORECASE,
+        ):
             in_dod = True
             continue
-        if in_dod and s.startswith("## "):
+        if in_dod and re.match(r"^#{1,2}[ \t]+", s):
             break
-        if in_dod and s.startswith("- ["):
+        match = re.match(r"^[-*+]\s+\[([^]]*)\]\s*(.*)$", s) if in_dod else None
+        if match:
             saw_item = True
-            if "TBD" in s:
+            item = match.group(2)
+            if (
+                match.group(1).casefold() != "x"
+                or _placeholder_prefixed(item)
+                or re.search(r"\b(?:tbd|todo)\b", item, flags=re.IGNORECASE)
+            ):
                 return False
     return saw_item
 
 
 def _tier_locked(goal_text):
-    """True only when a real `Locked:` field says so.
-
-    This used to be `"locked" in low and "tier" in low`, which passes on any
-    prose containing both words anywhere in the file -- "the door is locked"
-    plus "beta tier" satisfied a run-closure gate. Read the field the roster
-    actually defines (`Locked: yes`) instead of scanning for vocabulary
-    (audit 2026-07-25).
-    """
     if goal_text is None:
         return False
-    # Collect EVERY Locked: field; do not return on the first. A goal doc that
-    # records rejected options ("### Option B (rejected) / Locked: yes") ABOVE
-    # the real "## Current Execution Level / Locked: no" made first-match-wins
-    # report a locked tier that was not locked (adversarial verify 2026-07-25).
-    values = []
-    for line in goal_text.splitlines():
-        m = re.match(r"\s*(?:[-*]\s*)?\**\s*Locked\s*\**\s*:\s*(.+?)\s*$", line, re.I)
-        if m:
-            values.append(m.group(1).strip().strip("*`").lower())
-    if not values:
-        return False
-    affirmative = {"yes", "y", "true", "locked", "1"}
-    # Fail closed: one non-affirmative value anywhere means the tier is not
-    # cleanly locked, whatever another section of the same document claims.
-    return all(v in affirmative for v in values)
+    tiers = []
+    locks = []
+    for line in _unfenced_lines(goal_text):
+        stripped = line.strip()
+        tier = re.fullmatch(
+            r"(?:[-*+]\s*)?(?:\*\*)?\s*(?:chosen\s+)?tier\s*"
+            r"(?:\*\*)?\s*:\s*(.+?)\s*",
+            stripped,
+            flags=re.IGNORECASE,
+        )
+        lock = re.fullmatch(
+            r"(?:[-*+]\s*)?(?:\*\*)?\s*locked\s*(?:\*\*)?\s*"
+            r":\s*(.+?)\s*",
+            stripped,
+            flags=re.IGNORECASE,
+        )
+        if tier:
+            tiers.append(tier.group(1).casefold())
+        elif lock:
+            locks.append(lock.group(1).casefold())
+    return (
+        len(tiers) == 1
+        and bool(re.fullmatch(
+            r"(?:solo(?: agent loop)?|mini(?: swarm)?|full(?: swarm)?)(?:\s+\([^()\r\n]+\))?",
+            tiers[0],
+        ))
+        and len(locks) == 1
+        and locks[0] in ("yes", "true")
+    )
 
 
 def _actuals_populated(cost_text):
     if cost_text is None:
         return False
-    if MARK_START not in cost_text or MARK_END not in cost_text:
+    evidence_text = "\n".join(_unfenced_lines(cost_text))
+    if evidence_text.count(MARK_START) != 1 or evidence_text.count(MARK_END) != 1:
         return False
-    block = cost_text.split(MARK_START)[1].split(MARK_END)[0]
+    start = evidence_text.find(MARK_START)
+    end = evidence_text.find(MARK_END)
+    if start >= end:
+        return False
+    block = evidence_text[start + len(MARK_START):end]
     for line in block.splitlines():
         s = line.strip()
         if not s.startswith("|"):
@@ -103,10 +155,24 @@ def _actuals_populated(cost_text):
         if s.lower().startswith("| model") or set(s) <= set("|-: "):
             continue
         cells = [c.strip() for c in s.strip("|").split("|")]
-        # Measured column is index 2; populated means it has a number / $.
-        if len(cells) >= 3 and cells[2] not in ("—", "", "-"):
+        if len(cells) >= 3 and _finite_nonnegative_amount(cells[2]):
             return True
     return False
+
+
+def _finite_nonnegative_amount(value):
+    text = value.strip()
+    if text.startswith("**") and text.endswith("**") and len(text) >= 4:
+        text = text[2:-2].strip()
+    if text.startswith("$"):
+        text = text[1:].strip()
+    if not re.fullmatch(r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?", text):
+        return False
+    try:
+        amount = decimal.Decimal(text.replace(",", ""))
+    except decimal.InvalidOperation:
+        return False
+    return amount.is_finite() and amount >= 0
 
 
 TIER_FIELD = re.compile(r"\s*(?:[-*]\s*)?\**\s*Tier\s*\**\s*:\s*(.+?)\s*$", re.I)
@@ -124,7 +190,7 @@ def _is_full_swarm(goal_text):
     """
     if not goal_text:
         return False
-    for line in goal_text.splitlines():
+    for line in _unfenced_lines(goal_text):
         m = TIER_FIELD.match(line)
         if m and re.search(r"\bfull\s*swarm\b", m.group(1), re.I):
             return True
@@ -165,89 +231,189 @@ def _has_packets(run_dir, goal_text=None):
         goal_text = _read(os.path.join(run_dir, "00-project-goal.md"))
     require_approved = _is_full_swarm(goal_text)
     pkt = os.path.join(run_dir, "packets")
-    if os.path.isdir(pkt):
-        for name in os.listdir(pkt):
-            if name.startswith(".") or name == "README.md":
-                continue
-            if not require_approved:
-                return True
-            if _packet_is_approved(_read(os.path.join(pkt, name)) or ""):
-                return True
+    resolved_run = os.path.realpath(run_dir)
+    if os.path.lexists(pkt):
+        if (
+            os.path.islink(pkt)
+            or not os.path.isdir(pkt)
+            or os.path.realpath(pkt) != os.path.join(resolved_run, "packets")
+        ):
+            return False
+        try:
+            with os.scandir(pkt) as entries:
+                for entry in entries:
+                    if (
+                        entry.name.startswith(".")
+                        or entry.name == "README.md"
+                        or not entry.is_file(follow_symlinks=False)
+                    ):
+                        continue
+                    if not require_approved:
+                        return True
+                    if _packet_is_approved(_read(entry.path) or ""):
+                        return True
+        except OSError:
+            return False
     if require_approved:
         # The waiver is the obvious way around the gate, so it must not open
         # for the one tier the gate exists for: a Full Swarm run is by
         # definition not "a single-agent loop with no subagents".
         return False
     # explicit solo-run waiver in any run file
-    for name in os.listdir(run_dir) if os.path.isdir(run_dir) else []:
-        if name.endswith(".md"):
-            t = _read(os.path.join(run_dir, name)) or ""
-            if "no-packets: solo run" in t:
-                return True
+    try:
+        entries = os.scandir(run_dir)
+    except OSError:
+        return False
+    with entries:
+        for entry in entries:
+            if entry.name.endswith(".md") and entry.is_file(follow_symlinks=False):
+                t = _read(entry.path) or ""
+                if any("no-packets: solo run" in line for line in _unfenced_lines(t)):
+                    return True
     return False
-
-
-BULLET_ROW = re.compile(r"^\s*[-*]\s+\S")
-TABLE_SEPARATOR = re.compile(r"^\s*\|[\s:|-]*\|?\s*$")
-
-
-def _manifest_entry_count(body):
-    """Count real manifest entries: bullets, and table rows past the header.
-
-    A single regex was not enough. `| path | what |` followed by the alignment
-    separator `| :--- | ---: |` and NO data rows still matched, because the
-    HEADER row itself looks like a row -- an empty manifest passed the gate
-    (adversarial verify 2026-07-25). Tables need explicit header/separator
-    handling, so count instead of pattern-match.
-    """
-    entries = 0
-    seen_table_header = False
-    for line in body.splitlines():
-        s = line.strip()
-        if BULLET_ROW.match(s):
-            entries += 1
-            continue
-        if not s.startswith("|"):
-            continue
-        if TABLE_SEPARATOR.match(s):
-            continue
-        if not seen_table_header:
-            seen_table_header = True  # first non-separator table row is the header
-            continue
-        cells = [c.strip() for c in s.strip("|").split("|")]
-        if any(c and c not in ("—", "-", "n/a", "tbd") for c in cells):
-            entries += 1
-    return entries
-
-
-NO_MANIFEST = re.compile(
-    r"\b(no|none|not|never|without|missing|absent|omitted|skipped|n/?a)\b"
-    r"[^.\n]{0,40}\bmanifest\b"
-    r"|\bmanifest\b[^.\n]{0,40}\b(was not|were not|isn't|is not|wasn't|not produced|"
-    r"not written|omitted|skipped|deferred|pending|tbd|n/?a)\b",
-    re.I,
-)
 
 
 def _has_manifest(run_dir):
-    """A manifest must have entries -- not merely the word 'manifest'.
-
-    This used to return True if any .md in the run contained the substring
-    "manifest", so a delivery report reading "No artifact manifest was produced"
-    CLOSED the run it should have blocked. Require the manifest file itself and
-    at least one list/table row, and refuse when the text explicitly denies one
-    (audit 2026-07-25).
-    """
     for name in ("14-artifact-manifest.md", "13-delivery-report.md"):
         t = _read(os.path.join(run_dir, name))
-        if not t or "manifest" not in t.lower():
+        if not t:
             continue
-        if NO_MANIFEST.search(t):
-            continue
-        body = t.lower().split("manifest", 1)[1]
-        if _manifest_entry_count(body) > 0:
-            return True
+        in_manifest = name == "14-artifact-manifest.md"
+        manifest_level = None
+        in_current = False
+        for line in _unfenced_lines(t):
+            stripped = line.strip()
+            heading = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+            if not in_manifest:
+                if heading and heading.group(2).strip().casefold() == "artifact manifest":
+                    in_manifest = True
+                    manifest_level = len(heading.group(1))
+                continue
+            if (
+                manifest_level is not None
+                and heading
+                and len(heading.group(1)) <= manifest_level
+                and heading.group(2).strip().casefold() != "artifact manifest"
+            ):
+                break
+            if heading and heading.group(2).strip().casefold() == "current artifacts":
+                in_current = True
+                continue
+            if in_current and heading:
+                in_current = False
+            if in_current:
+                bullet = re.match(r"^[-*+]\s+(.+)$", stripped)
+                if bullet and _substantive_manifest_value(bullet.group(1)):
+                    return True
+            bullet = re.match(r"^[-*+]\s+(.+)$", stripped)
+            if (bullet and _substantive_manifest_value(bullet.group(1))
+                    and not _manifest_denial(bullet.group(1))):
+                return True
+            if not stripped.startswith("|") or set(stripped) <= set("|-: "):
+                continue
+            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            if len(cells) >= 3 and cells[2].casefold() == "current":
+                if _substantive_manifest_value(cells[0], reject_header=True):
+                    return True
     return False
+
+
+def _substantive_manifest_value(value, reject_header=False):
+    text = value.strip()
+    checkbox = re.match(r"^\[([^]]*)\]\s*(.*)$", text)
+    if checkbox:
+        if checkbox.group(1).casefold() != "x":
+            return False
+        text = checkbox.group(2)
+    normalized = text.strip().strip("`*_ ")
+    if reject_header and normalized.casefold() in {
+        "artifact", "artifacts", "file", "name", "output", "path"
+    }:
+        return False
+    return not _placeholder_prefixed(normalized)
+
+
+def _manifest_denial(value):
+    text = value.casefold()
+    return bool(re.search(
+        r"\b(?:no|none|not|never|without|missing|absent|omitted|skipped)\b"
+        r"[^.\n]{0,40}\bmanifest\b"
+        r"|\bmanifest\b[^.\n]{0,40}\b(?:was not|were not|isn't|is not|"
+        r"wasn't|not produced|not written|omitted|skipped|deferred|pending|tbd)\b",
+        text,
+    ))
+
+
+def _placeholder_prefixed(value):
+    text = value.strip().strip("`*_ ").casefold()
+    if not text:
+        return True
+    if re.match(r"^\(?(?:tbd|todo|n\s*/\s*a|none|pending)\)?(?:$|[\s:;,.!?—-])", text):
+        return True
+    return bool(re.match(r"^[-—_.?]+(?:$|\s+)", text))
+
+
+def _loop_closeout_complete(text):
+    """Require a substantive, explicitly CLOSED lifecycle receipt."""
+    if text is None:
+        return False
+    sections = {}
+    section_counts = {}
+    current = None
+    preamble = []
+    for line in _unfenced_lines(text):
+        heading = re.match(r"^##\s+(.+?)\s*$", line.strip())
+        if heading:
+            current = heading.group(1).strip().casefold()
+            section_counts[current] = section_counts.get(current, 0) + 1
+            sections.setdefault(current, [])
+        elif current is None:
+            preamble.append(line)
+        else:
+            sections[current].append(line)
+
+    metadata = {"loop id": [], "date": [], "owner": [], "agent": []}
+    for line in preamble:
+        match = re.match(
+            r"^(Loop ID|Date|Owner|Agent):\s*(.*?)\s*$",
+            line.strip(), flags=re.IGNORECASE,
+        )
+        if match:
+            metadata[match.group(1).casefold()].append(
+                match.group(2).strip().strip("`*_ ")
+            )
+    if any(
+        len(values) != 1 or _placeholder_prefixed(values[0])
+        or re.search(r"\b(?:tbd|todo|yyyy|__+)\b", values[0], flags=re.IGNORECASE)
+        for values in metadata.values()
+    ):
+        return False
+
+    required = (
+        "objective", "scope proof", "source packet", "verified evidence",
+        "completed", "open work", "blocker / dependency", "next action",
+        "disposition", "close condition", "memory harvest", "external effects",
+        "final artifact links", "updated",
+    )
+    if any(name not in sections or section_counts.get(name) != 1 for name in required):
+        return False
+    for name in required:
+        body = "\n".join(sections[name]).strip()
+        if not body or re.search(r"\b(?:tbd|todo)\b", body, flags=re.IGNORECASE):
+            return False
+    artifact_lines = [
+        line.strip() for line in sections["final artifact links"] if line.strip()
+    ]
+    if not artifact_lines or any(
+        _placeholder_prefixed(re.sub(r"^[-*+]\s+", "", line))
+        for line in artifact_lines
+    ):
+        return False
+    dispositions = [
+        line.strip().strip("`*_ ").upper()
+        for line in sections["disposition"] if line.strip()
+    ]
+    return dispositions == ["CLOSED"]
 
 
 def _nonempty_string(value):
@@ -352,6 +518,9 @@ def validate(run_dir):
         ("Actuals populated (not placeholder)", _actuals_populated(cost_text)),
         (packet_label, _has_packets(run_dir, goal_text)),
         ("Artifact manifest present", _has_manifest(run_dir)),
+        ("Loop closeout receipt complete", _loop_closeout_complete(
+            _read(os.path.join(run_dir, "23-loop-closeout.md"))
+        )),
         ("Graph/memory artifact present", _has_graph_or_memory(run_dir)),
     ]
     ok = all(passed for _, passed in checks)
@@ -376,15 +545,23 @@ def _good_run(d, with_memory=True):
            "## Actuals\n%s\n| Model | Est $ | Measured $ | Variance |\n"
            "|---|---|---|---|\n| main loop (opus) | — | $0.0175 | — |\n%s\n"
            % (MARK_START, MARK_END))
-    # The manifest needs a real ROW. This fixture used to be a bare table
-    # header (`| path | what | where |` and nothing under it), which the old
-    # substring check happily accepted -- the module's own example of a "good
-    # run" modelled an EMPTY manifest as closable (audit 2026-07-25).
-    _write(os.path.join(d, "13-delivery-report.md"),
-           "## Artifact Manifest\n| path | what | where |\n|---|---|---|\n"
-           "| site/index.html | landing page | runs/selftest/ |\n\n"
-           "Lessons exported to brain/shared-brain.jsonl; "
-           "GraphOS rebuilt at graphify-out/graph.json.\n")
+    _write(os.path.join(d, "14-artifact-manifest.md"),
+           "# Artifact Manifest\n\n"
+           "| Artifact | Type | Status | Owner | Verification | Notes |\n"
+           "|---|---|---|---|---|---|\n"
+           "| outputs/selftest.txt | Text | Current | selftest | read | verified |\n")
+    _write(os.path.join(d, "23-loop-closeout.md"),
+           "# Project OS Loop Closeout\n\nLoop ID: `L-selftest`\n"
+           "Date: 2026-07-29\nOwner: selftest\nAgent: validate-run\n\n"
+           "## Objective\nVerify closure.\n\n## Scope Proof\nScratch scope.\n\n"
+           "## Source Packet\nSelftest fixture.\n\n## Verified Evidence\n- Selftest.\n\n"
+           "## Completed\n- Validation.\n\n## Open Work\n- None.\n\n"
+           "## Blocker / Dependency\nNone.\n\n## Next Action\nRetain receipt.\n\n"
+           "## Disposition\nCLOSED\n\n## Close Condition\nChecks passed.\n\n"
+           "## Memory Harvest\nReviewed; no promotion.\n\n"
+           "## External Effects\nNone.\n\n"
+           "## Final Artifact Links\n- outputs/selftest.txt\n\n"
+           "## Updated\n2026-07-29 by selftest.\n")
     if with_memory:
         project = os.path.dirname(os.path.dirname(os.path.abspath(d)))
         brain = os.path.join(project, "brain")

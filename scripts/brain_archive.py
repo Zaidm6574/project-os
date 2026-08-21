@@ -23,213 +23,79 @@ import argparse
 import datetime as dt
 import json
 import os
+import pathlib
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bb_lock
+import brain_paths
 
-HOME = os.path.expanduser("~")
-BRAIN = os.environ.get(
-    "PROJECT_OS_SHARED_BRAIN",
-    os.path.join(HOME, ".project-os", "central-brain", "shared-brain.jsonl"))
-# 2026-07-25: BRAIN.replace(".jsonl", "-archive.jsonl") collapsed ARCHIVE ==
-# BRAIN whenever the configured brain path lacked a .jsonl suffix, so
-# archiving silently deleted entries from the live file. Derive the archive
-# path by appending a suffix instead of relying on a substring replace, and
-# fail closed if it ever still collides with BRAIN.
-ARCHIVE = (BRAIN[: -len(".jsonl")] if BRAIN.endswith(".jsonl") else BRAIN) + "-archive.jsonl"
-assert ARCHIVE != BRAIN, "archive path must never collide with the active brain path"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# An explicit path remains a command-level input so archive can reject a link
+# with a clean no-mutation result.  The default, however, is project-local.
+BRAIN = os.environ.get("PROJECT_OS_SHARED_BRAIN") or str(
+    brain_paths.resolve_shared_brain(ROOT))
 
 
-def _within(real_root, real_path):
-    if real_path == real_root:
-        return True
-    try:
-        return os.path.commonpath([real_root, real_path]) == real_root
-    except ValueError:
-        # Different drives, or an embedded NUL: not provably contained.
-        return False
+def archive_path(brain):
+    p = pathlib.Path(brain)
+    if p.suffix == ".jsonl":
+        return str(p.with_name(p.stem + "-archive.jsonl"))
+    return str(p.with_name(p.name + "-archive.jsonl"))
 
 
-def _escapes_brain_dir(path):
-    """Real target when `path` is a symlink -- ANY symlink.
-
-    This was once a containment check: a link that still resolved inside the
-    brain directory was allowed, on the theory that pointing the brain at a
-    sibling store is a supported layout. An adversary took both halves of that
-    apart (2026-07-26). A link is refused outright now:
-
-      * a link INSIDE the directory is not safe either -- pointing the archive
-        at the brain made the moved entry get appended to the brain and then
-        overwritten by the rewrite, so it survived in NEITHER file while the
-        tool printed "archived 1" and the docstring promised nothing is ever
-        deleted;
-      * `os.path.islink()` cannot see a HARD link, so this check can never be
-        the only guard. The sinks below open with O_NOFOLLOW and verify the
-        FILE DESCRIPTOR they actually hold (st_nlink), which is what closes
-        the hardlink and the swap-after-the-check race.
-
-    A path check alone is advisory: it reports a clear reason before any side
-    effect. It is the fd checks that are load-bearing.
-    """
-    if not os.path.islink(path):
-        return ""
-    return os.path.realpath(path)
+ARCHIVE = archive_path(BRAIN)
 
 
-def _mode_or_private(path):
-    """Permissions of `path`, or 0600 when it does not exist yet.
+class _RawLine:
+    """Malformed / non-object line kept verbatim; a class (not a dict shape)
+    so no legitimate JSON entry can ever collide with the placeholder."""
+    __slots__ = ("line",)
 
-    The brain holds lesson text harvested from every project, so when there is
-    no existing file to copy permissions from we pick the restrictive answer
-    instead of the umask default (0644 on a stock umask 022 account).
-    """
-    try:
-        return stat.S_IMODE(os.stat(path).st_mode)
-    except OSError:
-        return 0o600
+    def __init__(self, line):
+        self.line = line
 
 
-def _copy_backup(src, dest_base):
-    """Copy `src` to `dest_base` (or a numbered sibling) without following links.
-
-    2026-07-26 (audit): the backup name is "<brain>.pre-archive-<stamp>" and
-    the stamp is only second-resolution, so it is guessable; shutil.copy2()
-    FOLLOWS a symlink and truncates, which let a link planted at that name
-    redirect the copy on top of an arbitrary file the user can write.
-    O_CREAT|O_EXCL is what closes that: POSIX requires it to fail with EEXIST
-    when the path already exists, and to fail *even when the path is a
-    symlink*, including a dangling one -- so this never writes through
-    anything that was already there.
-
-    A genuinely taken name (a second archive inside the same second) falls
-    through to a numbered sibling rather than overwriting: this module
-    promises backups are kept, so clobbering one would be its own data loss.
-    The path actually written is returned, and that is the one apply prints.
-    """
-    taken = None
-    for n in range(1, 51):
-        path = dest_base if n == 1 else "%s-%d" % (dest_base, n)
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError as exc:
-            taken = exc
-            continue
-        with os.fdopen(fd, "wb") as out, open(src, "rb") as f:
-            shutil.copyfileobj(f, out)
-        shutil.copystat(src, path)  # what copy2() carried over: mode + times
-        return path
-    raise taken
-
-
-def _atomic_write_preserving_mode(dest, text):
-    """Replace dest's contents atomically, never writing through a planted path.
-
-    2026-07-26 (audit): this rewrite went through a fixed, guessable
-    "<brain>.tmp" name opened with plain open(..., "w"). Anyone able to create
-    a file in the brain directory could pre-plant a symlink there; open()
-    follows it, so the run truncated whatever the link pointed at, and
-    os.replace() -- which does NOT follow links -- then renamed the symlink
-    itself over the brain, leaving the active brain aliased to the file it had
-    just destroyed. Reproduced end-to-end before this fix.
-
-    tempfile.mkstemp() closes the hole, and the property doing the work is
-    O_EXCL, not the unpredictable name: mkstemp opens with O_CREAT|O_EXCL
-    (plus O_NOFOLLOW where the platform has it), and O_CREAT|O_EXCL fails with
-    EEXIST on any pre-existing path, symlinks included. Randomising the name
-    alone would only make pre-planting harder; O_EXCL makes writing through an
-    existing path impossible. os.replace() then swaps the finished file in as
-    one atomic rename, so no reader ever sees a half-written brain.
-
-    Mode is carried across the swap exactly as in
-    addons/full-engine/memory/cost_actuals.py: mkstemp always creates 0600
-    regardless of umask and rename carries the temp file's mode onto the
-    destination, so a naive temp-file rewrite REPLACES the brain's own
-    permissions with whatever the writer happened to create (the old
-    open(..., "w") handed a deliberately 0600 brain back as 0644, publishing
-    every project's lesson text to every other account on the machine). Stat
-    the destination and reproduce what was already there -- we never widen and
-    never narrow. Only when the destination is absent do we choose, and there
-    we choose 0600 rather than cost_actuals's umask default, which is right
-    for a cost report meant to be read by teammates and wrong for the brain.
-
-    dest is NOT resolved. Resolving it re-followed a symlink at write time,
-    which handed the whole guard back: an attacker who swapped the brain for a
-    link AFTER the caller's check still had the rewrite land on the link's
-    target, destroying it and re-aliasing the brain to it (adversary
-    2026-07-26). os.replace() does not follow a symlink -- it replaces the link
-    itself -- so writing to the literal path is both the safe behaviour and the
-    one that keeps an operator's deliberate layout from silently redirecting a
-    rewrite.
-    """
-    real_dest = os.path.abspath(dest)
-    try:
-        dest_stat = os.stat(real_dest)
-    except OSError:
-        dest_stat = None
-
-    fd, tmp_name = tempfile.mkstemp(
-        dir=os.path.dirname(real_dest) or ".",
-        prefix=os.path.basename(real_dest) + ".", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-        if dest_stat is not None:
-            wanted_mode = stat.S_IMODE(dest_stat.st_mode)
-            if hasattr(os, "chown"):
-                # Best-effort: only root can hand a file to another uid, and a
-                # non-root run that merely has write access should still get
-                # the atomic write. It must run BEFORE the chmod -- POSIX has
-                # a non-root chown() clear setuid/setgid, even a same-owner
-                # no-op one, which would undo the mode we just restored.
-                try:
-                    os.chown(tmp_name, dest_stat.st_uid, dest_stat.st_gid)
-                except OSError:
-                    pass
-            # Not best-effort: swallowing this would silently re-introduce the
-            # permission change this function exists to prevent.
-            os.chmod(tmp_name, wanted_mode)
-            final_mode = stat.S_IMODE(os.stat(tmp_name).st_mode)
-            if final_mode != wanted_mode:
-                # chmod() may drop setuid/setgid without privilege. We cannot
-                # restore those, but we refuse to change the mode *quietly*.
-                print("WARNING: could not preserve mode %s on %s; wrote it as %s"
-                      % (oct(wanted_mode), real_dest, oct(final_mode)),
-                      file=sys.stderr)
-        else:
-            os.chmod(tmp_name, 0o600)
-        os.replace(tmp_name, real_dest)
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+def _reject_non_finite(value):
+    raise ValueError(f"non-finite number {value}")
 
 
 def _rows(path):
+    """Returns (rows, skipped). Malformed / non-object lines are kept as
+    _RawLine placeholders (never candidates, rewritten verbatim) so a
+    bad line can't crash or get dropped by an apply rewrite."""
     if not os.path.isfile(path):
-        return []
-    out = []
-    with open(path, encoding="utf-8") as f:
+        return [], 0
+    out, skipped = [], 0
+    with open(path, encoding="utf-8", newline="") as f:
         for line in f:
-            line = line.strip()
-            if not line:
+            if not line.strip():
                 continue
             try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
-                out.append({"_raw": line})
-    return out
+                o = json.loads(line, parse_constant=_reject_non_finite)
+                # JSON accepts exponents such as 1e999 syntactically, but the
+                # decoded float is infinite. Re-encoding with allow_nan=False
+                # catches those overflow-to-infinity values at any depth.
+                json.dumps(o, allow_nan=False)
+            except (json.JSONDecodeError, ValueError):
+                o = None
+            if isinstance(o, dict):
+                out.append(o)
+            else:
+                skipped += 1
+                out.append(_RawLine(line))
+    return out, skipped
 
 
 def _rid(o):
+    if not isinstance(o, dict):
+        return ""
     return o.get("id") or o.get("name") or ""
 
 
@@ -247,7 +113,13 @@ def _entry_age_days(o):
 def _interest_candidates(rows, days):
     out = []
     for o in rows:
-        if (o.get("type") or o.get("kind")) != "interest":
+        if not isinstance(o, dict):
+            continue
+        try:
+            typ = brain_paths.record_type(o)
+        except brain_paths.BrainRecordError:
+            continue
+        if typ != "interest":
             continue
         age = _entry_age_days(o)
         if age is not None and age > days:
@@ -255,9 +127,118 @@ def _interest_candidates(rows, days):
     return out
 
 
+def _copy_backup(src, dest_base):
+    """Create a sibling backup without ever following a planted destination."""
+    taken = None
+    for number in range(1, 51):
+        path = dest_base if number == 1 else "%s-%d" % (dest_base, number)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError as exc:
+            taken = exc
+            continue
+        os.close(fd)
+        if hasattr(bb_lock, "lock_path"):
+            # The fenced runtime keeps the directory ownership boundary while
+            # preserving the existing copy2 seam used by operational backups.
+            shutil.copy2(src, path)
+        else:
+            with open(path, "wb") as out, open(src, "rb") as source:
+                shutil.copyfileobj(source, out)
+            shutil.copystat(src, path)
+        return path
+    raise taken
+
+
+def _atomic_write_preserving_mode(dest, text):
+    """Atomically replace a brain file without following a planted path."""
+    try:
+        dest_stat = os.stat(dest)
+    except OSError:
+        dest_stat = None
+    fd, tmp = tempfile.mkstemp(
+        dir=os.path.dirname(os.path.abspath(dest)) or ".",
+        prefix=os.path.basename(dest) + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, 0o600 if dest_stat is None else stat.S_IMODE(dest_stat.st_mode))
+        os.replace(tmp, dest)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+class _LeaseRenewer:
+    """Keep a bb_lock lease alive and remember if its fencing token is lost."""
+
+    def __init__(self, target, token):
+        self.target = target
+        self.token = token
+        self._stop = threading.Event()
+        self._lost = threading.Event()
+        self._error = None
+        self._started = False
+        self._interval = max(
+            0.01, min(getattr(bb_lock, "STALE_AFTER_SEC", 60.0) / 3.0, 10.0))
+        self._thread = threading.Thread(
+            target=self._run, name="brain-archive-renew", daemon=True)
+
+    def start(self):
+        self._thread.start()
+        self._started = True
+
+    def _mark_lost(self, error=None):
+        self._error = error
+        self._lost.set()
+
+    def _renew(self):
+        # Compatibility seam for callers that supply the documented minimal
+        # acquire/release lock adapter. Real bb_lock always has renew().
+        if not hasattr(bb_lock, "renew"):
+            return True
+        if self._lost.is_set():
+            return False
+        try:
+            owned = bb_lock.renew(self.target, self.token)
+        except Exception as exc:
+            self._mark_lost(exc)
+            return False
+        if not owned:
+            self._mark_lost()
+            return False
+        return True
+
+    def _run(self):
+        while not self._stop.wait(self._interval):
+            if not self._renew():
+                return
+
+    def verify(self):
+        """Synchronously renew/fence immediately before a shared-file mutation."""
+        return self._renew()
+
+    def diagnostic(self):
+        if self._error is not None:
+            return f": {self._error}"
+        return ""
+
+    def stop(self):
+        self._stop.set()
+        if self._started:
+            self._thread.join()
+
+
 def cmd_candidates(args):
-    rows = _rows(BRAIN)
+    rows, skipped = _rows(BRAIN)
     cands = _interest_candidates(rows, args.interest_days)
+    if skipped:
+        print(f"skipped {skipped} malformed lines in {os.path.basename(BRAIN)}")
     if not cands:
         print(f"no interest entries older than {args.interest_days}d "
               f"(active brain: {len(rows)} entries)")
@@ -271,105 +252,175 @@ def cmd_candidates(args):
     return 0
 
 
-def cmd_apply(args):
-    rows = _rows(BRAIN)
-    if args.ids:
-        wanted = set(args.ids)
-        move = [o for o in rows if _rid(o) in wanted]
-        missing = wanted - {_rid(o) for o in move}
-        if missing:
-            print(f"REFUSED: unknown id(s): {sorted(missing)}", file=sys.stderr)
-            return 2
-    else:
-        move = [o for o, _ in _interest_candidates(rows, args.interest_days)]
-    if not move:
-        print("nothing to archive")
-        return 0
-
-    if not bb_lock.acquire(BRAIN, agent="brain-archive", wait=15):
-        print("FAILED: could not lock shared brain", file=sys.stderr)
-        return 1
+def _append_archive(archive_lines, source_mode):
+    """Append under a mode no more permissive than the active brain."""
+    if os.path.islink(ARCHIVE):
+        raise OSError("refusing symlink archive path")
+    permitted_mode = source_mode & 0o666
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(ARCHIVE, flags, permitted_mode)
     try:
-        # Checked INSIDE the lock. It used to run before acquire(), and
-        # acquire() waits up to 15s for a concurrent agent -- an attacker-sized
-        # window to swap the brain for a symlink after the check had passed
-        # (adversary 2026-07-26). Holding the lock first shrinks the window to
-        # the writes themselves, which is why each sink below re-verifies its
-        # own file descriptor rather than trusting this.
-        for label, path in (("shared brain", BRAIN), ("archive", ARCHIVE)):
-            target = _escapes_brain_dir(path)
-            if target:
-                print(f"REFUSED: the {label} path {path} is a symlink -> "
-                      f"{target}; refusing to write through it",
-                      file=sys.stderr)
-                return 2
-        # 2026-07-25: rows/move were computed from a pre-lock read; a
-        # concurrent writer could append between that read and lock
-        # acquisition, and the stale in-memory `keep` snapshot written back
-        # below would silently drop it. Re-read under the lock and re-derive
-        # move/keep from the freshly-locked file.
-        rows = _rows(BRAIN)
+        if os.fstat(fd).st_nlink != 1:
+            raise OSError("refusing hard-linked archive path")
+        current_mode = stat.S_IMODE(os.fstat(fd).st_mode)
+        tightened_mode = current_mode & permitted_mode
+        if tightened_mode != current_mode:
+            os.fchmod(fd, tightened_mode)
+        with os.fdopen(fd, "a", encoding="utf-8", newline="") as f:
+            fd = None
+            f.writelines(archive_lines)
+            f.flush()
+            os.fsync(f.fileno())
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _commit_if_owned(token, tmp, archive_lines, source_mode):
+    """Fence token verification and both shared-file mutations as one step."""
+    if not all(hasattr(bb_lock, name) for name in ("lock_path", "_guard", "read_lock")):
+        try:
+            _append_archive(archive_lines, source_mode)
+            os.replace(tmp, BRAIN)
+            return True
+        except OSError:
+            return False
+    lock_file = bb_lock.lock_path(BRAIN)
+    with bb_lock._guard(lock_file):
+        info = bb_lock.read_lock(lock_file)
+        if info is None or info.get("token") != token:
+            return False
+        # Keep the lease fresh at both ends of the transaction. All ownership
+        # transitions use this same stable guard, so no reaper/new owner can
+        # enter between the token check and active-file replacement.
+        os.utime(lock_file, None)
+        _append_archive(archive_lines, source_mode)
+        os.replace(tmp, BRAIN)
+        os.utime(lock_file, None)
+        return True
+
+
+def _apply_locked(args, lease, token):
+    """Perform archive work while the caller owns and renews the brain lock."""
+    tmp = None
+    try:
+        if os.path.islink(BRAIN) or os.path.islink(ARCHIVE):
+            print("REFUSED: brain or archive path is a symlink", file=sys.stderr)
+            return 2, False
+        rows, skipped = _rows(BRAIN)
+        if skipped:
+            print(f"skipped {skipped} malformed lines in {os.path.basename(BRAIN)} "
+                  "(kept in place, never archived)")
         if args.ids:
+            wanted = set(args.ids)
             move = [o for o in rows if _rid(o) in wanted]
+            missing = wanted - {_rid(o) for o in move}
+            if missing:
+                print(f"REFUSED: unknown id(s): {sorted(missing)}", file=sys.stderr)
+                return 2, False
         else:
             move = [o for o, _ in _interest_candidates(rows, args.interest_days)]
-        # The mode the brain is wearing right now: the archive holds the very
-        # same lesson text, so a brain that is private must not spawn a
-        # world-readable archive on its first append.
-        brain_mode = _mode_or_private(BRAIN)
+        if not move:
+            print("nothing to archive")
+            return 0, False
+
+        source_mode = stat.S_IMODE(os.stat(BRAIN).st_mode)
+        backup_base = BRAIN + ".pre-archive-" + time.strftime("%Y%m%d-%H%M%S")
         try:
-            backup = _copy_backup(
-                BRAIN, BRAIN + ".pre-archive-" + time.strftime("%Y%m%d-%H%M%S"))
-        except FileExistsError:
-            print("REFUSED: every candidate backup name next to the shared "
-                  "brain is already taken; refusing to archive without a "
-                  "backup", file=sys.stderr)
-            return 2
+            backup = _copy_backup(BRAIN, backup_base)
+        except OSError as exc:
+            print("REFUSED: could not safely create brain backup: %s" % exc,
+                  file=sys.stderr)
+            return 2, False
+        if not lease.verify():
+            print("FAILED: brain archive lock lease lost during apply; aborting "
+                  "before archive/active mutation" + lease.diagnostic(),
+                  file=sys.stderr)
+            return 1, False
         move_ids = {id(o) for o in move}
         keep = [o for o in rows if id(o) not in move_ids]
         stamp = dt.date.today().isoformat()
-        archive_existed = os.path.exists(ARCHIVE)
-        # O_NOFOLLOW refuses a symlink at the final component atomically -- no
-        # check-then-open window -- and st_nlink on the OPEN descriptor is the
-        # only way to see a hard link, which os.path.islink() is blind to. A
-        # pre-planted hardlink at the archive name otherwise appended every
-        # archived lesson into an arbitrary file with no race at all
-        # (adversary 2026-07-26).
-        try:
-            fd = os.open(ARCHIVE,
-                         os.O_WRONLY | os.O_CREAT | os.O_APPEND
-                         | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        except OSError as e:
-            print(f"REFUSED: cannot open the archive {ARCHIVE} safely "
-                  f"({e.strerror or e}); refusing to write through it",
+        archive_lines = []
+        for o in move:
+            archived = brain_paths.canonicalize_record(o)
+            archived["archived"] = stamp
+            archive_lines.append(json.dumps(archived, ensure_ascii=False) + "\n")
+        fd, tmp = tempfile.mkstemp(
+            dir=os.path.dirname(os.path.abspath(BRAIN)) or ".",
+            prefix=os.path.basename(BRAIN) + ".", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            for o in keep:
+                if isinstance(o, _RawLine):
+                    f.write(o.line)
+                else:
+                    f.write(json.dumps(o, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        shutil.copystat(BRAIN, tmp)
+        if not lease.verify():
+            print("FAILED: brain archive lock lease lost during apply; aborting "
+                  "before archive/active mutation" + lease.diagnostic(),
                   file=sys.stderr)
-            return 2
-        if os.fstat(fd).st_nlink > 1:
-            os.close(fd)
-            print(f"REFUSED: the archive {ARCHIVE} has more than one hard link;"
-                  f" writing would also write the other name", file=sys.stderr)
-            return 2
-        with os.fdopen(fd, "a", encoding="utf-8") as f:
-            for o in move:
-                o["archived"] = stamp
-                f.write(json.dumps(o, ensure_ascii=False) + "\n")
-        if not archive_existed:
-            # Created just now (0600, umask cannot widen it): match the active
-            # brain instead of the umask default. An archive that already
-            # exists keeps whatever mode its owner chose.
-            os.chmod(ARCHIVE, brain_mode)
-        _atomic_write_preserving_mode(
-            BRAIN,
-            "".join(json.dumps(o, ensure_ascii=False) + "\n" for o in keep))
+            return 1, False
+        if not _commit_if_owned(token, tmp, archive_lines, source_mode):
+            if hasattr(bb_lock, "lock_path"):
+                print("FAILED: brain archive lock lease lost before final commit; "
+                      "active brain left unchanged", file=sys.stderr)
+                return 1, False
+            print("REFUSED: archive commit was not safe; active brain left unchanged",
+                  file=sys.stderr)
+            return 2, False
+        tmp = None
         print(f"archived {len(move)} -> {ARCHIVE}")
         print(f"active brain: {len(rows)} -> {len(keep)} entries (backup: {backup})")
+        return 0, True
     finally:
-        bb_lock.release(BRAIN, agent="brain-archive", force=True)
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
+
+
+def cmd_apply(args):
+    token = bb_lock.acquire(BRAIN, agent="brain-archive", wait=15)
+    if not token:
+        print("FAILED: could not lock shared brain", file=sys.stderr)
+        return 1
+    lease = None
+    release_ok = False
+    try:
+        lease = _LeaseRenewer(BRAIN, token)
+        lease.start()
+        rc, changed = _apply_locked(args, lease, token)
+    finally:
+        try:
+            if lease is not None:
+                lease.stop()
+        finally:
+            release_ok = bb_lock.release(BRAIN, agent="brain-archive", token=token)
+            if not release_ok:
+                print("FAILED: could not release brain archive lock with its "
+                      "fencing token", file=sys.stderr)
+
+    if not release_ok:
+        return 1
+    if rc != 0 or not changed:
+        return rc
 
     r = subprocess.run(
         [sys.executable, os.path.join(ROOT, "memory", "mneme_adapter.py"), "build"],
         capture_output=True, text=True)
-    print((r.stdout + r.stderr).strip().splitlines()[-1] if (r.stdout or r.stderr) else "")
+    output = (r.stdout + r.stderr).strip()
+    if getattr(r, "returncode", 0) != 0:
+        detail = output.splitlines()[-1] if output else "no diagnostic output"
+        print(f"FAILED: archive state updated, but Mneme rebuild failed "
+              f"(exit {r.returncode}): {detail}", file=sys.stderr)
+        return 1
+    if output:
+        print(output.splitlines()[-1])
     return 0
 
 

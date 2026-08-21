@@ -1,7 +1,8 @@
 # 22 — Automation Log
 
 Written automatically by `scripts/os_nightly.py` — the unattended daily heartbeat
-(macOS: a launchd agent; Linux: a cron entry). Do not edit by hand.
+(macOS: a launchd agent; Linux: a cron entry). Entries are appended below the
+marker line at the bottom; anything you write above the marker is preserved.
 
 Each entry (newest first, capped at 30) reports:
 
@@ -33,4 +34,6 @@ Then: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.projectos.nigh
 
 ---
 
-(entries appear below once the heartbeat runs)
+(entries appear below the marker once the heartbeat runs)
+
+<!-- os-nightly entries below — manual notes above this line are preserved -->

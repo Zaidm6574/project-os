@@ -13,12 +13,20 @@ stdlib-only. The installer copies all of them into an installed project; the
 optional full-engine add-on adds more alongside them.
 
 - `mneme_adapter.py` — the memory index. `build` embeds the shared brain
-  (`shared-brain.jsonl` plus its `shared-brain-archive.jsonl` tier) and the
-  canonical-goal section of every `runs/*/00-project-goal.md`; `query "..."`
-  searches them. It does **not** index the markdown in this folder — the notes
+  (`shared-brain.jsonl` plus its `shared-brain-archive.jsonl` tier), the
+  canonical-goal section of every `runs/*/00-project-goal.md`, and meaningful
+  H2 sections from `blackboard/*.md`; `query "..."` searches them. It does
+  **not** index the markdown in this folder — the notes
   and rules below are for you to read, not for the index. Uses nomic-embed-text
   via a local Ollama when one is running, and a lexical embedder otherwise; it
-  refuses to query an index built with the other embedder.
+  refuses to query an index built with the other embedder. Configure
+  `MNEME_EMBEDDER=auto|neural|lexical` (default `auto`); `OSVEC_EMBEDDER` is
+  the legacy alias. Ollama uses `MNEME_OLLAMA_URL` (default
+  `http://127.0.0.1:11434`), `MNEME_NEURAL_MODEL` (default
+  `nomic-embed-text`), `MNEME_OLLAMA_TIMEOUT` (0.1–600 seconds, default 120),
+  and `MNEME_OLLAMA_BATCH_SIZE` (1–256, default 64). Each has an `OSVEC_*`
+  legacy alias. Invalid values fail with an actionable message instead of
+  silently changing retrieval mode.
 - `code_graph.py` — a graph of the CURRENT SOURCE CODE (modules, functions,
   classes, tests and the imports/calls/defines edges between them), each node
   fingerprinted with sha256 so staleness is provable. `build` writes
@@ -31,9 +39,10 @@ optional full-engine add-on adds more alongside them.
   same nodes and edges alongside it at `graphify-out/graph.mmd`. Run it with
   `--root blackboard` or `--root runs/<slug>`.
 - `osvec_adapter.py` — the full-engine vector store (`memory/store/`). Unlike
-  the rest of this folder it needs numpy, so `python3 memory/osvec_adapter.py
-  selftest` is the only thing that proves it works; a capability report saying
-  the file is present has checked nothing but the filename.
+  the rest of this folder its data commands need optional numpy, so
+  `python3 memory/osvec_adapter.py selftest` is the only thing that proves it
+  works; `--help` remains available on a stdlib-only install and a capability
+  report saying the file is present has checked nothing but the filename.
 - `context_budget.py` — kickoff preflight for context and cost. Reads the newest
   session transcript and returns OK / WATCH / CHECKPOINT / UNKNOWN as its exit
   code; UNKNOWN (no transcript found) is a fail-closed verdict, not a pass.

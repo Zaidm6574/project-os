@@ -182,8 +182,8 @@ class DocumentedExampleIsReadableByCanon(unittest.TestCase):
                     "typo. Records need type == 'lesson'." % (record,),
                 )
 
-    def test_control_a_record_canon_cannot_read_still_fails_these_probes(self) -> None:
-        """Without this, both probes above would pass on ANY appended record."""
+    def test_legacy_record_is_normalized_before_append(self) -> None:
+        """Compatibility input must become a record every canon reader reads."""
         project = Path(self.tmp.name) / "control"
         run_dir = project / "runs" / "demo"
         run_dir.mkdir(parents=True)
@@ -195,16 +195,14 @@ class DocumentedExampleIsReadableByCanon(unittest.TestCase):
         proc = self._append({"kind": "lesson", "text": "the old doc shape"}, project)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
-        self.assertFalse(
+        self.assertTrue(
             self.validator._has_graph_or_memory(str(run_dir)),
-            "validate_run started ACCEPTING a record with no id/type; the "
-            "probes above no longer discriminate the doc shape",
+            "brain_append failed to normalize a legacy record before writing it",
         )
         lessons, skipped = self.central.lessons_for_central(project, "demo")
         self.assertEqual(
-            (len(lessons), skipped), (1, 1),
-            "central_brain stopped dropping a 'kind'-shaped record; the probes "
-            "above no longer discriminate the doc shape",
+            (len(lessons), skipped), (2, 0),
+            "brain_append wrote a legacy row instead of canonicalizing it",
         )
 
 

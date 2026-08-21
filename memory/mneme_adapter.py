@@ -14,19 +14,97 @@ Usage:
   python3 memory/mneme_adapter.py query "your text here" [k]
   python3 memory/mneme_adapter.py stats
 """
-import os, re, json, glob, sys, math, hashlib, tempfile
+import os, re, json, glob, sys, math, hashlib, tempfile, fcntl
 import urllib.request
+from contextlib import contextmanager
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project-os/
 HOME = os.path.expanduser("~")
 INDEX = os.environ.get("MNEME_INDEX", os.path.join(ROOT, "memory", "mneme_index.json"))
-SHARED_BRAIN = os.environ.get(
-    "PROJECT_OS_SHARED_BRAIN",
-    os.path.join(HOME, ".project-os", "central-brain", "shared-brain.jsonl"))
+# A full project resolves to its project-local brain.  Standalone copies of this
+# adapter (the documented lexical fallback) have no scripts/ directory, so keep
+# the legacy environment-derived location available rather than failing at
+# import time.  Reads still fail loudly if that selected source is corrupt.
+SCRIPTS = os.path.join(ROOT, "scripts")
+if os.path.isfile(os.path.join(SCRIPTS, "brain_paths.py")):
+    if SCRIPTS not in sys.path:
+        sys.path.insert(0, SCRIPTS)
+    import brain_paths
+    SHARED_BRAIN = str(brain_paths.resolve_shared_brain(ROOT))
+else:
+    SHARED_BRAIN = os.environ.get(
+        "PROJECT_OS_SHARED_BRAIN",
+        os.path.join(HOME, ".project-os", "central-brain", "shared-brain.jsonl"))
 DIM = 256
 OLLAMA_URL = os.environ.get("MNEME_OLLAMA_URL") or os.environ.get("OSVEC_OLLAMA_URL", "http://127.0.0.1:11434")
 NEURAL_MODEL = os.environ.get("MNEME_NEURAL_MODEL") or os.environ.get("OSVEC_NEURAL_MODEL", "nomic-embed-text")
 EMBEDDER_PREF = os.environ.get("MNEME_EMBEDDER") or os.environ.get("OSVEC_EMBEDDER", "auto")  # auto | neural | lexical
+
+# The MNEME_* names are canonical; OSVEC_* aliases preserve compatibility with
+# the older adapter. Keep network work bounded so a dead local Ollama cannot
+# hold a build forever, and so an accidental huge batch does not exhaust RAM.
+OLLAMA_TIMEOUT_DEFAULT = 120.0
+OLLAMA_TIMEOUT_MIN = 0.1
+OLLAMA_TIMEOUT_MAX = 600.0
+OLLAMA_BATCH_SIZE_DEFAULT = 64
+OLLAMA_BATCH_SIZE_MIN = 1
+OLLAMA_BATCH_SIZE_MAX = 256
+VALID_EMBEDDER_PREFS = frozenset(("auto", "neural", "lexical"))
+
+
+def _configured_preference():
+    value = str(EMBEDDER_PREF or "").strip().lower()
+    if value not in VALID_EMBEDDER_PREFS:
+        raise ValueError(
+            "MNEME_EMBEDDER/OSVEC_EMBEDDER must be one of auto, neural, lexical; "
+            "got %r" % value
+        )
+    return value
+
+
+def _bounded_float(primary, alias, default, minimum, maximum):
+    raw = os.environ.get(primary) or os.environ.get(alias)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError("%s/%s must be a number" % (primary, alias)) from None
+    if not math.isfinite(value) or not minimum <= value <= maximum:
+        raise ValueError(
+            "%s/%s must be between %s and %s seconds"
+            % (primary, alias, minimum, maximum)
+        )
+    return value
+
+
+def _bounded_int(primary, alias, default, minimum, maximum):
+    raw = os.environ.get(primary) or os.environ.get(alias)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError("%s/%s must be an integer" % (primary, alias)) from None
+    if not minimum <= value <= maximum:
+        raise ValueError(
+            "%s/%s must be between %s and %s"
+            % (primary, alias, minimum, maximum)
+        )
+    return value
+
+
+def ollama_timeout():
+    return _bounded_float(
+        "MNEME_OLLAMA_TIMEOUT", "OSVEC_OLLAMA_TIMEOUT",
+        OLLAMA_TIMEOUT_DEFAULT, OLLAMA_TIMEOUT_MIN, OLLAMA_TIMEOUT_MAX)
+
+
+def ollama_batch_size():
+    return _bounded_int(
+        "MNEME_OLLAMA_BATCH_SIZE", "OSVEC_OLLAMA_BATCH_SIZE",
+        OLLAMA_BATCH_SIZE_DEFAULT, OLLAMA_BATCH_SIZE_MIN,
+        OLLAMA_BATCH_SIZE_MAX)
 
 
 def _tokens(text):
@@ -59,13 +137,15 @@ def embed_neural_batch(texts):
     """Embed via local Ollama /api/embed (batched). Raises on any failure —
     callers decide whether to fall back to lexical."""
     out = []
-    for i in range(0, len(texts), 64):
-        chunk = texts[i:i + 64]
+    batch_size = ollama_batch_size()
+    timeout = ollama_timeout()
+    for i in range(0, len(texts), batch_size):
+        chunk = texts[i:i + batch_size]
         req = urllib.request.Request(
             OLLAMA_URL + "/api/embed",
             data=json.dumps({"model": NEURAL_MODEL, "input": chunk}).encode(),
             headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=120) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             resp = json.load(r)
         embs = resp.get("embeddings")
         if not embs or len(embs) != len(chunk):
@@ -78,15 +158,20 @@ def neural_available():
     try:
         embed_neural_batch(["ping"])
         return True
+    except ValueError:
+        # Configuration errors are operator errors, not an unavailable server;
+        # auto mode must not silently downgrade a misspelled setting.
+        raise
     except Exception:
         return False
 
 
 def pick_embedder():
-    if EMBEDDER_PREF == "lexical":
+    preference = _configured_preference()
+    if preference == "lexical":
         return "lexical-hash-v1"
     name = "neural-" + NEURAL_MODEL
-    if EMBEDDER_PREF == "neural":
+    if preference == "neural":
         if not neural_available():
             sys.exit(f"[mneme] MNEME_EMBEDDER=neural but Ollama/{NEURAL_MODEL} "
                      f"unavailable at {OLLAMA_URL} (try: ollama pull {NEURAL_MODEL})")
@@ -135,13 +220,72 @@ def _brain_text(o):
     return ""
 
 
+def _archive_path(brain):
+    """Archive sibling of the brain file; only the final path component changes."""
+    directory, name = os.path.split(brain)
+    if name.endswith(".jsonl"):
+        name = name[:-len(".jsonl")] + "-archive.jsonl"
+    else:
+        name = name + "-archive.jsonl"
+    return os.path.join(directory, name)
+
+
+_PLACEHOLDER_TOKENS = frozenset({"tbd", "n/a", "na", "-", "--", "---", "..", "..."})
+
+
+def _is_placeholder(text):
+    text = re.sub(r"<!--.*?-->", " ", text or "", flags=re.S)
+    tokens = []
+    for line in text.splitlines():
+        line = line.strip()
+        if re.match(r"#{1,6}\s", line):
+            continue
+        line = re.sub(r"^(?:[-*+]|\d+[.)])\s+", "", line).replace("|", " ")
+        tokens.extend(line.split())
+    return not any(token.lower() not in _PLACEHOLDER_TOKENS
+                   and not re.fullmatch(r"[-–—_.:]+", token)
+                   for token in tokens)
+
+
+def _heading_slug(heading):
+    return re.sub(r"[^a-z0-9]+", "-", heading.lower()).strip("-") or "section"
+
+
+def _gather_blackboard(items):
+    for path in sorted(glob.glob(os.path.join(ROOT, "blackboard", "*.md"))):
+        heading, body, seen = None, [], set()
+
+        def add_section():
+            if heading is None:
+                return
+            text = "\n".join(body)
+            if _is_placeholder(text):
+                return
+            base = _heading_slug(heading)
+            slug, number = base, 1
+            while slug in seen:
+                number += 1
+                slug = f"{base}-{number}"
+            seen.add(slug)
+            items.append((f"blackboard/{os.path.basename(path)}#{slug}",
+                          "blackboard", (heading + "\n" + text.strip())[:600]))
+
+        for line in read(path).splitlines():
+            if line.startswith("## "):
+                add_section()
+                heading, body = line[3:].strip(), []
+            elif heading is not None:
+                body.append(line)
+        add_section()
+
+
 def _gather():
     """Collect (id, source, text) tuples from lessons + run goals.
 
-    Sources are exactly the three in _scanned_sources(): the shared brain, its
-    archive tier, and each run's 00-project-goal.md. Nothing else -- not
-    03-decisions.md (which this docstring used to claim) and nothing in
-    memory/. Keep both this list and memory/README.md's mneme bullet honest;
+    Sources are exactly the four in _scanned_sources(): the shared brain, its
+    archive tier, each run's 00-project-goal.md, and meaningful H2 sections
+    from blackboard markdown. Nothing in memory/. Keep both this list and
+    memory/README.md's mneme bullet honest;
     tests/test_docs_graph_mermaid_20260727.py pins the README against
     _scanned_sources() at runtime.
 
@@ -152,7 +296,7 @@ def _gather():
     skipped = []
     # shared-brain lessons: active file + archive tier
     for path, source in ((SHARED_BRAIN, "lesson"),
-                         (SHARED_BRAIN.replace(".jsonl", "-archive.jsonl"), "lesson-archived")):
+                         (_archive_path(SHARED_BRAIN), "lesson-archived")):
         if os.path.isfile(path):
             for line_no, line in enumerate(read(path).splitlines(), start=1):
                 line = line.strip()
@@ -181,7 +325,8 @@ def _gather():
         print(f"[mneme] WARNING: ... and {len(skipped) - 10} more unparseable line(s)",
               file=sys.stderr)
     if skipped:
-        print(f"[mneme] WARNING: {len(skipped)} brain line(s) are NOT in the index; "
+        print(f"[mneme] WARNING: skipped {len(skipped)} unreadable brain line(s); "
+              "they are NOT in the index; "
               f"repair the source and rebuild", file=sys.stderr)
     # run goals
     for goal in glob.glob(os.path.join(ROOT, "runs", "*", "00-project-goal.md")):
@@ -190,14 +335,16 @@ def _gather():
         m = re.search(r"## Canonical Goal.*?\n(.+?)(?:\n##|\Z)", txt, re.S)
         body = (m.group(1) if m else txt)[:600]
         items.append((f"{slug}:goal", "goal", body))
+    _gather_blackboard(items)
     return items
 
 
 def _scanned_sources():
     """Every path _gather() reads, for reporting. Keep in sync with _gather()."""
     return [SHARED_BRAIN,
-            SHARED_BRAIN.replace(".jsonl", "-archive.jsonl"),
-            os.path.join(ROOT, "runs", "*", "00-project-goal.md")]
+            _archive_path(SHARED_BRAIN),
+            os.path.join(ROOT, "runs", "*", "00-project-goal.md"),
+            os.path.join(ROOT, "blackboard", "*.md")]
 
 
 def _empty_index_note():
@@ -215,7 +362,7 @@ def _empty_index_note():
     silence, so the remedy is to name the scanned paths and the next action,
     and keep the exit code at 0.
     """
-    lines = ["[mneme] nothing to index -- the index is EMPTY (this is not an error).",
+    lines = ["[mneme] WARNING: built zero vectors -- the index is EMPTY (this is not an error).",
              "[mneme] scanned:"]
     for p in _scanned_sources():
         exists = "" if ("*" in p or os.path.exists(p)) else "  (does not exist)"
@@ -235,24 +382,56 @@ Usage:
 
 Environment:
   MNEME_INDEX                 index path (default: memory/mneme_index.json)
-  PROJECT_OS_SHARED_BRAIN     brain path to index
-  OSVEC_EMBEDDER=lexical      force the dependency-free embedder instead of Ollama
+  PROJECT_OS_SHARED_BRAIN     brain path to index (absolute; project-local by default)
+  MNEME_EMBEDDER              auto|neural|lexical (default: auto)
+  OSVEC_EMBEDDER               legacy alias for MNEME_EMBEDDER
+  MNEME_OLLAMA_URL             Ollama base URL (default: http://127.0.0.1:11434)
+  OSVEC_OLLAMA_URL             legacy alias for MNEME_OLLAMA_URL
+  MNEME_NEURAL_MODEL           Ollama model (default: nomic-embed-text)
+  OSVEC_NEURAL_MODEL            legacy alias for MNEME_NEURAL_MODEL
+  MNEME_OLLAMA_TIMEOUT         request timeout in seconds, 0.1..600 (default: 120)
+  OSVEC_OLLAMA_TIMEOUT          legacy alias for MNEME_OLLAMA_TIMEOUT
+  MNEME_OLLAMA_BATCH_SIZE      texts per request, 1..256 (default: 64)
+  OSVEC_OLLAMA_BATCH_SIZE       legacy alias for MNEME_OLLAMA_BATCH_SIZE
 
 An empty corpus produces an empty index and exits 0 -- that is correct on a
 fresh install, and `build` says so explicitly rather than reporting silence."""
 
 
+@contextmanager
+def _build_lock():
+    directory = os.path.dirname(INDEX) or "."
+    os.makedirs(directory, exist_ok=True)
+    with open(INDEX + ".build.lock", "a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def build():
+    with _build_lock():
+        return _build_locked()
+
+
+def _build_locked():
     embedder = pick_embedder()
     gathered = [(i, s, t) for i, s, t in _gather() if (t or "").strip()]
     if embedder.startswith("neural-"):
         vecs = embed_neural_batch([t for _, _, t in gathered])
     else:
         vecs = [embed(t) for _, _, t in gathered]
+    if len(vecs) != len(gathered):
+        raise ValueError(
+            "invalid embedding count: received %d vectors for %d source entries"
+            % (len(vecs), len(gathered))
+        )
     entries = [{"id": _id, "source": source, "text": text[:240], "vec": v}
                for (_id, source, text), v in zip(gathered, vecs)]
     dim = len(vecs[0]) if vecs else DIM
     index = {"dim": dim, "embedder": embedder, "count": len(entries), "entries": entries}
+    _validate_index(index)
     _publish(index)
     return index
 
@@ -290,11 +469,42 @@ def _publish(index):
         raise
 
 
+def _validate_index(index):
+    if not isinstance(index, dict):
+        raise ValueError("invalid Mneme index: expected JSON object")
+    entries = index.get("entries")
+    count = index.get("count")
+    dim = index.get("dim")
+    embedder = index.get("embedder")
+    if not isinstance(entries, list):
+        raise ValueError("invalid Mneme index: entries must be a list")
+    if not isinstance(count, int) or isinstance(count, bool) or count != len(entries):
+        raise ValueError("invalid Mneme index: count does not match entries")
+    if not isinstance(dim, int) or isinstance(dim, bool) or dim <= 0:
+        raise ValueError("invalid Mneme index: dim must be a positive integer")
+    if not isinstance(embedder, str) or not embedder:
+        raise ValueError("invalid Mneme index: embedder must be a nonempty string")
+    if embedder == "lexical-hash-v1" and dim != DIM:
+        raise ValueError("invalid Mneme lexical index dimension")
+    if embedder != "lexical-hash-v1" and (not embedder.startswith("neural-") or embedder == "neural-"):
+        raise ValueError("invalid Mneme index: unsupported embedder")
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("vec"), list):
+            raise ValueError("invalid Mneme index: entries must carry vectors")
+        vector = entry["vec"]
+        if len(vector) != dim:
+            raise ValueError("invalid Mneme index: vector dimension does not match index")
+        if not all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                   and math.isfinite(value) for value in vector):
+            raise ValueError("invalid Mneme index: vector contains a non-finite value")
+    return index
+
+
 def load():
     try:
         with open(INDEX, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
+            return _validate_index(json.load(f))
+    except FileNotFoundError:
         return None
 
 
@@ -333,24 +543,30 @@ if __name__ == "__main__":
     if cmd == "build":
         try:
             i = build()
-        except (OSError, UnicodeDecodeError) as e:
+        except (OSError, UnicodeDecodeError, ValueError) as e:
             # Non-zero and legible, not a raw traceback: brain_append.py:167
             # surfaces only the FIRST 300 stderr chars, and a traceback puts
             # the actual cause LAST, so the operator would see frames instead
             # of the reason. Narrow on purpose — a bug in this file must still
             # crash loudly rather than be reported as a source problem.
-            sys.exit(f"[mneme] REFUSED: cannot read a brain source — {e}\n"
-                     f"[mneme] {INDEX} was left untouched; repair the source, then rebuild")
+            sys.exit(f"[mneme] REFUSED: build configuration or source is invalid — {e}\n"
+                     f"[mneme] {INDEX} was left untouched; repair the setting/source, then rebuild")
         print(f"[mneme] built {INDEX} — {i['count']} vectors (dim {i['dim']}, {i['embedder']})")
         if not i["count"]:
             print(_empty_index_note(), file=sys.stderr)
     elif cmd == "stats":
-        i = load()
+        try:
+            i = load()
+        except ValueError as e:
+            sys.exit(f"[mneme] REFUSED: {e}")
         print(json.dumps({"count": i["count"], "dim": i["dim"], "embedder": i["embedder"]} if i else {"count": 0}, indent=2))
     elif cmd == "query":
         text = sys.argv[2] if len(sys.argv) > 2 else ""
         k = int(sys.argv[3]) if len(sys.argv) > 3 else 5
-        hits = query(text, k)
+        try:
+            hits = query(text, k)
+        except ValueError as e:
+            sys.exit(f"[mneme] REFUSED: {e}")
         # JSON stays on STDOUT and the explanation goes to STDERR: README shows
         # this as a JSON-producing command, so prose on stdout would break any
         # caller piping it into jq.

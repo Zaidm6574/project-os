@@ -28,6 +28,7 @@ memory/store/
 # (audit 2026-07-26). Named explicitly rather than restoring `memory/*.json`,
 # which would silently untrack a user's own files under memory/.
 **/mneme_index.json
+**/mneme_index.json.build.lock
 .turbovec/
 knowledge-graph/
 graphify-out/

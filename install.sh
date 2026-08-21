@@ -2,7 +2,7 @@
 set -eu
 
 show_usage() {
-  printf '%s\n' "Usage: ./install.sh /path/to/target-project [--force] [--dry-run] [--check-tools] [--allow-unsafe-target] [--full-engine] [--claude-engine] [--codex-engine] [--central-brain PATH] [--project-id ID]"
+  printf '%s\n' "Usage: ./install.sh /path/to/target-project [--force] [--dry-run] [--check-tools] [--allow-unsafe-target] [--full-engine] [--claude-engine] [--codex-engine] [--central-brain PATH] [--project-id ID] [--brain-migration MODE]"
   printf '%s\n' ""
   printf '%s\n' "The target must be a project folder. \$HOME, /, and system directories are"
   printf '%s\n' "refused (an install writes ~120 files and appends to the target's .gitignore);"
@@ -35,6 +35,7 @@ CLAUDE_ENGINE=0
 CODEX_ENGINE=0
 CENTRAL_BRAIN=""
 PROJECT_ID=""
+BRAIN_MIGRATION=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -76,6 +77,15 @@ while [ "$#" -gt 0 ]; do
         exit 2
       fi
       PROJECT_ID=$2
+      shift
+      ;;
+    --brain-migration)
+      if [ "${2:-}" = "" ]; then
+        printf '%s\n' "--brain-migration needs a mode argument (migrate, bind, or fresh-local)." >&2
+        exit 2
+      fi
+      FULL_ENGINE=1
+      BRAIN_MIGRATION=$2
       shift
       ;;
     *)
@@ -135,6 +145,20 @@ fi
 if [ "$ALLOW_UNSAFE_TARGET" = "1" ]; then
   set -- "$@" --allow-unsafe-target
 fi
+if [ "$FULL_ENGINE" = "1" ]; then
+  set -- --target "$TARGET" --starter-planned --dry-run
+  if [ "$FORCE" = "1" ]; then set -- "$@" --force; fi
+  if [ "$CLAUDE_ENGINE" = "1" ]; then set -- "$@" --claude; fi
+  if [ "$CODEX_ENGINE" = "1" ]; then set -- "$@" --codex; fi
+  if [ "$CENTRAL_BRAIN" != "" ]; then set -- "$@" --central-brain "$CENTRAL_BRAIN"; fi
+  if [ "$PROJECT_ID" != "" ]; then set -- "$@" --project-id "$PROJECT_ID"; fi
+  if [ "$BRAIN_MIGRATION" != "" ]; then set -- "$@" --brain-migration "$BRAIN_MIGRATION"; fi
+  "$PYTHON" "$FULL_ENGINE_SCRIPT" "$@" >/dev/null
+fi
+set -- --target "$TARGET"
+if [ "$FORCE" = "1" ]; then set -- "$@" --force; fi
+if [ "$DRY_RUN" = "1" ]; then set -- "$@" --dry-run; fi
+if [ "$ALLOW_UNSAFE_TARGET" = "1" ]; then set -- "$@" --allow-unsafe-target; fi
 "$PYTHON" "$SETUP_SCRIPT" "$@"
 
 if [ "$FULL_ENGINE" = "1" ]; then
@@ -160,6 +184,9 @@ if [ "$FULL_ENGINE" = "1" ]; then
   fi
   if [ "$PROJECT_ID" != "" ]; then
     set -- "$@" --project-id "$PROJECT_ID"
+  fi
+  if [ "$BRAIN_MIGRATION" != "" ]; then
+    set -- "$@" --brain-migration "$BRAIN_MIGRATION"
   fi
   "$PYTHON" "$FULL_ENGINE_SCRIPT" "$@"
 fi

@@ -94,6 +94,25 @@ class ItCatchesEveryCanonicalShape(unittest.TestCase):
         self.assertIn("leak.md", r.stdout + r.stderr,
                       "the offending file was not named in the output")
 
+    def test_tracked_mode_ignores_untracked_local_state(self):
+        subprocess.run(["git", "init", "-q", str(self.work)], check=True)
+        (self.work / "tracked.md").write_text("ordinary public text\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.work), "add", "tracked.md"], check=True)
+        planted = "figd_" + ("A" * 30)
+        (self.work / "private-local.md").write_text(
+            "token: %s\n" % planted, encoding="utf-8"
+        )
+
+        r = self._run("--tracked", str(self.work))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+        subprocess.run(
+            ["git", "-C", str(self.work), "add", "private-local.md"], check=True
+        )
+        r = self._run("--tracked", str(self.work))
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("private-local.md", r.stdout + r.stderr)
+
     def test_it_uses_every_pattern_not_a_subset(self):
         """The old rg had 7 of 28. Prove the script sees all of them."""
         pats = _canonical_patterns()

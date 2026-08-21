@@ -118,7 +118,7 @@ class ValidatorReadsFieldsNotProse(unittest.TestCase):
 
     def test_tier_lock_reads_the_locked_field(self):
         self.assertTrue(self.v._tier_locked("Chosen tier: solo\nLocked: yes"))
-        self.assertTrue(self.v._tier_locked("**Locked**: yes"))
+        self.assertTrue(self.v._tier_locked("Tier: Solo\n**Locked**: yes"))
         self.assertFalse(self.v._tier_locked("Locked: no"))
         self.assertFalse(self.v._tier_locked("Chosen tier: solo"))
 
@@ -1218,17 +1218,13 @@ class Round2AdversarialBypasses(unittest.TestCase):
         with self.assertRaises(gg.GoalAnchorMissing):
             gg.canonical_goal(template)  # untouched template must refuse
         edited = template.replace(
-            "Replace this line with the one-sentence canonical goal.",
-            "Build a credit-card tracker that flags overspend.",
-        )
+            "\nTBD\n", "\nBuild a credit-card tracker that flags overspend.\n", 1)
         self.assertEqual(
             gg.canonical_goal(edited),
             "Build a credit-card tracker that flags overspend.",
         )
         other = template.replace(
-            "Replace this line with the one-sentence canonical goal.",
-            "Build a budgeting app for freelancers.",
-        )
+            "\nTBD\n", "\nBuild a budgeting app for freelancers.\n", 1)
         self.assertNotEqual(
             gg.goal_hash(gg.canonical_goal(edited)),
             gg.goal_hash(gg.canonical_goal(other)),

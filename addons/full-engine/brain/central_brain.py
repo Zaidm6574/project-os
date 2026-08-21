@@ -29,6 +29,7 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -40,16 +41,32 @@ DEFAULT_CENTRAL = Path(os.environ.get("PROJECT_OS_CENTRAL_BRAIN", "~/.project-os
 PROJECT_BRAIN = Path("brain") / "shared-brain.jsonl"
 CENTRAL_FILE = "shared-brain.jsonl"
 README = "README.md"
+README_TEXT = (
+    "# Project OS Central Brain\n\n"
+    "This folder stores approved Project OS lesson summaries in JSONL.\n\n"
+    "It is local-only. Do not put raw chats, API keys, passwords, private "
+    "credentials, or unnecessary sensitive personal data here.\n"
+)
 
-# Single source of truth for secret shapes: brain.py in this same directory.
-# Keeping a second copy here is how the two drifted (cross-check 2026-07-25):
-# brain.py was widened to 23 patterns while this file stayed on 7.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-# SCANNED_FIELDS is deliberately NOT imported: record_secret_hit() already
-# walks every scannable field, and importing an unused name here made this
-# module look like it did its own field-level scan when it did not.
-from brain import SECRET_PATTERNS, record_secret_hit  # noqa: E402
-sys.path.pop(0)
+def _load_from_scripts(module_name):
+    """Load a shared scripts module from this install's ancestor tree."""
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / "scripts" / (module_name + ".py")
+        if candidate.is_file() and not candidate.is_symlink():
+            spec = importlib.util.spec_from_file_location(
+                "project_os_central_" + module_name, candidate)
+            module = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
+            spec.loader.exec_module(module)
+            return module
+    raise RuntimeError("Project OS scripts/%s.py is required for privacy gating" % module_name)
+
+
+_secret_patterns = _load_from_scripts("secret_patterns")
+SECRET_PATTERNS = _secret_patterns.SECRET_PATTERNS
+record_secret_hit = _secret_patterns.secret_reason
+_brain_paths = _load_from_scripts("brain_paths")
+DEFAULT_PROJECT = Path(_brain_paths.find_project_root(HERE))
 
 
 def _create_private(path) -> bool:
@@ -122,7 +139,8 @@ def _load_bb_lock():
     return None
 
 
-_BB_LOCK = _load_bb_lock()
+bb_lock = _load_bb_lock()
+_BB_LOCK = bb_lock
 
 
 def _acquire_brain_lock(path: Path):
@@ -168,24 +186,61 @@ def central_id(pid: str, origin_id: str, text: str) -> str:
     return f"{pid}/{origin}-{digest}"
 
 
+class CentralBrainInitError(RuntimeError):
+    """A central-brain path could not be initialized without following links."""
+
+
+def _validated_leaf(directory_fd: int, name: str):
+    try:
+        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise CentralBrainInitError(f"cannot inspect {name}: {exc}") from None
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise CentralBrainInitError(f"unsafe central-brain leaf {name}: expected one regular file")
+    return info
+
+
+def _exclusive_create(directory_fd: int, name: str, content: bytes, mode: int) -> bool:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        file_fd = os.open(name, flags, mode, dir_fd=directory_fd)
+    except FileExistsError:
+        _validated_leaf(directory_fd, name)
+        return False
+    except OSError as exc:
+        raise CentralBrainInitError(f"cannot create {name}: {exc}") from None
+    try:
+        info = os.fstat(file_fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise CentralBrainInitError(f"unsafe central-brain leaf {name} after creation")
+        os.write(file_fd, content)
+        os.fsync(file_fd)
+    finally:
+        os.close(file_fd)
+    return True
+
+
 def init_central(path: Path) -> Path:
     path = path.expanduser().resolve()
-    path.mkdir(parents=True, exist_ok=True)
-    brain_file = path / CENTRAL_FILE
-    # touch() created this at 0666 & ~umask -- 0644 on a stock account -- so
-    # the CROSS-PROJECT brain was world-readable from its first moment, while
-    # scripts/brain_archive.py wrote the very same records 0600.
-    _create_private(brain_file)
-    readme = path / README
-    if not readme.exists():
-        readme.write_text(
-            "# Project OS Central Brain\n\n"
-            "This folder stores approved Project OS lesson summaries in JSONL.\n\n"
-            "It is local-only. Do not put raw chats, API keys, passwords, private "
-            "credentials, or unnecessary sensitive personal data here.\n",
-            encoding="utf-8",
-        )
-    return brain_file
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        directory_fd = os.open(
+            str(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        raise CentralBrainInitError(f"cannot open central-brain directory {path}: {exc}") from None
+    try:
+        _validated_leaf(directory_fd, CENTRAL_FILE)
+        _validated_leaf(directory_fd, README)
+        created_brain = _exclusive_create(directory_fd, CENTRAL_FILE, b"", 0o600)
+        created_readme = _exclusive_create(directory_fd, README, README_TEXT.encode("utf-8"), 0o644)
+        if created_brain or created_readme:
+            os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    return path / CENTRAL_FILE
 
 
 def read_jsonl(path: Path, unparsable: list | None = None) -> list[dict]:
@@ -321,7 +376,25 @@ def syncable_summary(record: dict) -> bool:
     return True
 
 
-def lessons_for_central(project: Path, pid: str, unparsable: list | None = None) -> tuple[list[dict], int]:
+class SkipTally(int):
+    """An integer skip count with separate secret and policy diagnostics."""
+
+    def __new__(cls, secret: int = 0, other: int = 0) -> "SkipTally":
+        tally = super().__new__(cls, secret + other)
+        tally.secret = secret
+        tally.other = other
+        return tally
+
+    def describe(self) -> str:
+        parts = []
+        if self.secret:
+            parts.append(f"{self.secret} secret-looking")
+        if self.other:
+            parts.append(f"{self.other} privacy/type")
+        return ", ".join(parts) or "none"
+
+
+def lessons_for_central(project: Path, pid: str, unparsable: list | None = None) -> tuple[list[dict], SkipTally]:
     """Returns (syncable lessons, count skipped by the privacy/type gate).
 
     `unparsable` collects the project brain's dropped line numbers; those are
@@ -330,18 +403,27 @@ def lessons_for_central(project: Path, pid: str, unparsable: list | None = None)
     src = project_brain_path(project)
     lessons: list[dict] = []
     skipped = 0
+    secret_skipped = 0
     for record in read_jsonl(src, unparsable):
+        if record_secret_hit(record):
+            secret_skipped += 1
+            continue
         if record.get("central_import") or record.get("central_id") or record.get("source") == "central-brain":
             continue
         if not syncable_summary(record):
             skipped += 1
             continue
-        if record.get("type") != "lesson" and record.get("memory_type") != "lesson":
+        try:
+            typ = _brain_paths.record_type(record)
+        except _brain_paths.BrainRecordError:
+            skipped += 1
+            continue
+        if typ != "lesson":
             skipped += 1
             continue
         text = str(record.get("text", "")).strip()
-        if not text or looks_like_secret(text) or record_secret_hit(record):
-            skipped += 1
+        if not text or looks_like_secret(text):
+            secret_skipped += 1
             continue
         origin_id = str(record.get("id") or record.get("memory_id") or "")
         tags = list(record.get("tags") or [])
@@ -362,8 +444,11 @@ def lessons_for_central(project: Path, pid: str, unparsable: list | None = None)
         for field in ("approved", "summary_only", "raw_chat"):
             if field in record:
                 central_record[field] = record[field]
+        if record_secret_hit(central_record):
+            secret_skipped += 1
+            continue
         lessons.append(central_record)
-    return lessons, skipped
+    return lessons, SkipTally(secret_skipped, skipped)
 
 
 def push(path: Path, project: Path, explicit_project_id: str | None = None,
@@ -375,17 +460,17 @@ def push(path: Path, project: Path, explicit_project_id: str | None = None,
 
 
 def pull(path: Path, project: Path, explicit_project_id: str | None = None,
-         unparsable: list | None = None) -> tuple[int, int]:
+         unparsable: list | None = None) -> tuple[int, SkipTally]:
     brain_file = init_central(path)
     pid = project_id(project, explicit_project_id)
-    dest = project_brain_path(project)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    # Same reason as init_central: pull is how a project's brain first comes
-    # into existence on a fresh machine, and touch() would publish it 0644.
-    _create_private(dest)
     safe_records = []
     skipped = 0
-    for record in read_jsonl(brain_file, unparsable):
+    secret_skipped = 0
+    incoming = read_jsonl(brain_file, unparsable)
+    for record in incoming:
+        if record_secret_hit(record):
+            secret_skipped += 1
+            continue
         if record.get("project_id") == pid:
             continue
         if not syncable_summary(record):
@@ -395,8 +480,8 @@ def pull(path: Path, project: Path, explicit_project_id: str | None = None,
             skipped += 1
             continue
         text = str(record.get("text", "")).strip()
-        if not text or looks_like_secret(text) or record_secret_hit(record):
-            skipped += 1
+        if not text or looks_like_secret(text):
+            secret_skipped += 1
             continue
         tags = list(record.get("tags") or [])
         if "central-brain" not in tags:
@@ -416,8 +501,23 @@ def pull(path: Path, project: Path, explicit_project_id: str | None = None,
         for field in ("approved", "summary_only", "raw_chat"):
             if field in record:
                 local_record[field] = record[field]
+        if record_secret_hit(local_record):
+            secret_skipped += 1
+            continue
         safe_records.append(local_record)
-    return append_new(dest, safe_records), skipped
+    tally = SkipTally(secret_skipped, skipped)
+    if not safe_records:
+        # Pull establishes the private project brain on a normal empty first
+        # sync, but must not create an artifact when the source had records
+        # that all failed the privacy gate.
+        if not incoming:
+            dest = project_brain_path(project)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            _create_private(dest)
+        return 0, tally
+    dest = project_brain_path(project)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    return append_new(dest, safe_records), tally
 
 
 def status(path: Path, unparsable: list | None = None) -> tuple[int, list[str]]:
@@ -570,4 +670,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except CentralBrainInitError as exc:
+        print(f"refuse: {exc}", file=sys.stderr)
+        raise SystemExit(2)

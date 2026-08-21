@@ -138,30 +138,24 @@ class OsvecRemoveOrdering(unittest.TestCase):
             "the surviving side-car record was corrupted",
         )
 
-    def test_failed_remove_leaves_the_desync_detectable_on_disk(self):
-        """The downstream observable: the desync must surface, not be
-        silently 'healed' by data loss.
+    def test_failed_remove_refuses_to_persist_a_desynchronized_store(self):
+        """A known desync must remain visible without publishing bad state.
 
-        With the fixed ordering, alpha's record survives in the persisted
-        side-car, so the store still shows index != side-car (which load()
-        refuses, fail closed). With the old ordering, alpha was destroyed
-        from the side-car too, so the persisted store looks healthy and the
-        data loss is invisible.
+        The old probe expected ``save()`` to write a mismatched sidecar so a
+        later load could reject it. Current OSVec validates the staged index
+        and sidecar before every publish, which is stronger: the failed remove
+        leaves alpha in memory and saving refuses instead of making a known
+        invalid durable store appear as a successful commit.
         """
         mem = self._memory_with_two_records()
         self._desync(mem, "alpha")
         self.assertFalse(mem.remove("alpha"))
-        mem.save()
-
-        with open(osvec.SIDECAR_PATH) as f:
-            blob = json.load(f)
-        persisted_ids = sorted(r["memory_id"] for r in blob["records"].values())
-        self.assertEqual(
-            persisted_ids, ["alpha", "beta"],
-            "the record a failing remove() should have preserved is missing "
-            "from the persisted side-car: the desync was silently healed by "
-            "destroying data",
-        )
+        with self.assertRaisesRegex(osvec.OSVecError, "index/sidecar"):
+            mem.save()
+        self.assertIn("alpha", mem.id_to_u64)
+        self.assertIn("alpha", {
+            record["memory_id"] for record in mem.sidecar.values()
+        })
 
     def test_failed_remove_leaves_the_survivor_removable(self):
         """After a refused remove(), the healthy record must still be intact

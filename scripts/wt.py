@@ -7,7 +7,8 @@ CODE). Also the antidote to the stale-checkout trap: sessions have edited a
 worktree while someone read the main checkout and called it truth — `wt.py list`
 shows every checkout and who's dirty. Check it before trusting any tree.
 
-Worktrees live in ~/.project-os/worktrees/<repo>/<name> on branch wt/<name>.
+Worktrees live in ~/.project-os/worktrees/<repo>/<pathhash>/<name> on branch
+wt/<name> (the short path hash keeps distinct repos with the same dir name apart).
 
 Usage (run anywhere inside the target repo, or pass --repo):
   python3 scripts/wt.py create <name>     # new worktree at HEAD (warns if tree dirty)
@@ -15,7 +16,7 @@ Usage (run anywhere inside the target repo, or pass --repo):
   python3 scripts/wt.py merge <name>      # merge wt/<name> into the CURRENT branch
   python3 scripts/wt.py remove <name> [--force]   # refuses dirty/unmerged without --force
 """
-import os, sys, subprocess
+import os, sys, hashlib, subprocess
 
 HOME = os.path.expanduser("~")
 
@@ -45,15 +46,27 @@ def main_root(root):
 
 
 def wt_dir(root, name):
-    # defect (2026-07-25): `name` came straight from argv into os.path.join with no
-    # containment check, so `../../../../tmp/evil-marker-dir/sub` escaped
-    # ~/.project-os/worktrees/<repo>/ and os.makedirs created it before git ever
-    # validated the branch ref. Reject traversal/separators before building the path.
-    base = os.path.join(HOME, ".project-os", "worktrees", os.path.basename(root))
-    path = os.path.normpath(os.path.join(base, name))
-    if os.path.commonpath([os.path.normpath(base), path]) != os.path.normpath(base):
-        sys.exit(f"REFUSED: worktree name escapes worktrees root: {name!r}")
-    return path
+    if (not isinstance(name, str) or not name or name in (".", "..")
+            or os.path.isabs(name) or os.sep in name
+            or (os.altsep and os.altsep in name)):
+        sys.exit("REFUSED: worktree name must be one safe direct component")
+    # basename alone collides across distinct repos with the same dir name —
+    # key the namespace by basename + short hash of the resolved repo path
+    real = os.path.realpath(root)
+    h = hashlib.sha1(real.encode("utf-8")).hexdigest()[:8]
+    base = os.path.join(HOME, ".project-os", "worktrees", os.path.basename(real))
+    namespace = os.path.join(base, h)
+    if os.path.lexists(namespace) and os.path.islink(namespace):
+        sys.exit(f"REFUSED: worktree namespace is a symlink: {namespace}")
+    base_real = os.path.realpath(base)
+    namespace_real = os.path.realpath(namespace)
+    try:
+        inside = os.path.commonpath((base_real, namespace_real)) == base_real
+    except ValueError:
+        inside = False
+    if not inside:
+        sys.exit(f"REFUSED: worktree namespace escapes its root: {namespace}")
+    return os.path.join(namespace, name)
 
 
 def dirty(tree):
@@ -141,6 +154,9 @@ def main():
     repo = None
     if "--repo" in a:
         i = a.index("--repo")
+        if i + 1 >= len(a):
+            print("usage error: --repo requires a value", file=sys.stderr)
+            return 2
         repo = a[i + 1]
         del a[i:i + 2]
     force = "--force" in a

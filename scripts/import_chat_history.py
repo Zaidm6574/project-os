@@ -24,7 +24,10 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:  # runtime authority stays brain.py; this documents the shared API.
+    from secret_patterns import redaction_pairs
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -202,13 +205,23 @@ def _sub_whole_tokens(text: str, pattern, replacement: str):
     return "".join(out), hits
 
 
-def redact(text: str, patterns: list, counts: Counter = None) -> str:
+def redact(text: str, patterns: list = None, counts: Counter = None) -> str:
     """Redact every match of `patterns`, tallying replacements into `counts`.
 
     The tally is what makes a redaction visible: the importer prints it and
     writes it into the report, so a transcript that carried credentials can
     never be summarized silently.
     """
+    if patterns is None:
+        # Direct library callers still get the shared labeled redactions. The
+        # CLI supplies the brain-authoritative patterns below, where failure to
+        # load them remains a visible, fail-closed refusal.
+        sys.path.insert(0, str(ROOT / "scripts"))
+        try:
+            from secret_patterns import redaction_pairs
+            patterns = redaction_pairs()
+        finally:
+            sys.path.pop(0)
     for pattern, replacement in patterns:
         text, hits = _sub_whole_tokens(text, pattern, replacement)
         if hits and counts is not None:
@@ -254,7 +267,8 @@ def read_export(path: Path) -> list[str]:
     return chunks
 
 
-def clean_lines(chunks: list[str], patterns: list, counts: Counter = None) -> list[str]:
+def clean_lines(chunks: list[str], patterns: list = None,
+                counts: Counter = None) -> list[str]:
     lines: list[str] = []
     for chunk in chunks:
         chunk = redact(chunk, patterns, counts)

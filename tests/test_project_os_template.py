@@ -169,6 +169,21 @@ class SetupProjectOSTests(unittest.TestCase):
             self.assertIn("vector store not populated yet", text)
 
     @unittest.skipUnless(_path_has_python310(), "installer requires Python >=3.10 on PATH")
+    def test_install_script_full_engine_activates_codex_skills(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "project"
+            result = subprocess.run(
+                ["sh", str(INSTALL), str(target), "--full-engine", "--codex-engine"],
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((target / ".agents" / "skills" / "project" / "SKILL.md").exists())
+            self.assertTrue((target / ".agents" / "skills" / "kickoff" / "SKILL.md").exists())
+            self.assertTrue((target / ".agents" / "skills" / "new-run" / "SKILL.md").exists())
+
+    @unittest.skipUnless(_path_has_python310(), "installer requires Python >=3.10 on PATH")
     def test_install_script_full_engine_can_initialize_central_brain(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "project"

@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,97 @@ def load_module(path: Path, name: str):
 
 
 class GraphContractTests(unittest.TestCase):
+    def _graph_sandbox(self, tmp, ontology=None):
+        project = Path(tmp) / "project"
+        memory = project / "memory"
+        blackboard = project / "blackboard"
+        memory.mkdir(parents=True)
+        blackboard.mkdir()
+        shutil.copy2(CORE_BUILDER, memory / "build_graph.py")
+        (blackboard / "00-project-goal.md").write_text("# Fresh Project OS Workspace\n", encoding="utf-8")
+        ontology_path = project / "alternate-ontology.json"
+        if ontology is not None:
+            ontology_path.write_text(json.dumps(ontology), encoding="utf-8")
+        return project, ontology_path
+
+    def test_ontology_import_is_opt_in_and_unset_build_is_local_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project, _ = self._graph_sandbox(tmp)
+            env = os.environ.copy()
+            for key in (
+                "PROJECT_OS_ONTOLOGY_GRAPH",
+                "PROJECT_OS_ONTOLOGY_SCHEMA",
+                "PROJECT_OS_ONTOLOGY_NAMESPACE",
+            ):
+                env.pop(key, None)
+            result = subprocess.run(
+                [sys.executable, "memory/build_graph.py", "--root", "blackboard"],
+                cwd=project,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            graph = json.loads((project / "graphify-out" / "graph.json").read_text(encoding="utf-8"))
+            self.assertEqual(graph["source"], "blackboard")
+            self.assertEqual([node["id"] for node in graph["nodes"]], ["project-os", "blackboard"])
+
+    def test_ontology_import_uses_configured_path_schema_and_namespace(self):
+        ontology = {
+            "schema": "example/graph-v7",
+            "nodes": [
+                {
+                    "id": "urn:example:graph:alpha",
+                    "type": "concept",
+                    "label": "Alternate graph",
+                }
+            ],
+            "edges": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            project, ontology_path = self._graph_sandbox(tmp, ontology)
+            env = os.environ.copy()
+            env.update(
+                {
+                    "PROJECT_OS_ONTOLOGY_GRAPH": str(ontology_path),
+                    "PROJECT_OS_ONTOLOGY_SCHEMA": "example/graph-v7",
+                    "PROJECT_OS_ONTOLOGY_NAMESPACE": "urn:example:graph:",
+                }
+            )
+            result = subprocess.run(
+                [sys.executable, "memory/build_graph.py", "--root", "blackboard"],
+                cwd=project,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            graph = json.loads((project / "graphify-out" / "graph.json").read_text(encoding="utf-8"))
+            self.assertEqual(graph["source"], "blackboard+ontology")
+            self.assertIn("urn:example:graph:alpha", {node["id"] for node in graph["nodes"]})
+
+    def test_malformed_configured_ontology_fails_cleanly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project, ontology_path = self._graph_sandbox(tmp)
+            ontology_path.write_text("{not-json", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "memory/build_graph.py",
+                    "--root",
+                    "blackboard",
+                    "--ontology-graph",
+                    str(ontology_path),
+                ],
+                cwd=project,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("[arachne] REFUSED:", result.stderr)
+            self.assertIn("ontology", result.stderr)
+            self.assertFalse((project / "graphify-out" / "graph.json").exists())
+
     def test_core_builder_output_is_recognized_by_public_graph_consumers(self):
         tool_check = load_module(TOOL_CHECK, "graph_contract_tool_check")
         validator = load_module(VALIDATE_RUN, "graph_contract_validator")

@@ -25,7 +25,7 @@ Or during install:
 ./install.sh /path/to/project --check-tools
 ```
 
-Activation guard: if `memory/build_graph.py`, `memory/osvec_adapter.py`, or legacy `memory/turbovec_adapter.py` exists, the local graph/vector helper path is available even when external Graphify/TurboVec commands are missing. Build the graph with `python3 memory/build_graph.py --root blackboard` or a run folder, and verify OSVec with `python3 memory/osvec_adapter.py selftest` or the legacy adapter selftest before calling memory unavailable.
+Activation guard: if `memory/build_graph.py`, `memory/mneme_adapter.py`, `memory/osvec_adapter.py`, or legacy `memory/turbovec_adapter.py` exists, the local graph/vector helper path is available even when external Graphify/TurboVec commands are missing. Build the graph with `python3 memory/build_graph.py --root blackboard` or a run folder, verify core vector memory with `python3 memory/mneme_adapter.py build` (falls back to lexical matching without Ollama), and verify OSVec with `python3 memory/osvec_adapter.py selftest` or the legacy adapter selftest before calling memory unavailable.
 
 ## Reality Check
 
