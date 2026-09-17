@@ -9,7 +9,8 @@ small local exchange file that other tools can read or append to.
 It is deliberately small and safe:
   * zero network calls,
   * stdlib only,
-  * refuses to import/export files outside this project copy.
+  * uses the canonical explicitly selected durable store,
+  * keeps exchange source/output files inside this project copy.
 
 It is the executable counterpart to the doctrine sibling; see brain/README.md.
 
@@ -32,6 +33,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 import time
@@ -176,12 +178,41 @@ SECRET_SCAN_EXHAUSTIVE = True
 
 
 def _safe_path(path: str) -> str:
-    """Resolve a path and refuse anything outside the project copy."""
+    """Refuse an outside path or a file sharing its inode with another path."""
     root = os.path.realpath(os.path.abspath(ROOT))
     full = os.path.realpath(os.path.abspath(path))
     if os.path.commonpath([full, root]) != root:
         sys.exit(f"refuse: path '{path}' is outside the project ({ROOT})")
+    try:
+        info = os.stat(full)
+    except FileNotFoundError:
+        pass  # An exchange output may legitimately be a new file.
+    except OSError as exc:
+        sys.exit(f"refuse: cannot inspect project exchange path: {exc}")
+    else:
+        if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+            sys.exit("refuse: project exchange path must not be hardlinked")
     return full
+
+
+def _safe_brain_path() -> str:
+    """Validate the selected durable store again at the command boundary.
+
+    The canonical resolver may select one external store via an explicit
+    environment override or an ignored binding. That selection does not apply
+    to exchange input/output files, which still use _safe_path. Re-resolving
+    refuses a changed store selection or invalid filesystem components since
+    import; it is not a sandbox against an adversarial concurrent process.
+    """
+    if brain_paths is None:
+        return _safe_path(BRAIN_FILE)
+    try:
+        selected = str(brain_paths.resolve_shared_brain(ROOT))
+    except brain_paths.BrainPathError as exc:
+        sys.exit(f"refuse: {exc}")
+    if os.path.abspath(BRAIN_FILE) != selected:
+        sys.exit("refuse: shared-brain selection changed; restart the command")
+    return selected
 
 
 class BrainFormatError(ValueError):
@@ -678,7 +709,7 @@ def _refuse_idless(lessons, origin):
 
 
 def cmd_export(args):
-    _safe_path(BRAIN_FILE)
+    brain_file = _safe_brain_path()
     if args.from_file:
         lessons = _lessons_from_file(args.from_file)
     else:
@@ -689,17 +720,15 @@ def cmd_export(args):
     # save-chat refuses could be smuggled in via `export --from` (audit 07-25).
     gate_records(lessons, where="export")
     _refuse_idless(lessons, args.from_file or "osvec_adapter")
-    added = _append_new(BRAIN_FILE, lessons, "brain-export")
+    added = _append_new(brain_file, lessons, "brain-export")
     note = ""
     print(f"export: {added} new lesson(s) appended to "
-          f"{os.path.relpath(BRAIN_FILE, ROOT)}{note}")
+          f"{os.path.relpath(brain_file, ROOT)}{note}")
     return 0
 
 
 def cmd_import(args):
-    # same containment gate as export/save-chat: refuse a brain file that
-    # resolves outside the project (independent review finding, 2026-07-17)
-    lessons = _read_jsonl(_safe_path(BRAIN_FILE))
+    lessons = _read_jsonl(_safe_brain_path())
     if args.into:
         # `--into` EXPORTS brain contents to another file, so it is a write path
         # and must clear the same gate. Printing to stdout below is not a write.
@@ -716,7 +745,7 @@ def cmd_import(args):
 
 
 def cmd_save_chat(args):
-    _safe_path(BRAIN_FILE)
+    brain_file = _safe_brain_path()
     text = _chat_text(args)
     source = args.source or ("chat-raw" if args.mode == "raw" else "chat-summary")
     tags = _tags(args.tag)
@@ -742,11 +771,11 @@ def cmd_save_chat(args):
     # not just the chat text.
     gate_record(record, where="save-chat")
 
-    added = _append_new(BRAIN_FILE, [record], "brain-save-chat")
+    added = _append_new(brain_file, [record], "brain-save-chat")
     if not added:
         print(f"save-chat: kept existing {rid}")
         return 0
-    print(f"save-chat: appended {rid} to {os.path.relpath(BRAIN_FILE, ROOT)}")
+    print(f"save-chat: appended {rid} to {os.path.relpath(brain_file, ROOT)}")
     return 0
 
 
@@ -761,6 +790,7 @@ def _selftest():
         ROOT, BRAIN_FILE = temp_root, os.path.join(temp_brain_dir, "shared-brain.jsonl")
         if bb_lock is not None:
             bb_lock.LOCK_DIR = os.path.join(temp_root, "locks")
+        original_override = os.environ.pop("PROJECT_OS_SHARED_BRAIN", None)
         try:
             # Keep synthetic IDs free of token-like separators: the durable
             # gate intentionally treats opaque `prefix-<long-token>` values as
@@ -789,6 +819,10 @@ def _selftest():
             print("selftest: OK")
             return 0
         finally:
+            if original_override is not None:
+                os.environ["PROJECT_OS_SHARED_BRAIN"] = original_override
+            else:
+                os.environ.pop("PROJECT_OS_SHARED_BRAIN", None)
             ROOT, BRAIN_FILE = original_root, original_brain_file
             if bb_lock is not None:
                 bb_lock.LOCK_DIR = original_lock_dir

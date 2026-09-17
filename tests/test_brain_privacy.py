@@ -74,9 +74,8 @@ class BrainPrivacyTests(unittest.TestCase):
             self.assertIn("outside the project", str(raised.exception))
 
     def test_import_refuses_symlinked_brain_file(self):
-        # import must pass BRAIN_FILE through the same containment gate as
-        # export/save-chat, or a symlinked brain file exfiltrates external
-        # content (independent review finding, 2026-07-17)
+        # The canonical store gate must refuse a symlink before import can
+        # disclose its contents (independent review finding, 2026-07-17).
         brain = load_module(BRAIN, "brain_import_symlink")
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -92,13 +91,17 @@ class BrainPrivacyTests(unittest.TestCase):
             link = project / "brain" / "shared-brain.jsonl"
             link.symlink_to(external)
 
+            original = external.read_bytes()
+            captured = io.StringIO()
             with mock.patch.object(brain, "ROOT", str(project)), mock.patch.object(
                 brain, "BRAIN_FILE", str(link)
             ):
-                with self.assertRaises(SystemExit) as raised:
+                with self.assertRaises(SystemExit) as raised, contextlib.redirect_stdout(captured):
                     brain.cmd_import(argparse.Namespace(into=None))
 
-            self.assertIn("outside the project", str(raised.exception))
+            self.assertIn("symlink", str(raised.exception))
+            self.assertEqual(captured.getvalue(), "")
+            self.assertEqual(external.read_bytes(), original)
 
     def test_central_sync_rejects_raw_and_unapproved_records(self):
         central_brain = load_module(CENTRAL_BRAIN, "central_brain_privacy_boundary")

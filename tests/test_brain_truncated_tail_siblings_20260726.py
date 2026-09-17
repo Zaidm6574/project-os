@@ -59,12 +59,13 @@ class SaveChatDoesNotWeld(unittest.TestCase):
 
     def test_a_saved_summary_survives_a_truncated_tail(self):
         with tempfile.TemporaryDirectory() as tmp:
-            brain_file = Path(tmp) / "shared-brain.jsonl"
+            brain_file = Path(tmp) / "brain" / "shared-brain.jsonl"
+            brain_file.parent.mkdir()
             brain_file.write_text(TRUNCATED, encoding="utf-8")
             brain = _load("brain_trunc_savechat", os.path.join(BRAIN_DIR, "brain.py"))
-            # _safe_path refuses any path outside ROOT, so the sandbox has to
-            # BE the root -- pointing only BRAIN_FILE at a tempdir trips the
-            # guard rather than exercising the writer.
+            # Use the canonical local store for this synthetic project, so
+            # command-time selection checks pass and this test exercises
+            # the truncated-tail writer rather than a path refusal.
             brain.ROOT = tmp
             brain.BRAIN_FILE = str(brain_file)
             rc = brain.cmd_save_chat(_Args(

@@ -215,15 +215,16 @@ class BrainPyCreatesPrivateBrain(BrainModeCase):
 
     def _brain(self, name, root, brain_file):
         module = _load(name, BRAIN_DIR / "brain.py")
-        # _safe_path refuses any path outside ROOT, so the sandbox has to BE
-        # the root (same reason as test_brain_truncated_tail_siblings).
+        # Model the full installation's canonical project-local store. The
+        # command now revalidates this selection before exercising modes.
         module.ROOT = str(root)
         module.BRAIN_FILE = str(brain_file)
         return module
 
     def test_save_chat_creates_a_private_brain(self):
         with tempfile.TemporaryDirectory() as tmp:
-            brain_file = Path(tmp) / "shared-brain.jsonl"
+            brain_file = Path(tmp) / "brain" / "shared-brain.jsonl"
+            brain_file.parent.mkdir()
             brain = self._brain("bpy_mode_save", tmp, brain_file)
             self.assertEqual(brain.cmd_save_chat(_Args(
                 mode="summary", summary="an approved summary", kind="lesson")), 0)
@@ -231,7 +232,8 @@ class BrainPyCreatesPrivateBrain(BrainModeCase):
 
     def test_save_chat_keeps_an_existing_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
-            brain_file = Path(tmp) / "shared-brain.jsonl"
+            brain_file = Path(tmp) / "brain" / "shared-brain.jsonl"
+            brain_file.parent.mkdir()
             brain_file.write_text("", encoding="utf-8")
             os.chmod(str(brain_file), 0o640)
             brain = self._brain("bpy_mode_save_keep", tmp, brain_file)
@@ -243,7 +245,8 @@ class BrainPyCreatesPrivateBrain(BrainModeCase):
 
     def test_export_creates_a_private_brain(self):
         with tempfile.TemporaryDirectory() as tmp:
-            brain_file = Path(tmp) / "shared-brain.jsonl"
+            brain_file = Path(tmp) / "brain" / "shared-brain.jsonl"
+            brain_file.parent.mkdir()
             source = Path(tmp) / "lessons.jsonl"
             source.write_text(json.dumps(
                 {"id": "L-export-1", "type": "lesson",
@@ -254,7 +257,8 @@ class BrainPyCreatesPrivateBrain(BrainModeCase):
 
     def test_export_keeps_an_existing_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
-            brain_file = Path(tmp) / "shared-brain.jsonl"
+            brain_file = Path(tmp) / "brain" / "shared-brain.jsonl"
+            brain_file.parent.mkdir()
             brain_file.write_text("", encoding="utf-8")
             os.chmod(str(brain_file), 0o640)
             source = Path(tmp) / "lessons.jsonl"
