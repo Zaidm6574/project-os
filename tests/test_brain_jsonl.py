@@ -533,22 +533,46 @@ class TestBrainArchiveMalformedTolerance(BrainEnvMixin):
         archive = self.brain.parent / "shared-brain-archive.jsonl"
         lock_dir = Path(self.tmp.name) / "locks"
         replace_entered = threading.Event()
+        writer_attempted = threading.Event()
         writer_done = threading.Event()
+        stop_writer = threading.Event()
         writer_errors = []
+        active_replacements = []
         real_replace = brain_archive.os.replace
+        real_acquire = brain_archive.bb_lock.acquire
+
+        def observed_acquire(target, agent="unknown", wait=10):
+            if agent == "final-fence-writer":
+                writer_attempted.set()
+            return real_acquire(target, agent=agent, wait=wait)
 
         def delayed_replace(src, dst):
+            if os.path.abspath(dst) != os.path.abspath(self.brain):
+                return real_replace(src, dst)
+            self.assertEqual(Path(src).parent, self.brain.parent)
+            self.assertTrue(str(src).endswith(".tmp"))
+            active_replacements.append((str(src), str(dst)))
+            # Enter the real final fence with a normal live lease. Only now
+            # age the old owner's lock: preparation speed must not determine
+            # whether publication reaches the boundary this test exercises.
+            os.utime(stale_lock, (1, 1))
             replace_entered.set()
-            # Without one stable guard around the final fence + replace, the
-            # stale lease is reaped and the late append lands before this call.
-            writer_done.wait(0.20)
+            self.assertTrue(writer_attempted.wait(2),
+                            "late writer never attempted acquisition")
+            # With the guard absent, the contender can reap the aged lease
+            # and append before replacement; the final content assertion
+            # below must catch that lost append, not merely trust this wait.
+            self.assertFalse(
+                writer_done.wait(0.20),
+                "contender finished while active replacement still held the fence")
             return real_replace(src, dst)
 
         def writer():
             try:
                 if not replace_entered.wait(2):
                     raise AssertionError("archive never reached active replacement")
-                time.sleep(0.03)  # make the intentionally unrenewed 10 ms lease stale
+                if stop_writer.is_set():
+                    return
                 token = brain_archive.bb_lock.acquire(
                     str(self.brain), agent="final-fence-writer", wait=2)
                 if not token:
@@ -561,8 +585,9 @@ class TestBrainArchiveMalformedTolerance(BrainEnvMixin):
                         fh.flush()
                         os.fsync(fh.fileno())
                 finally:
-                    brain_archive.bb_lock.release(
-                        str(self.brain), agent="final-fence-writer", token=token)
+                    if not brain_archive.bb_lock.release(
+                            str(self.brain), agent="final-fence-writer", token=token):
+                        raise AssertionError("late writer could not release its token")
                 writer_done.set()
             except BaseException as exc:
                 writer_errors.append(exc)
@@ -576,20 +601,32 @@ class TestBrainArchiveMalformedTolerance(BrainEnvMixin):
              mock.patch.object(brain_archive, "ARCHIVE", str(archive)), \
              mock.patch.object(brain_archive, "_LeaseRenewer", return_value=lease), \
              mock.patch.object(brain_archive.bb_lock, "LOCK_DIR", str(lock_dir)), \
-             mock.patch.object(brain_archive.bb_lock, "STALE_AFTER_SEC", 0.01), \
              mock.patch.object(brain_archive.bb_lock, "POLL_SEC", 0.005), \
+             mock.patch.object(brain_archive.bb_lock, "acquire", side_effect=observed_acquire), \
              mock.patch.object(brain_archive.os, "replace", side_effect=delayed_replace), \
              mock.patch.object(brain_archive.subprocess, "run", return_value=completed), \
              contextlib.redirect_stderr(io.StringIO()) as err:
             stale_lock = Path(brain_archive.bb_lock.lock_path(str(self.brain)))
             writer_thread.start()
-            rc = brain_archive.cmd_apply(SimpleNamespace(ids=None, interest_days=60))
-            writer_thread.join(3)
+            try:
+                rc = brain_archive.cmd_apply(SimpleNamespace(ids=None, interest_days=60))
+            finally:
+                # Wake and stop a contender even if publication raises before
+                # its signal, then finish it before mocks/tempfiles disappear.
+                stop_writer.set()
+                replace_entered.set()
+                writer_thread.join(3)
 
         self.assertFalse(writer_thread.is_alive(), "final-fence writer did not finish")
         self.assertEqual(writer_errors, [])
+        self.assertEqual(len(active_replacements), 1,
+                         "fixture did not intercept the active-store replacement")
+        self.assertTrue(writer_attempted.is_set(), "late writer did not try to acquire")
+        self.assertTrue(writer_done.is_set(), "late writer did not complete")
         active = [json.loads(line) for line in self.brain.read_text().splitlines()]
         self.assertEqual([row["id"] for row in active], ["keep", "late"])
+        archived = [json.loads(line) for line in archive.read_text().splitlines()]
+        self.assertEqual([row["id"] for row in archived], ["old"])
         self.assertFalse(stale_lock.exists(), "final fencing left a stale lock")
         if rc != 0:
             self.assertIn("release", err.getvalue().lower())
