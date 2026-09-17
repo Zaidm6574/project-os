@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only SQLite/FTS5 mirror of brain/shared-brain.jsonl for exact recall.
+"""Read-only SQLite/FTS5 mirror of the selected shared brain for exact recall.
 
 Complements the OSVec store (memory/osvec_adapter.py): OSVec serves semantic
 retrieval and may legitimately return zero when a query does not match; this
@@ -8,6 +8,11 @@ never silently miss. The JSONL stays the only write plane — the mirror is
 rebuilt from it and refuses queries when it no longer matches (fail-closed;
 parity = source sha256 + record count + per-record sha256 + full FTS index
 term signature).
+
+Full installations use scripts/brain_paths.py for the same default source as
+brain.py (explicit environment, ignored binding, then project-local). Standalone
+copies without that resolver retain the project-local default. Rebuild remains
+explicit; selecting a store does not automatically rebuild its derived mirror.
 
 Usage:
   python3 memory/brain_fts_mirror.py rebuild            # (re)build mirror db
@@ -26,9 +31,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import sqlite3
+import stat
 import tempfile
 import urllib.parse
 from pathlib import Path
@@ -61,10 +68,37 @@ def _contained(path: Path, label: str) -> Path:
     return real
 
 
+def _default_brain_path() -> Path:
+    """Resolve the configured source at each operation without ambient imports.
+
+    Only absence of the core resolver permits the standalone local fallback.
+    An installed resolver or selection that fails must never silently index a
+    different store. Explicit --brain overrides retain their caller-owned scope.
+    """
+    resolver = Path(ROOT) / "scripts" / "brain_paths.py"
+    try:
+        info = resolver.lstat()
+    except FileNotFoundError:
+        return _contained(BRAIN_JSONL, "brain jsonl")
+    except OSError as exc:
+        raise MirrorError(f"cannot inspect shared-brain resolver: {exc}") from exc
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise MirrorError("shared-brain resolver must be a regular non-linked file")
+    try:
+        spec = importlib.util.spec_from_file_location("_mirror_brain_paths", resolver)
+        if spec is None or spec.loader is None:
+            raise ImportError("cannot load the installed shared-brain resolver")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return Path(module.resolve_shared_brain(ROOT))
+    except Exception as exc:
+        raise MirrorError(f"cannot resolve selected shared brain: {exc}") from exc
+
+
 def _resolve_paths(brain_path: Path | None, db_path: Path | None) -> tuple[Path, Path]:
-    """Default paths pass the containment gate; explicit overrides are the caller's."""
+    """Resolve the default source; contain the db; leave explicit overrides alone."""
     if brain_path is None:
-        brain_path = _contained(BRAIN_JSONL, "brain jsonl")
+        brain_path = _default_brain_path()
     if db_path is None:
         db_path = _contained(MIRROR_DB, "mirror db")
     return Path(brain_path), Path(db_path)
