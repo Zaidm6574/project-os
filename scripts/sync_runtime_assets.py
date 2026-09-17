@@ -272,6 +272,22 @@ def _targets(root: Path, workflows: list) -> list:
     return out
 
 
+def _unexpected_adapters(root: Path, targets: list) -> list:
+    """Find entrypoints left behind by deletion/rename or added outside canon.
+
+    A missing generated marker does not make an extra adapter safe to ignore:
+    it may be hand-edited or user-authored. Report it, never delete it. Limit
+    inventory to the two adapter entrypoint layouts; auxiliary files are not
+    owned by this generator.
+    """
+    staged = root / "addons" / "full-engine" / "staged"
+    expected = {path for path, _ in targets}
+    existing = set((staged / "commands").glob("*.md"))
+    existing.update((staged / "codex-skills").glob("*/SKILL.md"))
+    return ["unexpected adapter (retired or unrecognized): %s"
+            % path.relative_to(root) for path in sorted(existing - expected)]
+
+
 def _refuse_symlinked_target(path: Path, root: Path) -> None:
     """Never write through a symlink, and never write outside the repo.
 
@@ -316,9 +332,18 @@ def _refuse_symlinked_target(path: Path, root: Path) -> None:
 
 
 def sync(root: Path) -> list:
+    root = Path(root)
     workflows = load_workflows(root)
+    targets = _targets(root, workflows)
+    unexpected = _unexpected_adapters(root, targets)
+    if unexpected:
+        raise SystemExit(
+            "sync_runtime_assets: refusing to sync until unexpected adapters "
+            "are reviewed and moved or removed manually; no files changed:\n"
+            + "\n".join(unexpected)
+        )
     written = []
-    for path, content in _targets(Path(root), workflows):
+    for path, content in targets:
         path.parent.mkdir(parents=True, exist_ok=True)
         _refuse_symlinked_target(path, Path(root))
         if not path.is_file() or path.read_text(encoding="utf-8") != content:
@@ -331,8 +356,9 @@ def check(root: Path) -> list:
     """Return a list of drift problems. Empty list == every adapter matches."""
     root = Path(root)
     workflows = load_workflows(root)
-    problems = []
-    for path, content in _targets(root, workflows):
+    targets = _targets(root, workflows)
+    problems = _unexpected_adapters(root, targets)
+    for path, content in targets:
         rel = str(path.relative_to(root))
         if not path.is_file():
             problems.append(f"missing generated asset: {rel}")

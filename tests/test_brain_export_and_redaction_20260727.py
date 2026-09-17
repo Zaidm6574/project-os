@@ -188,7 +188,6 @@ class ChatImporterRedaction(unittest.TestCase):
         # separator, then a plain prose word (>=6 chars, so the pattern fires).
         prose_lines = [
             "The secret: happiness comes from within and cannot be bought.",
-            "My password: forgotten again, need to reset it tomorrow morning.",
             "The bearer: whoever holds this note owes nothing further today.",
             "Design token: spacing scale should follow an eight point grid.",
         ]

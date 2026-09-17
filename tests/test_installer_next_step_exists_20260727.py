@@ -101,6 +101,9 @@ class ClosingMessageMatchesWhatWasInstalled(unittest.TestCase):
     """
 
     def setUp(self):
+        if sys.version_info < (3, 10):
+            self.skipTest("installer integration requires Python 3.10+; test interpreter is %d.%d"
+                          % sys.version_info[:2])
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.work = Path(self.tmp.name)
@@ -113,13 +116,13 @@ class ClosingMessageMatchesWhatWasInstalled(unittest.TestCase):
         env["HOME"] = str(self.home)
         r = subprocess.run(["sh", str(INSTALL_SH), str(target), *extra],
                            capture_output=True, text=True, cwd=str(ROOT), env=env)
+        self.assertEqual(r.returncode, 0,
+                         "installer failed (exit %d):\n%s\n%s"
+                         % (r.returncode, r.stdout[-1500:], r.stderr[-1500:]))
         return r, target
 
     def test_a_starter_install_does_not_tell_you_to_type_a_slash_command(self):
         r, target = self._install()
-        if r.returncode != 0:
-            self.skipTest("installer did not run here (rc=%d): %s"
-                          % (r.returncode, r.stderr[:400]))
         self.assertFalse(
             (target / ".claude").exists(),
             "assumption broken: a starter install now creates .claude/; update this test")
@@ -136,8 +139,6 @@ class ClosingMessageMatchesWhatWasInstalled(unittest.TestCase):
     def test_the_closing_message_still_tells_the_user_what_to_do(self):
         """The mirror direction: do not fix this by deleting the guidance."""
         r, _ = self._install()
-        if r.returncode != 0:
-            self.skipTest("installer did not run here (rc=%d)" % r.returncode)
         self.assertRegex(
             r.stdout, r"(?i)claude-engine|codex-engine|AGENTS\.md|CLAUDE\.md|describe",
             "the closing message no longer points the user anywhere at all -- "

@@ -48,10 +48,18 @@ It does not currently implement automatic context-window compaction, learned evi
 2. Plan validation proves declared structure, not that verification actually ran.
 3. `build_verify.py` executes project-controlled code and is not a sandbox; `--isolated` protects only the source tree.
 4. Memory exchange checks approval metadata and known secret patterns. A CLI flag or record field is a caller assertion, not authenticated human consent; the host must establish the authorized storage scope.
-5. Generated runtime assets must match their workflow source through `scripts/sync_runtime_assets.py --check`.
+5. Generated runtime assets must match their workflow source through `scripts/sync_runtime_assets.py --check`. The check also reports unexpected command/skill entrypoints after a workflow deletion or rename. Sync refuses until those files are reviewed and moved or removed manually; it does not delete user-authored adapters.
 6. Publishing is outside the runtime and requires a human privacy review.
 
 ## Current architectural gaps
+
+Plan creation and compilation hold the same per-plan lease and publication fence from the initial read through the final save. This serializes cooperating writers and keeps compiled packets tied to the plan revision being marked running. It does not prevent arbitrary direct file edits, make a whole packet set transactional, or bind a later completion assertion to an execution revision.
+
+On POSIX, lease-loss cancellation targets a command's ordinary process group, including workers that remain after its immediate child exits. The CLI also performs bounded cleanup for SIGINT/SIGTERM before releasing its lease, then restores the caller's signal behavior. This is process cleanup, not containment of deliberately detached processes. A cancellation error remains a failed command, not proof of successful cleanup.
+
+Run-index rebuilds hold a shared lease and publication fence from enumeration through atomic replacement of `runs/INDEX.md`. This prevents an older cooperating rebuild from overwriting a newer completed rebuild. The catalogue remains a derived view; run files remain authoritative. Concurrent hostile path replacement is refused at publication, but can leave a lease for stale reaping because lease keys use resolved paths.
+
+The default `brain_append.py` operation rebuilds its derived index even when retrying an existing record ID, so retry can finish a refresh that previously failed. `--no-reindex` explicitly skips that refresh. Successful indexing is not a measurement of retrieval quality or a guarantee that another process cannot subsequently change the source.
 
 - Scheduling is documented and locally scriptable, but no first-class scheduler registry exists in the repository.
 - Worktree creation exists, but end-to-end scheduler → isolated worker → verifier orchestration remains an operator workflow.

@@ -18,12 +18,16 @@ Usage:
 
 Try it without any brain configured (uses the bundled sample brief):
   python3 scripts/promptsmith.py --task "build the hero section" \
-      --brief-file examples/sample-brief.md --out-dir /tmp/promptsmith-demo
+      --brief-file examples/sample-brief.md --out-dir demo-packets --no-index
+
+Without --no-index, the shared blackboard index records a path relative to its
+own directory (URL-escaped where needed), even with a custom --out-dir.
 
 Rejections feed back: the rubric instructs the Evaluator to write a lesson line to
 memory/self-improvement-loop.md and record the variant via scripts/evolution.py.
 """
 import os, re, sys, json, subprocess, datetime, tempfile
+from urllib.parse import quote
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project-os/
 # Personal-brain CLI location. Point PROJECT_OS_BRAIN_DIR at any directory
@@ -125,36 +129,51 @@ def _table_cell(value):
     return " ".join(str(value).replace("|", " / ").split())
 
 
+def _parse_args(args):
+    """Validate the whole command before brief reads, helper calls or writes."""
+    valued = {"--task", "--query", "--packet-id", "--out-dir", "--brief-file"}
+    values = {}
+    i = 0
+    while i < len(args):
+        name = args[i]
+        if name not in valued and name != "--no-index":
+            raise ValueError(f"unrecognized argument: {name!r}")
+        if name in values:
+            raise ValueError(f"duplicate option: {name}")
+        if name == "--no-index":
+            values[name] = True
+            i += 1
+            continue
+        if i + 1 >= len(args) or args[i + 1].startswith("--"):
+            raise ValueError(f"missing value for {name}")
+        value = args[i + 1]
+        if not value.strip():
+            raise ValueError(f"empty value for {name}")
+        values[name] = value
+        i += 2
+    if "--task" not in values:
+        raise ValueError("--task is required")
+    return values
+
+
 def main():
-    args = sys.argv[1:]
-
-    def flag(name, default=None):
-        if name in args:
-            i = args.index(name)
-            if i + 1 >= len(args):
-                print(f"usage error: missing value for {name}", file=sys.stderr)
-                sys.exit(2)
-            v = args[i + 1]
-            del args[i:i + 2]
-            return v
-        return default
-
-    task = flag("--task")
-    if not task:
-        print("usage error: --task is required", file=sys.stderr)
-        print(__doc__)
+    try:
+        args = _parse_args(sys.argv[1:])
+    except ValueError as exc:
+        print(f"usage error: {exc}", file=sys.stderr)
         sys.exit(2)
-    query = flag("--query", task)
+    task = args["--task"]
+    query = args.get("--query", task)
     today = datetime.date.today().isoformat()
-    pid = flag("--packet-id", f"psmith-{today}-{slug(task)}")
+    pid = args.get("--packet-id", f"psmith-{today}-{slug(task)}")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,119}", pid):
         print("usage error: refusing --packet-id: use 1–120 ASCII letters, digits, "
               "hyphens or underscores, starting with a letter or digit",
               file=sys.stderr)
         sys.exit(2)
-    out_dir = flag("--out-dir", os.path.join(ROOT, "blackboard", "packets"))
-    brief_file = flag("--brief-file")
-    no_index = "--no-index" in args
+    out_dir = args.get("--out-dir", os.path.join(ROOT, "blackboard", "packets"))
+    brief_file = args.get("--brief-file")
+    no_index = args.get("--no-index", False)
     wp = os.path.join(out_dir, f"{pid}-worker-prompt.md")
     rp = os.path.join(out_dir, f"{pid}-rubric.md")
     idx = os.path.join(ROOT, "blackboard", "05-agent-packets.md")
@@ -167,6 +186,10 @@ def main():
             detail = str(exc).replace("\n", " ")
             print(f"usage error: could not read --brief-file {brief_file!r}: {detail}",
                   file=sys.stderr)
+            sys.exit(2)
+        if not brief_md:
+            print(f"usage error: --brief-file {brief_file!r} is empty; "
+                  "provide a brief containing non-whitespace text", file=sys.stderr)
             sys.exit(2)
         source = f"pre-fetched: {brief_file}"
     else:
@@ -232,6 +255,16 @@ Status: Draft
 Compiled: {today} by promptsmith from the SAME brief as the worker prompt
 (maker and checker share taste priors).
 
+## Task
+
+{task}
+
+## Taste brief — evaluate against this literally
+
+{brief_md}
+
+## Scoring
+
 **Pass bar:** >= 0.80 weighted, no criterion < 0.50.
 **Auto-fail:** any DON'T violation rejects regardless of weighted score.
 
@@ -272,8 +305,12 @@ Compiled: {today} by promptsmith from the SAME brief as the worker prompt
         if os.path.exists(idx):
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
             import bb_lock
+            # Preserve the destination while keeping whitespace and delimiters
+            # from changing the Markdown table. Default paths stay unchanged.
+            packet_ref = quote(os.path.relpath(os.path.abspath(wp),
+                                              os.path.dirname(idx)), safe="/")
             cells = (pid, "promptsmith", _table_cell(task)[:60], "Draft",
-                     f"packets/{os.path.basename(wp)}")
+                     packet_ref)
             row = "| " + " | ".join(_table_cell(cell) for cell in cells) + " |"
             token = bb_lock.acquire(idx, agent="promptsmith", wait=10)
             if token:

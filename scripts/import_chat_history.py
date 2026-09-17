@@ -19,8 +19,12 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import io
 import json
+import os
 import re
+import secrets
+import stat
 import sys
 from collections import Counter
 from pathlib import Path
@@ -63,21 +67,13 @@ SPAN_WIDENER_PATTERNS = [
         re.S), "[REDACTED_PRIVATE_KEY]"),
 ]
 
-# The shared list's generic keyword catch-all -- (api_key|secret|password|
-# passwd|token|bearer) + separator + 6+ non-space chars -- has no vendor shape
-# to anchor on, so ordinary prose like "the secret: happiness comes from
-# within" trips it and the redactor eats a real sentence. A live credential
-# VALUE is one opaque, high-entropy token; a prose value is a natural-language
-# word. Mirror the brain-side gate that stopped {"auth_token": "rotate
-# quarterly per runbook"} from being REFUSED (2026-07-26): skip a match that is
-# a keyword + separator + a single plain alphabetic word. Only the generic
-# catch-all can ever produce that exact shape -- every vendor pattern's match
-# carries digits, symbols, or a non-keyword prefix -- so this can never
-# un-redact a vendor key (audit 2026-07-27). The 15-char cap keeps a long
-# all-letter passphrase (unusual, but possible) on the redacted side.
+# Alphabetic values are still passwords. Exempt only colon-labelled prose
+# about a design token or "the secret", with a sentence continuing afterward.
+# An equals sign or a credential-specific label never receives this exemption.
 _KEYWORD_PROSE_MATCH = re.compile(
-    r"(?:api[_-]?key|secret|password|passwd|token|bearer)\s*[:=]\s*"
+    r"(?:secret|token):\s+"
     r"[A-Za-z]{1,15}\Z", re.I)
+_PROSE_CONTEXT = re.compile(r"\b(?:the (?=secret:)|design (?=token:))", re.I)
 
 # Personal data the shared credential list does not carry. No vendor
 # credential shape may be defined here, because that is what drifts.
@@ -92,30 +88,73 @@ class RedactionUnavailable(RuntimeError):
     """The authoritative credential list could not be loaded."""
 
 
+def _load_canonical_scanner():
+    """Load this installation's shared scanner, never a sys.path substitute."""
+    canonical_path = ROOT / "scripts" / "secret_patterns.py"
+    if canonical_path.is_symlink() or not canonical_path.is_file():
+        raise RedactionUnavailable("canonical scripts/secret_patterns.py is unavailable")
+    try:
+        canonical_spec = importlib.util.spec_from_file_location(
+            "project_os_canonical_secret_patterns", str(canonical_path))
+        canonical = importlib.util.module_from_spec(canonical_spec)
+        # Use the installation's current source even if timestamp/size-valid
+        # bytecode exists. A privacy gate must not use a stale cached scanner.
+        exec(compile(canonical_path.read_bytes(), str(canonical_path), "exec"),
+             canonical.__dict__)
+        canonical_patterns = canonical.SECRET_PATTERNS
+        specs = canonical.SECRET_PATTERN_SPECS
+        if (not isinstance(canonical_patterns, (list, tuple)) or not canonical_patterns
+                or not isinstance(specs, (list, tuple)) or not specs):
+            raise ValueError("canonical exports must be nonempty sequences")
+        expected = []
+        for item in specs:
+            if (not isinstance(item, (list, tuple)) or len(item) != 2
+                    or not all(isinstance(value, str) and value for value in item)):
+                raise ValueError("invalid canonical pattern specification")
+            expected.append(re.compile(item[0]))
+        if (any(not isinstance(p, re.Pattern) or not isinstance(p.pattern, str)
+                for p in canonical_patterns)
+                or [(p.pattern, p.flags) for p in canonical_patterns]
+                != [(p.pattern, p.flags) for p in expected]):
+            raise ValueError("compiled patterns do not match canonical specifications")
+    except (Exception, SystemExit):
+        # Exception text can contain source or credentials. Keep refusals inert.
+        raise RedactionUnavailable("canonical secret scanner could not be loaded") from None
+    return canonical
+
+
 def load_credential_patterns() -> list:
-    """Return brain.py's SECRET_PATTERNS as (regex, replacement) pairs.
+    """Return brain.py's patterns only when they cover the canonical scanner.
 
-    Loaded by file path (the install_full_engine.load_central_brain_module
-    idiom) so an unrelated `brain` module on sys.path cannot shadow it, and
-    gated on SECRET_SCAN_EXHAUSTIVE exactly like scripts/brain_append.py so an
-    older brain.py cannot silently downgrade this to a narrower list.
-
-    Raises RedactionUnavailable on every failure shape; the caller refuses.
+    Both modules are located in this installation. The exhaustive marker
+    alone is insufficient: portable brain copies retain a compatibility list.
+    Raises RedactionUnavailable on failure; the caller refuses.
     """
+    canonical = _load_canonical_scanner()
+    required = {(p.pattern, p.flags) for p in canonical.SECRET_PATTERNS}
     path = next((p for p in BRAIN_MODULE_CANDIDATES if p.is_file()), None)
     if path is None:
         raise RedactionUnavailable(
             "the brain module is not present at "
             + " or ".join(str(p) for p in BRAIN_MODULE_CANDIDATES)
         )
-    spec = importlib.util.spec_from_file_location("project_os_brain_patterns", str(path))
-    if spec is None or spec.loader is None:
-        raise RedactionUnavailable(f"{path} could not be loaded")
-    module = importlib.util.module_from_spec(spec)
+    previous_scanner = sys.modules.get("secret_patterns")
     try:
-        spec.loader.exec_module(module)
-    except Exception as exc:  # noqa: BLE001 - any import failure must fail closed
-        raise RedactionUnavailable(f"{path} failed to import ({exc})")
+        if path.is_symlink():
+            raise ValueError("brain module must be local")
+        spec = importlib.util.spec_from_file_location("project_os_brain_patterns", str(path))
+        module = importlib.util.module_from_spec(spec)
+        # The brain's imports must see the validated installation-local source,
+        # not an earlier sys.modules entry or stale scanner bytecode.
+        sys.modules["secret_patterns"] = canonical
+        exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+    except (Exception, SystemExit):
+        raise RedactionUnavailable("the brain module could not be loaded") from None
+    finally:
+        if previous_scanner is None:
+            sys.modules.pop("secret_patterns", None)
+        else:
+            sys.modules["secret_patterns"] = previous_scanner
     if not getattr(module, "SECRET_SCAN_EXHAUSTIVE", False):
         raise RedactionUnavailable(
             f"{path} does not advertise SECRET_SCAN_EXHAUSTIVE, so it may screen "
@@ -123,8 +162,11 @@ def load_credential_patterns() -> list:
         )
     patterns = getattr(module, "SECRET_PATTERNS", None)
     if (not isinstance(patterns, (list, tuple)) or not patterns
-            or not all(hasattr(p, "finditer") for p in patterns)):
+            or not all(isinstance(p, re.Pattern) and isinstance(p.pattern, str)
+                       for p in patterns)):
         raise RedactionUnavailable(f"{path} exposes no usable SECRET_PATTERNS")
+    if not required.issubset({(p.pattern, p.flags) for p in patterns}):
+        raise RedactionUnavailable(f"{path} does not provide canonical scanner coverage")
     return [(p, CREDENTIAL_REPLACEMENT) for p in patterns]
 
 
@@ -168,11 +210,29 @@ def _sub_whole_tokens(text: str, pattern, replacement: str):
     spans = []
     hits = 0
     for match in pattern.finditer(text):
-        # Ordinary prose that merely reads "keyword: word" is not a credential;
-        # skip it so a real sentence survives the report (audit 2026-07-27).
-        if _KEYWORD_PROSE_MATCH.match(match.group(0)):
+        # A short alphabetic value alone is never evidence of harmless prose.
+        context = _PROSE_CONTEXT.search(text, max(0, match.start() - 7), match.start() + 7)
+        if (_KEYWORD_PROSE_MATCH.fullmatch(match.group(0)) and context
+                and context.end() == match.start()
+                and re.match(r"[ \t]+[A-Za-z]+\b", text[match.end():])):
             continue
         start, end = match.span()
+        # A quoted passphrase can contain spaces; consume through its closing
+        # quote (or line end if truncated), not just the first matched word.
+        quoted = re.search(r"[:=]\s*([\"'])", match.group(0))
+        if quoted:
+            value_start = start + quoted.end()
+            cursor = value_start
+            escaped = False
+            while cursor < len(text) and text[cursor] not in "\r\n":
+                char = text[cursor]
+                cursor += 1
+                if char == quoted.group(1) and not escaped:
+                    break
+                # An odd run of backslashes escapes a quote; an even run
+                # leaves it as the boundary. Truncated values end at EOL/EOS.
+                escaped = char == "\\" and not escaped
+            end = max(end, cursor)
         # Both scans are bounded by the previous span's end, which is always a
         # whitespace index (or end of text). Without that bound a long
         # whitespace-free blob -- a minified JSON export line -- rescans the
@@ -213,15 +273,9 @@ def redact(text: str, patterns: list = None, counts: Counter = None) -> str:
     never be summarized silently.
     """
     if patterns is None:
-        # Direct library callers still get the shared labeled redactions. The
-        # CLI supplies the brain-authoritative patterns below, where failure to
-        # load them remains a visible, fail-closed refusal.
-        sys.path.insert(0, str(ROOT / "scripts"))
-        try:
-            from secret_patterns import redaction_pairs
-            patterns = redaction_patterns(redaction_pairs())
-        finally:
-            sys.path.pop(0)
+        # Preserve the labeled API for library callers, with the same local
+        # canonical-module requirement as the CLI.
+        patterns = redaction_patterns(_load_canonical_scanner().redaction_pairs())
     for pattern, replacement in patterns:
         text, hits = _sub_whole_tokens(text, pattern, replacement)
         if hits and counts is not None:
@@ -306,6 +360,119 @@ def clipped_hint(line: str, max_words: int = 10) -> str:
     return hint + ("..." if len(words) > max_words else "")
 
 
+def _private_report_parent(output: Path) -> int:
+    """Open each parent without following links; create missing dirs privately.
+
+    Keep the directory descriptor for all subsequent publication operations,
+    so a parent-path substitution cannot redirect a write to another tree.
+    Platforms without no-follow directory operations must refuse safely.
+    """
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        raise OSError("private report publication requires no-follow directory operations")
+    parent = Path(os.path.abspath(output)).parent
+    # Traversal needs search permission, not permission to list every ancestor.
+    access = getattr(os, "O_SEARCH", getattr(os, "O_PATH", os.O_RDONLY))
+    flags = access | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open(parent.anchor, flags)
+    try:
+        for part in parent.parts[1:]:
+            try:
+                child = os.open(part, flags, dir_fd=fd)
+            except FileNotFoundError:
+                os.mkdir(part, mode=0o700, dir_fd=fd)
+                child = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _report_stat(fd: int, name: str):
+    try:
+        current = os.stat(name, dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
+        raise OSError("report paths must be regular files with no links")
+    return current
+
+
+def _same_report(left, right) -> bool:
+    if left is None or right is None:
+        return left is right
+    return (left.st_dev, left.st_ino, left.st_size, left.st_mtime_ns, left.st_ctime_ns) == (
+        right.st_dev, right.st_ino, right.st_size, right.st_mtime_ns, right.st_ctime_ns)
+
+
+def _publish_private_report(output: Path, data: bytes) -> None:
+    """Stage private files, retain the old report, then atomically publish.
+
+    Never overwrite an existing backup. Refuse links, special files and an
+    output changed while preparing the replacement. Every staging file starts
+    at 0600, independent of umask; tighter original owner modes are retained.
+    """
+    fd = _private_report_parent(output)
+    staged = []
+
+    def stage(content, mode):
+        name = ".chat-report-" + secrets.token_hex(16)
+        file_fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                          0o600, dir_fd=fd)
+        staged.append(name)
+        with os.fdopen(file_fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fchmod(stream.fileno(), mode)
+            os.fsync(stream.fileno())
+        return name
+
+    try:
+        name = output.name
+        backup = name + ".bak"
+        original = _report_stat(fd, name)
+        previous = None
+        if original is not None:
+            # lstat also sees dangling symlinks. Any existing backup belongs
+            # to the user and is a refusal, not permission to clobber it.
+            try:
+                os.stat(backup, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise OSError("report backup already exists; choose a new output path")
+            old_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+            with os.fdopen(old_fd, "rb") as stream:
+                if not _same_report(original, os.fstat(stream.fileno())):
+                    raise OSError("report changed before backup")
+                previous = stream.read()
+                if not _same_report(original, os.fstat(stream.fileno())):
+                    raise OSError("report changed during backup")
+        mode = stat.S_IMODE(original.st_mode) & 0o600 if original else 0o600
+        report_stage = stage(data, mode)
+        backup_stage = stage(previous, mode) if previous is not None else None
+        if not _same_report(original, _report_stat(fd, name)):
+            raise OSError("report changed before publication")
+        if backup_stage is not None:
+            # link is atomic and exclusive: a racing backup cannot be replaced.
+            os.link(backup_stage, backup, src_dir_fd=fd, dst_dir_fd=fd,
+                    follow_symlinks=False)
+            os.replace(report_stage, name, src_dir_fd=fd, dst_dir_fd=fd)
+        else:
+            os.link(report_stage, name, src_dir_fd=fd, dst_dir_fd=fd,
+                    follow_symlinks=False)
+    finally:
+        try:
+            for name in staged:
+                try:
+                    os.unlink(name, dir_fd=fd)
+                except FileNotFoundError:
+                    pass
+        finally:
+            os.close(fd)
+
+
 def write_summary(
     lines: list[str],
     output: Path,
@@ -330,14 +497,7 @@ def write_summary(
     )
     tools = count_tools(lines).most_common(20)
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    # 2026-07-25: back up any pre-existing report before truncating it. A prior
-    # run's output (or a hand-curated file placed at the same path) would
-    # otherwise be silently destroyed by the unconditional open("w") below.
-    if output.exists():
-        backup = output.with_name(output.name + ".bak")
-        backup.write_bytes(output.read_bytes())
-    with output.open("w", encoding="utf-8") as f:
+    with io.StringIO() as f:
         f.write("# Private Chat Memory Summary\n\n")
         f.write("Generated locally from user-provided exports. Review before using. Keep this file private.\n\n")
         f.write("This default report avoids copying full source lines. Use it as a review queue, not as verified memory.\n\n")
@@ -370,6 +530,7 @@ def write_summary(
         f.write("- user-preference: Open the original private export locally and write a short approved summary in your own words.\n")
         f.write("- project-pattern: Convert repeated project ideas into reusable patterns only after manual review.\n")
         f.write("- lesson: Convert recurring blockers into lessons or safeguards only after manual review.\n")
+        _publish_private_report(output, f.getvalue().encode("utf-8"))
 
 
 def main() -> int:
@@ -394,8 +555,8 @@ def main() -> int:
     except RedactionUnavailable as exc:
         print(
             f"REFUSED: {exc}; refusing to write a report that was never screened "
-            "for credentials. Restore addons/full-engine/brain/brain.py (the "
-            "authoritative secret list) and retry.",
+            "for credentials. Restore scripts/secret_patterns.py and the "
+            "matching brain module, then retry.",
             file=sys.stderr,
         )
         return 2
@@ -405,7 +566,11 @@ def main() -> int:
         parser.error(str(exc))
     redaction_counts: Counter = Counter()
     lines = clean_lines(chunks, patterns, redaction_counts)
-    write_summary(lines, output_path, args.max_items, args.include_excerpts, redaction_counts)
+    try:
+        write_summary(lines, output_path, args.max_items, args.include_excerpts, redaction_counts)
+    except OSError as exc:
+        print(f"REFUSED: could not safely publish private report: {exc}", file=sys.stderr)
+        return 2
     print(f"Wrote private memory summary: {output_path}")
     print(f"Redacted {sum(redaction_counts.values())} secret-like value(s) before writing.")
     print("Review the original exports manually before copying any summary into the project blackboard.")

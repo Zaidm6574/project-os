@@ -41,6 +41,8 @@ def install(base, full=True):
     shutil.copytree(ROOT / "blackboard-template", project / "blackboard")
     shutil.copytree(ROOT / "blackboard-template", project / "blackboard-template")
     (project / "memory").mkdir()
+    (project / "scripts").mkdir()
+    shutil.copy2(ROOT / "scripts/bb_lock.py", project / "scripts/bb_lock.py")
     for name in SCRIPTS if full else ("new_run.py",):
         shutil.copy2(ENGINE / name, project / "memory" / name)
     if full:

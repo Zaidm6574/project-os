@@ -46,6 +46,9 @@ INSTALL_SH = ROOT / "install.sh"
 
 class QuickStartTellsTheTruth(unittest.TestCase):
     def setUp(self):
+        if sys.version_info < (3, 10):
+            self.skipTest("installer integration requires Python 3.10+; test interpreter is %d.%d"
+                          % sys.version_info[:2])
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.work = Path(self.tmp.name)
@@ -55,8 +58,12 @@ class QuickStartTellsTheTruth(unittest.TestCase):
     def _install(self, target, *extra):
         env = dict(os.environ)
         env["HOME"] = str(self.home)
-        return subprocess.run(["sh", str(INSTALL_SH), str(target), *extra],
-                              capture_output=True, text=True, cwd=str(ROOT), env=env)
+        r = subprocess.run(["sh", str(INSTALL_SH), str(target), *extra],
+                           capture_output=True, text=True, cwd=str(ROOT), env=env)
+        self.assertEqual(r.returncode, 0,
+                         "installer failed (exit %d):\n%s\n%s"
+                         % (r.returncode, r.stdout[-1500:], r.stderr[-1500:]))
+        return r
 
     def test_quickstart_does_not_send_a_starter_install_to_a_slash_command(self):
         """The README's own quick-start sequence must end somewhere real."""
@@ -76,9 +83,7 @@ class QuickStartTellsTheTruth(unittest.TestCase):
         # A starter install creates no slash commands -- confirm, then require
         # that the section does not tell the reader to type one.
         target = self.work / "qs"
-        r = self._install(target)
-        if r.returncode != 0:
-            self.skipTest("installer did not run here (rc=%d)" % r.returncode)
+        self._install(target)
         self.assertFalse((target / ".claude").exists(),
                          "assumption broken: a starter install now creates .claude/")
 
@@ -123,6 +128,9 @@ class DocumentedToolCommandsWorkInAnInstalledProject(unittest.TestCase):
     """The tools are meant to be run in YOUR project, not only in a clone."""
 
     def setUp(self):
+        if sys.version_info < (3, 10):
+            self.skipTest("installer integration requires Python 3.10+; test interpreter is %d.%d"
+                          % sys.version_info[:2])
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.work = Path(self.tmp.name)
@@ -133,8 +141,9 @@ class DocumentedToolCommandsWorkInAnInstalledProject(unittest.TestCase):
         env["HOME"] = str(self.home)
         r = subprocess.run(["sh", str(INSTALL_SH), str(self.target)],
                            capture_output=True, text=True, cwd=str(ROOT), env=env)
-        if r.returncode != 0:
-            self.skipTest("installer did not run here (rc=%d)" % r.returncode)
+        self.assertEqual(r.returncode, 0,
+                         "installer failed (exit %d):\n%s\n%s"
+                         % (r.returncode, r.stdout[-1500:], r.stderr[-1500:]))
 
     def test_the_brief_file_the_readme_names_is_installed(self):
         text = README.read_text(encoding="utf-8")

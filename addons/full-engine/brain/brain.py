@@ -38,6 +38,7 @@ import sys
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -146,15 +147,40 @@ def _create_private(path) -> bool:
 def _could_be_credential(value):
     """Could this VALUE be the secret a keyword pattern is hunting for?
 
-    Only used to gate the "key=value" spelling of the split-credential scan
-    (see _iter_scannable_items). A live credential is one opaque token: prose
-    ("rotate quarterly per runbook") contains whitespace, and a redaction
-    marker ("REDACTED", "***") carries no secret. Both were being REFUSED,
-    which blocks legitimate saves. The bare key+value concatenation is still
-    yielded unconditionally, so prefix reassembly is unaffected by this gate.
+    Only gates the generic "key=value" spelling of the split scan. Structured
+    sensitive fields have a separate fail-closed check: a password can contain
+    whitespace. The bare concatenation is always scanned for split prefixes.
     """
     return bool(value.strip()) and not (
         re.search(r"\s", value) or _PLACEHOLDER_VALUE.match(value))
+
+
+def _sensitive_field_has_value(key, value):
+    """Use the canonical key policy, allowing only empty/redacted values.
+
+    A portable script without scripts/ uses the same conservative key names,
+    not a claim of canonical credential-pattern coverage. Prose belongs in a
+    note field; whitespace cannot distinguish a note from a passphrase.
+    """
+    if _secret_patterns is not None:
+        sensitive = _secret_patterns.is_sensitive_key(key)
+    else:
+        normalized = re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
+        sensitive = normalized in {
+            "api_key", "apikey", "secret", "password", "passwd", "token",
+            "authorization", "access_token", "refresh_token", "auth_token",
+            "client_secret", "private_key",
+        } or normalized.endswith((
+            "_api_key", "_secret", "_password", "_passwd", "_token",
+            "_authorization", "_private_key",
+        ))
+    if not sensitive or value is None or value is False:
+        return False
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8", "replace")
+    if isinstance(value, str):
+        return bool(value) and _PLACEHOLDER_VALUE.fullmatch(value) is None
+    return True
 
 
 # Historical allowlist of the fields a human was expected to paste text into.
@@ -415,6 +441,8 @@ def _iter_scannable_items(value, root: str = ""):
                 if isinstance(key, str):
                     kpath = _child_path(path, key)
                     yield kpath, key
+                    if _sensitive_field_has_value(key, sub):
+                        raise _Unscannable(kpath)
                     # 2026-07-26 audit: a credential SPLIT across a key and its
                     # value defeats per-string scanning -- a token prefix key
                     # plus the remaining 40 chars as the value each match no
@@ -426,14 +454,9 @@ def _iter_scannable_items(value, root: str = ""):
                     # Extra yields only ADD ways to refuse; nothing that was
                     # scanned before is skipped because of them.
                     #
-                    # The "=" spelling is GATED on the value looking like a
-                    # credential, because the keyword catch-all only needs six
-                    # non-space characters after the separator: ungated, it
-                    # refused {"auth_token": "rotate quarterly per runbook"}
-                    # and {"client_secret": "REDACTED"} -- ordinary notes a
-                    # user is entitled to save (judge round 2026-07-26). A
-                    # value with whitespace or no entropy cannot BE the secret
-                    # the pattern is looking for.
+                    # Keep the generic split-pattern near-miss controls, but
+                    # never use their whitespace exemption for a structured
+                    # sensitive field (checked above).
                     if isinstance(sub, str):
                         joined = sub
                     elif isinstance(sub, (bytes, bytearray)):
@@ -589,14 +612,16 @@ def _lessons_from_adapter():
     out = []
     for rec in blob.get("records", {}).values():
         if rec.get("memory_type") == "lesson":
-            out.append({
+            lesson = {
                 "id": rec.get("memory_id"),
                 "ts": rec.get("created_at", "") or time.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "source": "project-os",
                 "type": "lesson",
                 "text": rec.get("text", ""),
                 "tags": rec.get("tags", []) or [],
-            })
+            }
+            _preserve_approval(rec, lesson)
+            out.append(lesson)
     return out
 
 
@@ -607,6 +632,18 @@ def _adapter_search_paths():
         os.path.join(ROOT, "addons", "full-engine", "memory"),
     )
     return tuple(dict.fromkeys(os.path.abspath(path) for path in candidates))
+
+
+def _preserve_approval(source, lesson):
+    """Normalization must not turn an explicitly private row into a lesson.
+
+    Keep presence and exact values, including false/null/invalid values, so
+    central sync can apply its strict approval policy after this exchange.
+    Legacy lessons with no approval vocabulary remain unchanged.
+    """
+    for field in ("approved", "summary_only", "raw_chat"):
+        if field in source:
+            lesson[field] = source[field]
 
 
 def _lessons_from_file(path):
@@ -665,14 +702,16 @@ def _lessons_from_file(path):
         else:
             typ = r.get("type") or r.get("kind") or r.get("memory_type")
         if typ == "lesson":
-            out.append({
+            lesson = {
                 "id": r.get("id") or r.get("memory_id"),
                 "ts": r.get("ts") or r.get("created_at", "") or time.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "source": r.get("source", "project-os"),
                 "type": "lesson",
                 "text": r.get("text", ""),
                 "tags": r.get("tags", []) or [],
-            })
+            }
+            _preserve_approval(r, lesson)
+            out.append(lesson)
     return out
 
 
@@ -727,20 +766,123 @@ def cmd_export(args):
     return 0
 
 
+def _exchange_stat(directory_fd, name):
+    try:
+        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise OSError("exchange output must be one regular file without links")
+    return info
+
+
+def _exchange_version(info):
+    if info is None:
+        return None
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+@contextmanager
+def _exchange_destination(path):
+    """Pin a project-local parent and serialize exchange publication.
+
+    Match the private-report writer's no-follow directory traversal. Start at
+    the canonical project root so platform aliases above it remain supported.
+    Existing directories are required, as with the former open(..., 'w').
+    """
+    full = _safe_path(path)
+    original = os.path.abspath(path)
+    root = os.path.abspath(ROOT)
+    if os.path.commonpath([original, root]) != root:
+        root = os.path.realpath(root)
+    if os.path.commonpath([original, root]) != root:
+        raise OSError("exchange output must be inside the project")
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        raise OSError("private exchange requires no-follow directory operations")
+    access = getattr(os, "O_SEARCH", getattr(os, "O_PATH", os.O_RDONLY))
+    flags = access | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory_fd = os.open(os.path.realpath(root), flags)
+    token = None
+    failed = False
+    try:
+        parts = os.path.relpath(original, root).split(os.sep)
+        for part in parts[:-1]:
+            child = os.open(part, flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = child
+        name = parts[-1]
+        _exchange_stat(directory_fd, name)
+        if bb_lock is None:
+            if CORE_SCRIPTS is not None:
+                raise RuntimeError("shared-brain locking support is required")
+            yield directory_fd, name, full
+        else:
+            token = bb_lock.acquire(full, agent="brain-exchange", wait=10)
+            if not token:
+                raise RuntimeError("could not lock exchange output")
+            with bb_lock.fenced(full, token):
+                yield directory_fd, name, full
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        os.close(directory_fd)
+        if token and not bb_lock.release(full, agent="brain-exchange", token=token):
+            # Preserve a prior refusal. A substituted pathname can also make
+            # the path-keyed lock unreleasable; its lease remains reapable.
+            if not failed:
+                raise RuntimeError("exchange output lock release failed")
+
+
+def _publish_private_exchange(directory_fd, name, full, data):
+    """Stage at 0600 and atomically publish, preserving old bytes on failure.
+
+    Reuses the private-report writer's descriptor-relative staging pattern
+    without report backup semantics. Existing owner restrictions are retained;
+    group/other access is removed. A new destination is published exclusively.
+    """
+    original = _exchange_stat(directory_fd, name)
+    mode = stat.S_IMODE(original.st_mode) & 0o600 if original else 0o600
+    stage = ".brain-exchange-" + uuid.uuid4().hex
+    file_fd = os.open(stage, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                      0o600, dir_fd=directory_fd)
+    try:
+        with os.fdopen(file_fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fchmod(stream.fileno(), mode)
+            os.fsync(stream.fileno())
+        parent = os.stat(os.path.dirname(full), follow_symlinks=False)
+        pinned = os.fstat(directory_fd)
+        if (parent.st_dev, parent.st_ino) != (pinned.st_dev, pinned.st_ino):
+            raise OSError("exchange output parent changed before publication")
+        if _exchange_version(original) != _exchange_version(_exchange_stat(directory_fd, name)):
+            raise OSError("exchange output changed before publication")
+        if original is None:
+            os.link(stage, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd,
+                    follow_symlinks=False)
+        else:
+            os.replace(stage, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+    finally:
+        try:
+            os.unlink(stage, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+
+
 def cmd_import(args):
-    lessons = _read_jsonl(_safe_brain_path())
     if args.into:
-        # `--into` EXPORTS brain contents to another file, so it is a write path
-        # and must clear the same gate. Printing to stdout below is not a write.
-        gate_records(lessons, where="import --into")
-        full = _safe_path(args.into)
-        with open(full, "w") as f:
-            for l in lessons:
-                f.write(json.dumps(l) + "\n")
+        # Hold the destination's canonical writer lock before reading: --into
+        # may name the brain itself, where an intervening append must survive.
+        with _exchange_destination(args.into) as (directory_fd, name, full):
+            lessons = _read_jsonl(_safe_brain_path())
+            gate_records(lessons, where="import --into")
+            data = "".join(json.dumps(lesson) + "\n" for lesson in lessons).encode("utf-8")
+            _publish_private_exchange(directory_fd, name, full, data)
         print(f"import: wrote {len(lessons)} lesson(s) to {os.path.relpath(full, ROOT)}")
     else:
-        for l in lessons:
-            print(json.dumps(l))
+        for lesson in _read_jsonl(_safe_brain_path()):
+            print(json.dumps(lesson))
     return 0
 
 

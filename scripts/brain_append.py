@@ -238,19 +238,21 @@ def main():
     if not released:
         print("FAILED: shared-brain lock release failed", file=sys.stderr)
         sys.exit(1)
-    if outcome == "kept":
-        print("kept existing id: %s" % record.get("id"))
-        sys.exit(0)
+    # A previous attempt may have durably appended this ID but failed to
+    # rebuild the index. Dedupe prevents a second row; it must not bypass the
+    # default refresh postcondition on retry.
+    status = ("kept existing id: %s" % record.get("id")
+              if outcome == "kept" else "appended")
 
     if no_reindex:
-        print("appended (reindex skipped — run memory/mneme_adapter.py build when done)")
+        print(status + " (reindex skipped — run memory/mneme_adapter.py build when done)")
         sys.exit(0)
 
     r = subprocess.run([sys.executable, MNEME, "build"], capture_output=True, text=True)
     if r.returncode == 0:
-        print("appended + reindexed:", (r.stdout or "").strip())
+        print(status + " + reindexed:", (r.stdout or "").strip())
         sys.exit(0)
-    print("appended, but reindex FAILED — run memory/mneme_adapter.py build manually:\n"
+    print(status + ", but reindex FAILED — run memory/mneme_adapter.py build manually:\n"
           + (r.stderr or "")[:300], file=sys.stderr)
     sys.exit(1)
 

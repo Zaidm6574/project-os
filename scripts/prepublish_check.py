@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """prepublish_check — scan a tree for credential shapes before you publish it.
 
-Uses THE canonical denylist (brain.SECRET_PATTERNS), not a copy of it.
+Uses this installation's canonical scripts/secret_patterns.py, not a copy of it
+or the optional brain module's portable compatibility list.
 
 2026-07-28: the README told readers to run a hand-written `rg` regex with seven
 patterns immediately before making a repo public. The canonical list has
@@ -28,7 +29,9 @@ Exit codes:
      a scanner that silently checks nothing is worse than no scanner at all
 """
 import argparse
+import importlib.util
 import os
+import re
 import subprocess
 import sys
 
@@ -46,24 +49,42 @@ SKIP_SUFFIXES = (".gif", ".png", ".jpg", ".jpeg", ".pdf", ".zip", ".gz",
 
 
 def load_patterns():
-    """Import the canonical list. Fail closed if it cannot be found."""
-    sys.path.insert(0, os.path.join(ROOT, "addons", "full-engine", "brain"))
+    """Load and validate the installation-local canonical list, or refuse."""
+    canonical = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                             "secret_patterns.py")
     try:
-        import brain
-    except Exception as exc:  # noqa: BLE001 -- report, do not pretend to scan
-        print("prepublish_check: cannot import the canonical denylist from "
-              "addons/full-engine/brain/brain.py (%s).\n"
-              "Refusing to run a partial scan -- a check that silently verifies "
-              "nothing is worse than no check." % exc, file=sys.stderr)
-        sys.exit(2)
-    finally:
-        sys.path.pop(0)
-    pats = getattr(brain, "SECRET_PATTERNS", None)
-    if not pats:
-        print("prepublish_check: brain.SECRET_PATTERNS is empty or missing.",
-              file=sys.stderr)
-        sys.exit(2)
-    return pats
+        if os.path.islink(canonical) or not os.path.isfile(canonical):
+            raise ValueError("canonical module must be a local regular file")
+        spec = importlib.util.spec_from_file_location("_prepublish_canonical", canonical)
+        module = importlib.util.module_from_spec(spec)
+        # Read the exact sibling source, not a cached/ancestor/sys.path module
+        # or a stale bytecode file. A scan must not create cache files either.
+        with open(canonical, "rb") as handle:
+            source = handle.read()
+        exec(compile(source, canonical, "exec"), module.__dict__)
+        patterns = module.SECRET_PATTERNS
+        specs = module.SECRET_PATTERN_SPECS
+        if (not isinstance(patterns, (tuple, list)) or not patterns
+                or not isinstance(specs, (tuple, list)) or not specs):
+            raise ValueError("canonical exports must be nonempty sequences")
+        expected = []
+        for item in specs:
+            if (not isinstance(item, (tuple, list)) or len(item) != 2
+                    or not all(isinstance(value, str) and value for value in item)):
+                raise ValueError("invalid canonical pattern specification")
+            expected.append(re.compile(item[0]))
+        if (any(not isinstance(pattern, re.Pattern)
+                or not isinstance(pattern.pattern, str) for pattern in patterns)
+                or [(pattern.pattern, pattern.flags) for pattern in patterns]
+                != [(pattern.pattern, pattern.flags) for pattern in expected]):
+            raise ValueError("compiled patterns do not match canonical specifications")
+        return tuple(patterns)
+    except (Exception, SystemExit):  # invalid scanner source must also fail closed
+        # Import/compile exception text can contain source or credential values.
+        print("prepublish_check: cannot load the installation-local canonical denylist.\n"
+              "Restore a complete, valid scripts/secret_patterns.py from this installation.\n"
+              "Refusing to run a partial scan.", file=sys.stderr)
+        raise SystemExit(2) from None
 
 
 def iter_files(root):

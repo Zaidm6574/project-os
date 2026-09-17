@@ -58,23 +58,20 @@ BENIGN_PAIRS = {
     "prefix_lookalike": {"skills": "ant-colony-optimization-notes"},
 }
 
-# Keys that END in a credential keyword — the exact shape the "key=value"
-# spelling of the split scan feeds to the keyword catch-all, which needs only
-# six non-space characters after its separator. Ungated, EVERY one of these was
-# REFUSED, so a user could not save "auth_token: rotate quarterly per runbook"
-# (judge round 2026-07-26). A value carrying whitespace or no entropy cannot BE
-# the secret the pattern hunts, so all of these must be ALLOWED. Without this
-# fixture family a naive "the key name contains a credential word" rule passes
-# the whole file — the judge built that mutant and it survived.
+# Whole-value placeholders carry no credential and remain valid under sensitive
+# keys. Whitespace alone is not an exemption: passwords may be passphrases.
+# Keep prose in clearly named note fields rather than sensitive value fields.
 LEGITIMATE_KEYWORD_KEYS = {
-    "prose_value": {"auth_token": "rotate quarterly per runbook"},
-    "prose_naming_a_manager": {"vault_password": "stored in 1Password"},
     "redaction_marker": {"client_secret": "REDACTED"},
     "symbolic_placeholder": {"api_key": "***"},
     "not_applicable": {"password": "n/a"},
     "todo_marker": {"secret": "TODO"},
     "angle_redaction": {"token": "<redacted>"},
-    "prose_mentioning_the_key": {"passwd": "see the runbook for the value"},
+}
+SENSITIVE_PROSE = {
+    "auth_token": "rotate quarterly per runbook",
+    "vault_password": "stored in 1Password",
+    "passwd": "see the runbook for the value",
 }
 
 
@@ -176,8 +173,14 @@ class BenignNearMissPairsStillPass(unittest.TestCase):
                     f"{pair!r} was refused: an ordinary note cannot be saved",
                 )
 
+    def test_sensitive_field_prose_refuses_but_same_note_text_survives(self) -> None:
+        for key, text in SENSITIVE_PROSE.items():
+            with self.subTest(key=key):
+                self.assertEqual(brain.record_secret_hit({"metadata": {key: text}}), "metadata")
+                self.assertIsNone(brain.record_secret_hit({"metadata": {key + "_note": text}}))
+
     def test_the_same_keys_still_refuse_an_opaque_value(self) -> None:
-        """...and the mirror: the gate is on the VALUE, not on the key.
+        """Placeholders do not exempt populated values under sensitive keys.
 
         Same key names as the fixtures above; only the value changes, so a
         rule that simply stopped scanning these keys would fail here.

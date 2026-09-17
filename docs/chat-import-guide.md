@@ -12,6 +12,12 @@ It is meant to help a new user review old chats locally and decide what, if anyt
 - Writes a private markdown review report to `private-memory/chat-memory.md`.
 - Avoids copying full source lines by default.
 
+The importer requires the canonical `scripts/secret_patterns.py` scanner. A partial installation without that module is refused rather than using the portable brain's weaker compatibility patterns. Matching credential assignments are redacted even when their values contain only letters; natural-language prose exceptions are deliberately narrow.
+
+New reports and automatic backups are created with owner-only permissions (`0600` or stricter). Replacing a report preserves or tightens its existing mode. An existing `.bak` is never overwritten; select a new output path or review and move the backup before another replacement. Review excerpts before sharing: pattern matching still cannot remove every kind of sensitive information.
+
+Output publication requires no-follow directory operations and refuses symbolic links in the output or any parent directory. On macOS, aliases such as `/tmp` and `/var` are therefore refused; use their physical directory paths (for example `/private/tmp`). Unsupported platforms refuse instead of writing with weaker path protection.
+
 ## What It Does Not Do
 
 - It does not upload chats.

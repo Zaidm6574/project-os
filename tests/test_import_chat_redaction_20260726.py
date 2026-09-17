@@ -96,7 +96,7 @@ def run_importer(script, input_path, output_path, *extra):
 
 
 def standalone_copy(tmp, brain_at="addons/full-engine/brain"):
-    """A project tree holding ONLY the importer, plus brain.py at `brain_at`.
+    """A project tree with the importer and its canonical scanner dependency.
 
     Mirrors how the importer resolves the pattern source relative to its own
     location, without touching the real repo. `brain_at=None` omits it;
@@ -108,6 +108,8 @@ def standalone_copy(tmp, brain_at="addons/full-engine/brain"):
     shutil.copy2(IMPORTER, script)
     brain_copy = None
     if brain_at:
+        shutil.copy2(ROOT / "scripts" / "secret_patterns.py",
+                     root / "scripts" / "secret_patterns.py")
         brain_dir = root.joinpath(*brain_at.split("/"))
         brain_dir.mkdir(parents=True)
         brain_copy = brain_dir / "brain.py"

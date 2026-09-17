@@ -8,6 +8,10 @@ Each command revalidates the selected store. If the selected store changes or pa
 
 The shared brain is not raw chat memory. Store compact, approved lessons only.
 
+The exchange command names are historical: `export --from FILE` appends lessons from a project file to the selected brain (`export` without `--from` uses the adapter); `import --into FILE` writes the selected brain to a project exchange file. Lesson normalization preserves explicit `approved`, `summary_only`, and `raw_chat` fields so export cannot erase a later central-sync restriction. Those fields remain caller assertions, not authenticated approval.
+
+Exchange writes reject non-placeholder values under recognized credential fields, including multiword passwords. Put explanatory prose under a note field rather than a credential field. Output is staged privately and published atomically with mode `0600` or stricter owner permissions; failed publication preserves the previous output. No automatic backup is created. Review an exchange file before deliberately broadening its sharing permissions.
+
 To save a chat memory directly:
 
 ```bash

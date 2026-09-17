@@ -17,9 +17,16 @@ Usage:
 
 Env: BB_LOCK_DIR (default ~/.project-os/locks), BB_LOCK_STALE (default 60 seconds)
 
+On POSIX, run starts a separate session and cancels the command's process
+group on lease loss or wrapper cancellation, before releasing the lease.
+SIGINT/SIGTERM are deferred during spawn and bounded cleanup, then delivered
+to the caller's original handler after lease release. Descendants that leave
+the group are outside this cooperative lifecycle contract; fenced() is still
+required for publication.
+
 Exit codes: 0 ok · 1 could not acquire / not held · 2 usage error
 """
-import errno, os, sys, json, time, hashlib, subprocess, fcntl, math, uuid
+import errno, os, sys, json, time, hashlib, subprocess, fcntl, math, uuid, signal, threading
 from contextlib import contextmanager
 
 LOCK_DIR = os.environ.get("BB_LOCK_DIR", os.path.expanduser("~/.project-os/locks"))
@@ -116,8 +123,13 @@ def reap_one(lp):
         return _reap_locked(lp)
 
 
-def acquire(target, agent="unknown", wait=10.0):
-    """Atomically acquire the lock for target. Returns its fencing token."""
+def acquire(target, agent="unknown", wait=10.0, cancellation=None):
+    """Atomically acquire the lock for target. Returns its fencing token.
+
+    A command wrapper keeps signals deferred from creation until it receives
+    the token. Contended waits remain interruptible; on success the wrapper
+    must restore cancellation only after storing the returned token.
+    """
     os.makedirs(LOCK_DIR, exist_ok=True)
     lp = lock_path(target)
     deadline = time.monotonic() + wait
@@ -125,8 +137,10 @@ def acquire(target, agent="unknown", wait=10.0):
         try:
             with _guard(lp, deadline=deadline):
                 _reap_locked(lp)
+                acquired = False
+                if cancellation is not None:
+                    cancellation.interruptible = False
                 try:
-                    fd = os.open(lp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                     token = uuid.uuid4().hex
                     # Keep lock acquisition independent of content-writer
                     # wrappers: a stalled writer may instrument os.fdopen,
@@ -136,13 +150,43 @@ def acquire(target, agent="unknown", wait=10.0):
                         "pid": os.getpid(), "ts": time.time(), "token": token,
                     }).encode("utf-8")
                     try:
-                        os.write(fd, payload)
-                    finally:
-                        os.close(fd)
-                    _HELD_TOKENS[lp] = token
-                    return token
-                except FileExistsError:
-                    pass
+                        fd = os.open(lp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    except FileExistsError:
+                        pass
+                    else:
+                        try:
+                            offset = 0
+                            while offset < len(payload):
+                                written = os.write(fd, payload[offset:])
+                                if written <= 0:
+                                    raise OSError(errno.EIO, "lock payload write made no progress")
+                                offset += written
+                            _HELD_TOKENS[lp] = token
+                        except BaseException:
+                            # Partial JSON has no usable token. The open
+                            # object, while still guarded, is our proof of
+                            # ownership; never unlink a replacement file.
+                            try:
+                                if os.path.samestat(os.fstat(fd), os.stat(lp)):
+                                    os.unlink(lp)
+                            except FileNotFoundError:
+                                pass
+                            except OSError as cleanup_error:
+                                print("FAILED: acquisition rollback unconfirmed (%s)" %
+                                      type(cleanup_error).__name__, file=sys.stderr)
+                                raise
+                            finally:
+                                if _HELD_TOKENS.get(lp) == token:
+                                    _HELD_TOKENS.pop(lp, None)
+                            raise
+                        finally:
+                            os.close(fd)
+                        acquired = True
+                        return token
+                finally:
+                    if cancellation is not None and not acquired:
+                        cancellation.interruptible = True
+                        cancellation.check()
         except _GuardTimeout:
             # Same timeout failure shape as a lock held past the deadline:
             # a wedged guard holder must not block us beyond --wait.
@@ -277,26 +321,136 @@ def _usage_error(message):
     return 2
 
 
-def _run_with_renewal(command, target, token):
-    proc = subprocess.Popen(command)
-    interval = max(0.01, min(STALE_AFTER_SEC / 3.0, 10.0))
-    while True:
+class _CommandCancelled(BaseException):
+    """Unwind a command wait without Popen's KeyboardInterrupt reaping wait."""
+
+
+class _CommandSignals:
+    """Keep cancellation pending through spawn, cleanup, and lease release.
+
+    Popen.wait handles KeyboardInterrupt by briefly waiting for/reaping the
+    leader. A separate exception preserves the group id until our final group
+    signal. Restore and invoke the original handler only after the lease's
+    finally block, preserving SIGINT/SIGTERM exit status and caller handlers.
+    Ignored signals remain ignored; repeated signals cannot skip cleanup.
+    """
+
+    def __init__(self):
+        self.handlers = {}
+        self.pending = None
+        self.interruptible = False
+
+    def _receive(self, signum, frame):
+        if self.pending is None:
+            self.pending = (signum, frame)
+        self.check()
+
+    def check(self):
+        if self.interruptible and self.pending is not None:
+            raise _CommandCancelled()
+
+    def __enter__(self):
+        if threading.current_thread() is threading.main_thread():
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                handler = signal.getsignal(signum)
+                if handler != signal.SIG_IGN:
+                    self.handlers[signum] = handler
+                    signal.signal(signum, self._receive)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.interruptible = False
+        for signum, handler in self.handlers.items():
+            signal.signal(signum, handler)
+        if self.pending is not None:
+            signum, frame = self.pending
+            handler = self.handlers[signum]
+            if callable(handler):
+                handler(signum, frame)
+            else:
+                os.kill(os.getpid(), signum)
+            # A custom handler may return. The command was still cancelled;
+            # the CLI reports 128 + signal instead of a successful exit.
+            return isinstance(exc, _CommandCancelled)
+        return False
+
+
+def _cancel_command_group(proc):
+    """Stop ordinary POSIX workers, then reap our direct child within a bound.
+
+    The session leader's pid is also its process-group id. Keep that child
+    unreaped until the final group signal, pinning its pid against reuse even
+    when it exits before a TERM-resistant descendant. Non-child descendants
+    are reaped by their own parents (or init), not by this wrapper.
+    """
+    if isinstance(proc.returncode, int):
+        # A signal can race successful wait() completion. A reaped leader no
+        # longer pins the group id: do not risk signalling a reused id.
+        return "command exited; process group cancellation unconfirmed (leader already reaped)"
+    signal_denied = False
+    for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
-            return proc.wait(timeout=interval)
-        except subprocess.TimeoutExpired:
-            if not renew(target, token):
-                # Lease lost (reaped + re-acquired while we were stalled).
-                # Continuing would run alongside the new owner, so stop the
-                # child instead (independent review finding, 2026-07-17).
-                proc.terminate()
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            break
+        except PermissionError:
+            # Some POSIX hosts also report EPERM for a group containing only
+            # zombies. It is not proof of absence: retain the failure and
+            # still reap our child, rather than claiming successful cleanup.
+            signal_denied = True
+        if sig == signal.SIGTERM:
+            # The leader exiting is not proof that its workers have exited.
+            # Give the whole group its grace period before escalation.
+            time.sleep(5)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        # Even SIGKILL can be delayed by uninterruptible kernel work. Do not
+        # hang forever or claim that an unreaped command has terminated.
+        return "cancellation requested; command exit not observed"
+    if signal_denied:
+        return "command exited; process group cancellation unconfirmed (signal denied)"
+    return "command process group cancelled"
+
+
+def _run_with_renewal(command, target, token, cancellation=None):
+    proc = None
+    cleanup_started = False
+    interval = max(0.01, min(STALE_AFTER_SEC / 3.0, 10.0))
+    try:
+        if cancellation is not None:
+            cancellation.interruptible = False
+        proc = subprocess.Popen(command, start_new_session=True)
+        if cancellation is not None:
+            cancellation.interruptible = True
+            cancellation.check()
+        while True:
+            try:
+                return proc.wait(timeout=interval)
+            except subprocess.TimeoutExpired:
+                if not renew(target, token):
+                    # Lease lost (reaped + re-acquired while we were stalled).
+                    # Continuing would run alongside the new owner, so stop the
+                    # command's group instead, including ordinary workers.
+                    if cancellation is not None:
+                        cancellation.interruptible = False
+                    cleanup_started = True
+                    outcome = _cancel_command_group(proc)
+                    print("FAILED: lock lease lost while command was running; "
+                          + outcome, file=sys.stderr)
+                    return 1
+    except BaseException:
+        if cancellation is not None:
+            cancellation.interruptible = False
+        if proc is not None:
+            outcome = "cancellation unconfirmed (cleanup interrupted)"
+            if not cleanup_started:
                 try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-                print("FAILED: lock lease lost while command was running; "
-                      "command terminated", file=sys.stderr)
-                return 1
+                    outcome = _cancel_command_group(proc)
+                except Exception as cleanup_error:
+                    outcome = "cancellation unconfirmed (%s)" % type(cleanup_error).__name__
+            print("FAILED: command wrapper interrupted; " + outcome, file=sys.stderr)
+        raise
 
 
 def main():
@@ -406,15 +560,25 @@ def main():
         sub = rest[rest.index("--") + 1:]
         if not sub:
             sys.exit(_usage_error("run requires a command after --"))
-        acquired_token = acquire(target, agent, wait)
-        if not acquired_token:
-            print("FAILED: could not acquire lock", file=sys.stderr)
-            sys.exit(1)
-        try:
-            rc = _run_with_renewal(sub, target, acquired_token)
-        finally:
-            release(target, agent, force=True, token=acquired_token)
-        sys.exit(rc)
+        with _CommandSignals() as cancellation:
+            acquired_token = None
+            try:
+                # Waits remain interruptible. acquire defers only publication
+                # and the handoff until this frame owns the returned token.
+                cancellation.interruptible = True
+                cancellation.check()
+                acquired_token = acquire(target, agent, wait, cancellation=cancellation)
+                cancellation.interruptible = True
+                cancellation.check()
+                if not acquired_token:
+                    print("FAILED: could not acquire lock", file=sys.stderr)
+                    sys.exit(1)
+                rc = _run_with_renewal(sub, target, acquired_token, cancellation)
+            finally:
+                cancellation.interruptible = False
+                if acquired_token:
+                    release(target, agent, force=True, token=acquired_token)
+        sys.exit(128 + cancellation.pending[0] if cancellation.pending else rc)
 
     print(f"unknown command: {cmd}", file=sys.stderr)
     sys.exit(2)

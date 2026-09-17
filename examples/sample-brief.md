@@ -5,8 +5,12 @@ brain configured:
 
 ```bash
 python3 scripts/promptsmith.py --task "build the hero section" \
-  --brief-file examples/sample-brief.md --out-dir /tmp/promptsmith-demo
+  --brief-file examples/sample-brief.md --out-dir demo-packets --no-index
 ```
+
+The standalone demo leaves the shared packet index unchanged. Omit `--no-index`
+to register the worker in `blackboard/05-agent-packets.md`; its file path is
+relative to that index directory, with whitespace and delimiters URL-escaped.
 
 ## Palette
 

@@ -38,6 +38,7 @@ plan["migrations"]. Anything else — edited steps, a backwards schema, a plan
 approved before content digests were recorded — needs the human gate again.
 """
 import os, sys, json, re, datetime, hashlib, copy, tempfile, stat, shlex
+from contextlib import contextmanager
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project-os/
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
@@ -229,6 +230,32 @@ def save(plan, pid=None):
         except OSError:
             pass
         raise
+
+
+@contextmanager
+def locked_publication(pid):
+    """Keep one plan revision exclusive from its first read to publication.
+
+    Create's absence check and compile's packets/status transition are part
+    of the write, so fencing only the final save is too late. The guard also
+    prevents lease takeover during publication. Do not nest another lock
+    operation for this plan inside the block (the guard is non-reentrant).
+    """
+    p = plan_path(pid)
+    token = bb_lock.acquire(p, agent="plan", wait=10)
+    if not token:
+        print("FAILED: could not lock plan file", file=sys.stderr)
+        sys.exit(1)
+    try:
+        try:
+            with bb_lock.fenced(p, token):
+                yield
+        except bb_lock.LockLeaseLost as exc:
+            print("FAILED: plan lock lease lost before publication: %s" % exc,
+                  file=sys.stderr)
+            sys.exit(1)
+    finally:
+        bb_lock.release(p, agent="plan", token=token)
 
 
 def locked_update(pid, mutate):
@@ -937,20 +964,21 @@ def main():
         # DISCARDING an approval record — which defeats the human gate that
         # approve/approved_schema exist to enforce (audit 2026-07-25).
         dest = dest_path
-        if os.path.exists(dest):
-            try:
-                prior = load(dest)
-                prior_status = prior.get("status", "?")
-            except PlanInputError:
-                prior_status = "unreadable"
-            print(
-                f"REFUSED: {dest} already exists (status: {prior_status}).\n"
-                f"Creating over it would discard that plan and any approval it "
-                f"carries. Pick a different --id, or delete the file first.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        save(plan, dest)
+        with locked_publication(dest):
+            if os.path.exists(dest):
+                try:
+                    prior = load(dest)
+                    prior_status = prior.get("status", "?")
+                except PlanInputError:
+                    prior_status = "unreadable"
+                print(
+                    f"REFUSED: {dest} already exists (status: {prior_status}).\n"
+                    f"Creating over it would discard that plan and any approval it "
+                    f"carries. Pick a different --id, or delete the file first.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            save(plan, dest)
         print(f"created {dest} (status: planned — needs `approve` before compile)")
         sys.exit(0)
 
@@ -1025,118 +1053,119 @@ def main():
         sys.exit(0)
 
     if cmd == "compile":
-        plan = load(pid)
-        # Always validate at the execution boundary — approval can predate
-        # edits, and --force must not skip the checker contract
-        # (independent review finding, 2026-07-17).
-        probs = validate(plan)
-        if probs:
-            print("cannot compile, INVALID:\n- " + "\n- ".join(probs),
-                  file=sys.stderr)
-            sys.exit(1)
-        # The plan's own id is about to become a path component. Check it HERE,
-        # at consumption, before any side effect (the --force backup, the
-        # packets mkdir, the first packet write): the file on disk may have been
-        # hand-edited since `create` slugified it.
-        # Step ids get the SAME check, not a weaker one: they share the packet
-        # filename with the plan id, and they are interpolated into the packet
-        # BODY -- the document a worker agent is told to execute. A step id
-        # carrying a newline needs no path separator to do damage; it forged
-        # extra "On completion run:" command lines into that document while the
-        # compile exited 0 (adversary 2026-07-26).
-        try:
-            require_path_safe_plan_id(plan.get("id"))
-            for _s in plan.get("steps") or []:
-                require_path_safe_plan_id(
-                    _s.get("id") if isinstance(_s, dict) else _s)
-        except PlanInputError as e:
-            print("cannot compile: %s" % e, file=sys.stderr)
-            sys.exit(1)
-        if plan["status"] != "approved" and "--force" not in args:
-            if plan["status"] == "planned":
-                print("plan is not approved (planOnly). Run `approve` first, or --force.",
+        with locked_publication(pid):
+            plan = load(pid)
+            # Always validate at the execution boundary — approval can predate
+            # edits, and --force must not skip the checker contract
+            # (independent review finding, 2026-07-17).
+            probs = validate(plan)
+            if probs:
+                print("cannot compile, INVALID:\n- " + "\n- ".join(probs),
                       file=sys.stderr)
-            else:
-                print(f"plan status is '{plan['status']}' — recompiling would reset it to "
-                      "'running' and regenerate packets. Use --force if you mean it.",
-                      file=sys.stderr)
-            sys.exit(1)
-        # --force recompile of a non-approved plan: back up prior state first.
-        if plan["status"] != "approved" and "--force" in args:
-            import shutil as _sh
-            _bak = plan_path(pid) + ".pre-force"
+                sys.exit(1)
+            # The plan's own id is about to become a path component. Check it HERE,
+            # at consumption, before any side effect (the --force backup, the
+            # packets mkdir, the first packet write): the file on disk may have been
+            # hand-edited since `create` slugified it.
+            # Step ids get the SAME check, not a weaker one: they share the packet
+            # filename with the plan id, and they are interpolated into the packet
+            # BODY -- the document a worker agent is told to execute. A step id
+            # carrying a newline needs no path separator to do damage; it forged
+            # extra "On completion run:" command lines into that document while the
+            # compile exited 0 (adversary 2026-07-26).
             try:
-                _sh.copy2(plan_path(pid), _bak)
-                print(f"backed up prior plan state to {os.path.basename(_bak)}")
-            except OSError:
-                pass
-        # Write packets NEXT TO the plan (…/blackboard/packets), so compiling a
-        # plan given by full path lands beside it instead of the repo default.
-        packets_dir = (os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(pid))), "packets")
-                       if pid.endswith(".json") else PACKETS)
-        os.makedirs(packets_dir, exist_ok=True)
-        made = []
-        # validate() treats depends_on/outputs as optional; normalize here so
-        # the packet writer below never KeyErrors on a hand-written plan that
-        # validate accepted (audit finding F2, 2026-07-17)
-        for s in plan["steps"]:
-            s.setdefault("depends_on", [])
-            s.setdefault("outputs", [])
-            s.setdefault("done", False)
-        try:
-            ordered_steps = topo_order(plan)
-        except ValueError as e:
-            print(f"cannot compile: {e}", file=sys.stderr)
-            sys.exit(1)
-        # Resolve EVERY packet path before writing the first one, so a step id
-        # that escapes packets/ (step ids are only checked for being nonempty
-        # strings) refuses the whole compile instead of stopping half-written.
-        try:
-            packet_paths = [packet_path(packets_dir, f"{plan['id']}-{s['id']}.md")
-                            for s in ordered_steps]
-        except PlanInputError as e:
-            print("cannot compile: %s" % e, file=sys.stderr)
-            sys.exit(1)
-        # Retain an explicit source path instead of falling back to a possibly
-        # unrelated same-id plan under this compiler's default blackboard.
-        # Absolute paths survive a worker's cwd change; shell quoting keeps
-        # spaces and metacharacters in the path inside one argument.
-        completion_plan = shlex.quote(os.path.abspath(pid) if pid.endswith(".json")
-                                      else plan["id"])
-        for i, s in enumerate(ordered_steps, 1):
-            fp = packet_paths[i - 1]
-            # build the full packet body BEFORE touching disk, then write
-            # atomically (temp + rename) so no failure path can leave a
-            # partial or zero-byte packet behind (audit finding F2, 2026-07-17)
-            # 2026-07-27 (cold-clone reviewer): validate() REFUSES a multi-step
-            # plan unless a work-dependent checker declares verification with a
-            # nonempty, non-placeholder method AND expected (see :732-736) --
-            # and then compile interpolated role/task/depends_on/outputs and
-            # dropped the very strings the gate had just forced the author to
-            # write. A checker received "Task: check the form submits" with no
-            # criteria at all. Collecting a requirement and discarding it at the
-            # one point it could do work is a fail-open gate: it reads as
-            # enforced because the plan is refused without it, while the
-            # document a worker actually executes never carries it.
-            #
-            # Reuse _real_verification_value rather than testing truthiness, so
-            # "-", "n/a", "todo", "tbd" stay ONE definition of "declared".
-            # A looser rule here would print placeholder text into the packet
-            # while the gate upstream considers the same value absent.
-            _v = s.get("verification")
-            _v = _v if isinstance(_v, dict) else {}
-            _vm = _v.get("method") if _real_verification_value(_v.get("method")) else None
-            _ve = _v.get("expected") if _real_verification_value(_v.get("expected")) else None
-            # Emitted only when something real was declared: an unconditional
-            # block would put "Verification method: (none declared)" on every
-            # builder packet in every plan, training readers to skip the line
-            # that matters on the packets where it is load-bearing.
-            verification_block = ""
-            if _vm or _ve:
-                verification_block = ("Verification method: %s\nExpected: %s\n"
-                                      % (_vm or "(none declared)",
-                                         _ve or "(none declared)"))
-            body = f"""Packet ID: {plan['id']}-{s['id']}
+                require_path_safe_plan_id(plan.get("id"))
+                for _s in plan.get("steps") or []:
+                    require_path_safe_plan_id(
+                        _s.get("id") if isinstance(_s, dict) else _s)
+            except PlanInputError as e:
+                print("cannot compile: %s" % e, file=sys.stderr)
+                sys.exit(1)
+            if plan["status"] != "approved" and "--force" not in args:
+                if plan["status"] == "planned":
+                    print("plan is not approved (planOnly). Run `approve` first, or --force.",
+                          file=sys.stderr)
+                else:
+                    print(f"plan status is '{plan['status']}' — recompiling would reset it to "
+                          "'running' and regenerate packets. Use --force if you mean it.",
+                          file=sys.stderr)
+                sys.exit(1)
+            # --force recompile of a non-approved plan: back up prior state first.
+            if plan["status"] != "approved" and "--force" in args:
+                import shutil as _sh
+                _bak = plan_path(pid) + ".pre-force"
+                try:
+                    _sh.copy2(plan_path(pid), _bak)
+                    print(f"backed up prior plan state to {os.path.basename(_bak)}")
+                except OSError:
+                    pass
+            # Write packets NEXT TO the plan (…/blackboard/packets), so compiling a
+            # plan given by full path lands beside it instead of the repo default.
+            packets_dir = (os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(pid))), "packets")
+                           if pid.endswith(".json") else PACKETS)
+            os.makedirs(packets_dir, exist_ok=True)
+            made = []
+            # validate() treats depends_on/outputs as optional; normalize here so
+            # the packet writer below never KeyErrors on a hand-written plan that
+            # validate accepted (audit finding F2, 2026-07-17)
+            for s in plan["steps"]:
+                s.setdefault("depends_on", [])
+                s.setdefault("outputs", [])
+                s.setdefault("done", False)
+            try:
+                ordered_steps = topo_order(plan)
+            except ValueError as e:
+                print(f"cannot compile: {e}", file=sys.stderr)
+                sys.exit(1)
+            # Resolve EVERY packet path before writing the first one, so a step id
+            # that escapes packets/ (step ids are only checked for being nonempty
+            # strings) refuses the whole compile instead of stopping half-written.
+            try:
+                packet_paths = [packet_path(packets_dir, f"{plan['id']}-{s['id']}.md")
+                                for s in ordered_steps]
+            except PlanInputError as e:
+                print("cannot compile: %s" % e, file=sys.stderr)
+                sys.exit(1)
+            # Retain an explicit source path instead of falling back to a possibly
+            # unrelated same-id plan under this compiler's default blackboard.
+            # Absolute paths survive a worker's cwd change; shell quoting keeps
+            # spaces and metacharacters in the path inside one argument.
+            completion_plan = shlex.quote(os.path.abspath(pid) if pid.endswith(".json")
+                                          else plan["id"])
+            for i, s in enumerate(ordered_steps, 1):
+                fp = packet_paths[i - 1]
+                # build the full packet body BEFORE touching disk, then write
+                # atomically (temp + rename) so no failure path can leave a
+                # partial or zero-byte packet behind (audit finding F2, 2026-07-17)
+                # 2026-07-27 (cold-clone reviewer): validate() REFUSES a multi-step
+                # plan unless a work-dependent checker declares verification with a
+                # nonempty, non-placeholder method AND expected (see :732-736) --
+                # and then compile interpolated role/task/depends_on/outputs and
+                # dropped the very strings the gate had just forced the author to
+                # write. A checker received "Task: check the form submits" with no
+                # criteria at all. Collecting a requirement and discarding it at the
+                # one point it could do work is a fail-open gate: it reads as
+                # enforced because the plan is refused without it, while the
+                # document a worker actually executes never carries it.
+                #
+                # Reuse _real_verification_value rather than testing truthiness, so
+                # "-", "n/a", "todo", "tbd" stay ONE definition of "declared".
+                # A looser rule here would print placeholder text into the packet
+                # while the gate upstream considers the same value absent.
+                _v = s.get("verification")
+                _v = _v if isinstance(_v, dict) else {}
+                _vm = _v.get("method") if _real_verification_value(_v.get("method")) else None
+                _ve = _v.get("expected") if _real_verification_value(_v.get("expected")) else None
+                # Emitted only when something real was declared: an unconditional
+                # block would put "Verification method: (none declared)" on every
+                # builder packet in every plan, training readers to skip the line
+                # that matters on the packets where it is load-bearing.
+                verification_block = ""
+                if _vm or _ve:
+                    verification_block = ("Verification method: %s\nExpected: %s\n"
+                                          % (_vm or "(none declared)",
+                                             _ve or "(none declared)"))
+                body = f"""Packet ID: {plan['id']}-{s['id']}
 Agent: {s['role']}{f" (model hint: {s['model_hint']})" if s.get('model_hint') else ""}
 Task: {s['task']}
 {verification_block}Evidence: (fill during run)
@@ -1149,40 +1178,41 @@ Status: Draft
 Plan: {plan['id']} · step {i}/{len(plan['steps'])} · expected outputs: {", ".join(s['outputs']) or "(unspecified)"}
 {f"Isolation: WORKTREE — before touching code run: python3 scripts/wt.py create {plan['id']}-{s['id']}  (work + commit there; merge via wt.py merge)" + chr(10) if s.get('isolation') == 'worktree' else ""}On completion run: python3 scripts/plan_artifact.py complete {completion_plan} --step {s['id']}
 """
-            # The packet path itself is validated above, but the write went
-            # through the SIBLING `fp + ".tmp"` with a symlink-following
-            # open(), so a link planted at that predictable name redirected
-            # the write outside the tree while stdout still printed the
-            # contained packets/ path (adversary 2026-07-26). A hard link
-            # defeats realpath/commonpath entirely -- containment checks
-            # cannot see one -- so the tmp file is created with an
-            # unpredictable name and O_CREAT|O_EXCL|O_NOFOLLOW semantics,
-            # which refuse BOTH a symlink and any pre-existing path.
-            # Same defect and same remedy as scripts/brain_archive.py.
-            tmp = None
-            try:
-                fd, tmp = tempfile.mkstemp(
-                    dir=os.path.dirname(fp),
-                    prefix=os.path.basename(fp) + ".",
-                    suffix=".tmp")
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    f.write(body)
-                os.replace(tmp, fp)
-            except OSError as e:
+                # The packet path itself is validated above, but the write went
+                # through the SIBLING `fp + ".tmp"` with a symlink-following
+                # open(), so a link planted at that predictable name redirected
+                # the write outside the tree while stdout still printed the
+                # contained packets/ path (adversary 2026-07-26). A hard link
+                # defeats realpath/commonpath entirely -- containment checks
+                # cannot see one -- so the tmp file is created with an
+                # unpredictable name and O_CREAT|O_EXCL|O_NOFOLLOW semantics,
+                # which refuse BOTH a symlink and any pre-existing path.
+                # Same defect and same remedy as scripts/brain_archive.py.
+                tmp = None
                 try:
-                    if tmp:
-                        os.unlink(tmp)
-                except OSError:
-                    pass
-                print(f"cannot compile: failed writing packet "
-                      f"{os.path.basename(fp)}: {e}", file=sys.stderr)
-                sys.exit(1)
-            made.append(fp)
-        locked_update(pid, lambda p: p.__setitem__("status", "running"))
-        print(f"compiled {len(made)} worker packets (topological order):")
-        for m in made:
-            print(" ", m)
-        sys.exit(0)
+                    fd, tmp = tempfile.mkstemp(
+                        dir=os.path.dirname(fp),
+                        prefix=os.path.basename(fp) + ".",
+                        suffix=".tmp")
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        f.write(body)
+                    os.replace(tmp, fp)
+                except OSError as e:
+                    try:
+                        if tmp:
+                            os.unlink(tmp)
+                    except OSError:
+                        pass
+                    print(f"cannot compile: failed writing packet "
+                          f"{os.path.basename(fp)}: {e}", file=sys.stderr)
+                    sys.exit(1)
+                made.append(fp)
+            plan["status"] = "running"
+            save(plan, pid)
+            print(f"compiled {len(made)} worker packets (topological order):")
+            for m in made:
+                print(" ", m)
+            sys.exit(0)
 
     if cmd == "complete":
         step = flag("--step")
