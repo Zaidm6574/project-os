@@ -1076,6 +1076,7 @@ class CostActualsWriteTests(unittest.TestCase):
         reached_stage = threading.Event()
         resume_stale = threading.Event()
         old_result = []
+        old_errors = []
         real_fdopen = cost_actuals.os.fdopen
 
         def gated_fdopen(fd, mode="r", *args, **kwargs):
@@ -1086,30 +1087,45 @@ class CostActualsWriteTests(unittest.TestCase):
                     raise RuntimeError("test timed out waiting to resume stale cost writer")
             return real_fdopen(fd, mode, *args, **kwargs)
 
+        def stale_write():
+            try:
+                old_result.append(cost_actuals._update_markers(target, "stale table"))
+            except BaseException as exc:
+                old_errors.append(exc)
+
         with mock.patch.object(lock_module, "LOCK_DIR", str(self.base / "stale-locks")), \
-                mock.patch.object(lock_module, "STALE_AFTER_SEC", 0.08), \
-                mock.patch.object(lock_module, "POLL_SEC", 0.005), \
                 mock.patch.object(cost_actuals.os, "fdopen", side_effect=gated_fdopen), \
                 contextlib.redirect_stderr(io.StringIO()) as err:
             stale = threading.Thread(
-                target=lambda: old_result.append(
-                    cost_actuals._update_markers(target, "stale table")),
+                target=stale_write,
                 name="stale-cost-writer",
             )
             stale.start()
-            self.assertTrue(reached_stage.wait(2), "stale writer never staged")
-            time.sleep(0.12)
-            replacement_result = cost_actuals._update_markers(
-                target, "replacement owner table")
-            resume_stale.set()
-            stale.join(3)
+            try:
+                self.assertTrue(reached_stage.wait(2), "stale writer never staged")
+                lock_path = lock_module.lock_path(str(target))
+                old_lock = lock_module.read_lock(lock_path)
+                self.assertIsInstance(old_lock, dict)
+                self.assertTrue(old_lock.get("token"))
+                # Expire only this paused owner's real lease. A globally tiny
+                # TTL also expires the replacement on a busy CI runner.
+                os.utime(lock_path, (1, 1))
+                self.assertEqual(os.stat(lock_path).st_mtime, 1)
+                self.assertEqual(lock_module.read_lock(lock_path)["token"], old_lock["token"])
+                self.assertTrue(lock_module.is_stale(lock_path))
+                replacement_result = cost_actuals._update_markers(
+                    target, "replacement owner table")
+            finally:
+                resume_stale.set()
+                stale.join(3)
 
         self.assertFalse(stale.is_alive())
         self.assertTrue(replacement_result)
-        self.assertEqual(old_result, [False])
         text = target.read_text(encoding="utf-8")
         self.assertIn("replacement owner table", text)
         self.assertNotIn("stale table", text)
+        self.assertEqual(old_errors, [])
+        self.assertEqual(old_result, [False])
         self.assertIn("lease lost", err.getvalue().lower())
 
     def test_cost_release_failure_is_reported_and_run_fails(self):
