@@ -1,7 +1,7 @@
 # 22 — Automation Log
 
-Written automatically by `scripts/os_nightly.py` — the unattended daily heartbeat
-(macOS: a launchd agent; Linux: a cron entry). Entries are appended below the
+Written when `scripts/os_nightly.py` is invoked. It runs once; an unattended daily
+schedule requires a separate OS job (macOS launchd or Linux cron). Entries are appended below the
 marker line at the bottom; anything you write above the marker is preserved.
 
 Each entry (newest first, capped at 30) reports:
@@ -17,7 +17,9 @@ Each entry (newest first, capped at 30) reports:
 Any WATCH/CUTOVER or stale item here is a standing prompt for the next session to
 act. Read this file at kickoff instead of re-deriving drift by hand.
 
-Install (macOS example — adjust paths):
+macOS configuration fragment — not a complete loadable plist. Add the enclosing
+plist/dict and a unique `Label`, set a suitable Python interpreter and absolute
+project paths, then validate the complete file with `plutil -lint` before loading:
 
 ```xml
 <!-- ~/Library/LaunchAgents/ai.projectos.nightly.plist -->

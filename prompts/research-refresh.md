@@ -1,5 +1,9 @@
 # Research Refresh Prompt
 
+## Active workspace
+
+Resolve `<run-root>` explicitly from the run argument or the caller's packet before reading or writing. For a named run it is `runs/<slug>/`; do not choose the newest run automatically. For project-level work without a named run, explicitly select `blackboard/`. All numbered notes and `packets/` paths below are relative to that selected root. Pass the same root to every delegated role and follow-up workflow. Shared `blackboard/` notes are read-only context during a named run; promote reviewed cross-run lessons separately. See **Active workspace and shared notes** in `AGENTS.md` for helper arguments and project-level exceptions.
+
 Use this prompt when an existing project needs a current-state update. It can be invoked directly as `/research`, "research refresh", or "suggest Project OS updates."
 
 You are running a Project OS research refresh.
@@ -52,12 +56,12 @@ Produce:
 
 Update or recommend updates for:
 
-- `blackboard/02-research.md`
-- `blackboard/03-decisions.md`
-- `blackboard/04-risks.md`
-- `blackboard/09-cost-estimate.md`
-- `blackboard/16-research-router.md`
-- `blackboard/20-research-refresh.md`
+- `<run-root>/02-research.md`
+- `<run-root>/03-decisions.md`
+- `<run-root>/04-risks.md`
+- `<run-root>/09-cost-estimate.md`
+- `<run-root>/16-research-router.md`
+- `<run-root>/20-research-refresh.md`
 
 For major scope, roadmap, architecture, privacy, publishing, spending, or workflow changes, write a clear recommendation and ask for human approval before applying it. Smaller factual updates, source notes, and stale-research annotations can be applied directly when they do not change the approved direction.
 

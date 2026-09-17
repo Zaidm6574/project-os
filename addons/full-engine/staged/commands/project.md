@@ -1,10 +1,15 @@
 ---
 description: Route a rough idea into the right Project OS workflow (the general entry point)
 argument-hint: <what you want to build, review, or audit>
-allowed-tools: Read Write Edit Grep Glob Task TodoWrite WebSearch
+allowed-tools: Bash Read Write Edit Grep Glob Task TodoWrite WebSearch
 ---
 
 <!-- GENERATED from prompts/workflows/project.md by scripts/sync_runtime_assets.py — edit the canonical file, not this one. -->
+
+## Active workspace
+
+Resolve `<run-root>` explicitly from the run argument or the caller's packet before reading or writing. For a named run it is `runs/<slug>/`; do not choose the newest run automatically. For project-level work without a named run, explicitly select `blackboard/`. All numbered notes and `packets/` paths below are relative to that selected root. Pass the same root to every delegated role and follow-up workflow. Shared `blackboard/` notes are read-only context during a named run; promote reviewed cross-run lessons separately. See **Active workspace and shared notes** in `AGENTS.md` for helper arguments and project-level exceptions.
+
 Handle this Project OS request:
 
 **$ARGUMENTS**
@@ -12,7 +17,7 @@ Handle this Project OS request:
 This is the general entry point. Your first job is to route it, not to build.
 
 1. Read `AGENTS.md` — it is the single source of truth for Project OS doctrine across every runtime. Do not act from memory.
-2. Run the **Blackboard Read Gate** if `blackboard/` already has content: read the current goal, decisions, risks, open questions and approved plan before doing anything else. Use `context-scout` on the smallest available model when subagents and model routing are available, or do the read yourself and record the substitution. Report a compact `Context Used` summary.
+2. Run the **Blackboard Read Gate** if `<run-root>/` already has content: read the current goal, decisions, risks, open questions and approved plan before doing anything else. Use `context-scout` on the smallest available model when subagents and model routing are available, or do the read yourself and record the substitution. Report a compact `Context Used` summary.
 3. Route to the workflow that actually fits, and say which one you picked and why:
 
    | The request is… | Go to |
@@ -33,4 +38,4 @@ Stop and ask before spending money, publishing, deleting work, contacting anyone
 
 ## Capability note
 
-This workflow uses `subagents`, `websearch`, `task-tracking`. If your runtime does not have them, do the work inline yourself — do **not** skip the step and do **not** refuse. Record the substitution in `blackboard/17-capability-preflight.md` so the gap is visible instead of silent.
+This workflow uses `subagents`, `websearch`, `task-tracking`. If your runtime does not have them, do the work inline yourself — do **not** skip the step and do **not** refuse. Record the substitution in `<run-root>/17-capability-preflight.md`, using the active root selected by this workflow, so the gap is visible instead of silent.

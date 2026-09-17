@@ -35,6 +35,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 BRAIN_DIR = ROOT / "addons" / "full-engine" / "brain"
@@ -72,6 +73,10 @@ class BrainModeCase(unittest.TestCase):
     """Forces the stock umask so a world-readable creation is reproducible."""
 
     def setUp(self):
+        environment = mock.patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("PROJECT_OS_SHARED_BRAIN", None)
         self._umask = os.umask(0o022)
 
     def tearDown(self):

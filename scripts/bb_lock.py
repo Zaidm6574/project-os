@@ -40,6 +40,10 @@ class _GuardTimeout(Exception):
     """Deadline expired while waiting for a lock's serialization guard."""
 
 
+class LockLeaseLost(RuntimeError):
+    """The supplied token no longer owns a live lease for publication."""
+
+
 @contextmanager
 def _guard(lp, deadline=None):
     """Serialize all transitions for one stable lock pathname.
@@ -157,13 +161,39 @@ def renew(target, token=None):
         return False
     with _guard(lp):
         info = read_lock(lp)
-        if info is None or info.get("token") != expected:
+        if not isinstance(info, dict) or info.get("token") != expected or is_stale(lp):
             return False
         try:
             os.utime(lp, None)
             return True
         except FileNotFoundError:
             return False
+
+
+@contextmanager
+def fenced(target, token):
+    """Hold the stable guard from lease validation through publication.
+
+    A token check followed by an unguarded write leaves a window in which a
+    replacement owner can publish and then be overwritten by the old owner.
+    Use ``with fenced(target, token):`` around the entire publication. For
+    read-modify-write operations, acquire the lease before reading the state.
+    Missing, replaced, tokenless, or expired leases raise RuntimeError before
+    entering the block; no implicit token lookup or renewal is performed.
+
+    Once entered, the guard prevents takeover even if the lease ages during
+    the block. Keep it short and do not call acquire/renew/release/reap for the
+    same target inside it: those operations need this non-reentrant guard.
+    This is cooperative same-user locking, not protection from arbitrary file
+    editors. The guard file must never be unlinked while participants run.
+    """
+    lp = lock_path(target)
+    with _guard(lp):
+        info = read_lock(lp)
+        if (not token or not isinstance(info, dict)
+                or info.get("token") != token or is_stale(lp)):
+            raise LockLeaseLost("lock lease lost or expired before publication")
+        yield
 
 
 def release(target, agent="unknown", force=False, token=None):
@@ -345,22 +375,26 @@ def main():
             print("FAILED: could not acquire lock for append", file=sys.stderr)
             sys.exit(1)
         try:
-            parent = os.path.dirname(os.path.abspath(target))
-            os.makedirs(parent, exist_ok=True)
-            with open(target, "a", encoding="utf-8") as f:
-                # Never weld onto a crash-truncated last line. This is the
-                # generic append the module docstring advertises, and it is
-                # named in brain_append.py's own heal as a cause of the
-                # truncation it repairs -- yet it reproduced the defect
-                # itself (adversarial verify 2026-07-26).
-                if f.tell():
-                    with open(target, "rb") as probe:
-                        probe.seek(-1, os.SEEK_END)
-                        if probe.read(1) != b"\n":
-                            f.write("\n")
-                f.write(line + "\n")
-                f.flush()
-                os.fsync(f.fileno())
+            with fenced(target, acquired_token):
+                parent = os.path.dirname(os.path.abspath(target))
+                os.makedirs(parent, exist_ok=True)
+                with open(target, "a", encoding="utf-8") as f:
+                    # Never weld onto a crash-truncated last line. This is the
+                    # generic append the module docstring advertises, and it is
+                    # named in brain_append.py's own heal as a cause of the
+                    # truncation it repairs -- yet it reproduced the defect
+                    # itself (adversarial verify 2026-07-26).
+                    if f.tell():
+                        with open(target, "rb") as probe:
+                            probe.seek(-1, os.SEEK_END)
+                            if probe.read(1) != b"\n":
+                                f.write("\n")
+                    f.write(line + "\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+        except LockLeaseLost as exc:
+            print("FAILED: %s" % exc, file=sys.stderr)
+            sys.exit(1)
         finally:
             release(target, agent, force=True, token=acquired_token)
         sys.exit(0)

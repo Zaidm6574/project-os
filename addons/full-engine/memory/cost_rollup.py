@@ -12,12 +12,13 @@ Usage:
 
 Exits 2 when the rollup cannot be trusted as the portfolio total: --runs points
 at a directory that does not exist, or a run's 09-cost-estimate.md exists but
-could not be read (its spend is then missing from the **All runs** row, which is
-footnoted in the rendered table as well as flagged on stderr).
+could not be read, has an invalid ACTUALS block, or records incomplete
+measurement. Readable partial amounts remain labeled as recorded partial sums.
 
 Standard library only. No network access.
 """
 import argparse
+import importlib.util
 import os
 import re
 import sys
@@ -27,6 +28,38 @@ ROOT = os.path.dirname(HERE)
 MARK_START = "<!-- ACTUALS:START -->"
 MARK_END = "<!-- ACTUALS:END -->"
 DOLLARS_RE = re.compile(r"\$([0-9][0-9,]*\.?[0-9]*)")
+
+# A standard installation supplies both siblings plus scripts/bb_lock.py.
+# Load by path so direct importlib users and the installed CLI use the same
+# fence-aware locator as the writer, without duplicating Markdown parsing.
+_spec = importlib.util.spec_from_file_location(
+    "_rollup_cost_actuals", os.path.join(HERE, "cost_actuals.py"))
+_actuals = importlib.util.module_from_spec(_spec)
+try:
+    _spec.loader.exec_module(_actuals)
+except (OSError, RuntimeError) as exc:
+    message = "cost_rollup requires sibling cost_actuals.py and Project OS scripts/bb_lock.py: %s" % exc
+    if __name__ == "__main__":
+        sys.stderr.write("error: %s\n" % message)
+        raise SystemExit(2)
+    raise RuntimeError(message) from exc
+
+
+class Actuals(dict):
+    """Tier amounts with completeness metadata; preserves the dict API."""
+
+    def __init__(self):
+        super().__init__()
+        self.has_actuals = False
+        self.incomplete_reasons = []
+
+
+class Rollup(dict):
+    """Run amounts retaining unreadable inputs even without an output list."""
+
+    def __init__(self):
+        super().__init__()
+        self.unreadable = []
 
 
 def _tier(label):
@@ -38,11 +71,20 @@ def _tier(label):
 
 
 def _parse_actuals(text):
-    """Return {tier: summed_$} for one run's ACTUALS block (skips subtotal/total)."""
-    out = {}
-    if not text or MARK_START not in text or MARK_END not in text:
+    """Return dict-like tier sums and incomplete_reasons for one real block."""
+    out = Actuals()
+    if not text:
         return out
-    block = text.split(MARK_START, 1)[1].split(MARK_END, 1)[0]
+    try:
+        layout = _actuals._marker_layout(text, "cost report")
+    except _actuals.CostActualsError as exc:
+        out.incomplete_reasons.append(str(exc))
+        return out
+    if layout is None:
+        return out
+    out.has_actuals = True
+    start, end = layout
+    block = text[start + len(MARK_START):end]
     for line in block.splitlines():
         s = line.strip()
         if not s.startswith("|"):
@@ -52,6 +94,8 @@ def _parse_actuals(text):
             continue
         label = cells[0]
         low = label.lower()
+        if re.search(r"\bnot (?:fully )?measured\b", cells[2], re.IGNORECASE):
+            out.incomplete_reasons.append("%s: %s" % (label, cells[2]))
         # 2026-07-25: guard against blank label — set("") <= set(...) is True,
         # so an empty/whitespace Model cell was mistaken for a separator row
         # and its $ amount silently dropped instead of counted.
@@ -62,15 +106,18 @@ def _parse_actuals(text):
             continue
         amount = float(m.group(1).replace(",", ""))
         out[_tier(label)] = out.get(_tier(label), 0.0) + amount
+    if not out and not out.incomplete_reasons:
+        out.incomplete_reasons.append("ACTUALS block contains no recorded dollar amounts")
     return out
 
 
 def rollup(runs_dir, unreadable=None):
     """Return {run_slug: {tier: $}} for every run with parseable actuals.
 
-    Pass a list as `unreadable` to collect the cost files that EXIST but could
-    not be opened/read. Callers MUST report those before presenting the grand
-    total as the portfolio's spend.
+    Values preserve the dict API and carry incomplete_reasons. The returned
+    dict carries unreadable paths; render() retains both caveats automatically.
+    Pass a list as `unreadable` to collect those paths separately as well.
+    Converting the results to plain dicts discards this metadata.
 
     2026-07-27: `except OSError: continue` conflated "this run has no
     09-cost-estimate.md" (a legitimate skip — this function only promises runs
@@ -80,7 +127,7 @@ def rollup(runs_dir, unreadable=None):
     once one file was mode 000). Mirrors the `unreadable` tracking cost_actuals.py
     already does for transcripts.
     """
-    result = {}
+    result = Rollup()
     if not os.path.isdir(runs_dir):
         return result
     for slug in sorted(os.listdir(runs_dir)):
@@ -93,13 +140,14 @@ def rollup(runs_dir, unreadable=None):
                 per_tier = _parse_actuals(fh.read())
         except FileNotFoundError:
             continue  # no cost file recorded for this run — nothing to read
-        except OSError:
+        except (OSError, UnicodeError):
             # Present but unreadable (mode 000, a directory in its place, an
             # I/O error): the spend is real, so never drop it quietly.
             if unreadable is not None:
                 unreadable.append(cost_path)
+            result.unreadable.append(cost_path)
             continue
-        if per_tier:
+        if per_tier or per_tier.incomplete_reasons:
             result[slug] = per_tier
     return result
 
@@ -107,15 +155,20 @@ def rollup(runs_dir, unreadable=None):
 def _unreadable_note(unreadable):
     """Markdown footnote naming the runs excluded from the grand total."""
     return ("\n> **INCOMPLETE — grand total EXCLUDES %d unreadable run(s):** %s\n"
-            "> These cost files exist but could not be read, so the **All runs**\n"
-            "> row above UNDERSTATES real spend." % (
+            "> These cost files exist but could not be read; their amounts are unknown.\n"
+            "> The recorded sum is not a complete portfolio total." % (
                 len(unreadable), ", ".join(unreadable)))
 
 
 def render(data, unreadable=None):
+    unreadable = list(dict.fromkeys(list(unreadable or []) + list(getattr(data, "unreadable", []))))
+    partial = {slug: per.incomplete_reasons for slug, per in data.items()
+               if getattr(per, "incomplete_reasons", None)}
+    incomplete = bool(unreadable or partial)
     tiers = sorted({t for per in data.values() for t in per})
-    lines = ["| Run | " + " | ".join(t.capitalize() for t in tiers) + " | Run total $ |",
-             "|---|" + "---|" * (len(tiers) + 1)]
+    heading = "Recorded partial sum $" if incomplete else "Run total $"
+    lines = ["| " + " | ".join(["Run"] + [t.capitalize() for t in tiers] + [heading]) + " |",
+             "|" + "---|" * (len(tiers) + 2)]
     col_totals = {t: 0.0 for t in tiers}
     grand = 0.0
     for slug in sorted(data):
@@ -128,14 +181,23 @@ def render(data, unreadable=None):
             run_total += v
             cells.append("$%.4f" % v if v else "—")
         grand += run_total
-        lines.append("| %s | %s | $%.4f |" % (slug, " | ".join(cells), run_total))
-    tot_cells = " | ".join("$%.4f" % col_totals[t] for t in tiers)
-    lines.append("| **All runs** | %s | **$%.4f** |" % (tot_cells, grand))
+        value = "$%.4f" % run_total
+        if slug in partial:
+            value += " (not fully measured)"
+        lines.append("| " + " | ".join([slug] + cells + [value]) + " |")
+    tot_cells = ["$%.4f" % col_totals[t] for t in tiers]
+    total_label = "**All runs (recorded partial sum)**" if incomplete else "**All runs**"
+    lines.append("| " + " | ".join([total_label] + tot_cells + ["**$%.4f**" % grand]) + " |")
+    if partial:
+        lines.append("\n> **INCOMPLETE measurement:** " + "; ".join(
+            "%s (%s)" % (slug, "; ".join(reasons)) for slug, reasons in sorted(partial.items()))
+            + ". Recorded amounts do not establish the missing cost or a complete total.")
     if unreadable:
         # The caveat belongs in the rendered markdown, not only on stderr: this
         # table gets pasted into reports, where a bare **All runs** row would
         # read as the whole portfolio.
         lines.append(_unreadable_note(unreadable))
+    lines.append("\nRecorded ACTUALS rows only; totals do not establish complete provider billing, current prices, or run attribution.")
     return "\n".join(lines)
 
 
@@ -218,7 +280,12 @@ def main():
         sys.stderr.write(
             "\nUNREADABLE COST FILE(S): %s\n"
             "These exist but could not be opened/read, so the total above is\n"
-            "INCOMPLETE and UNDERSTATES real spend.\n" % ", ".join(unreadable))
+            "INCOMPLETE; omitted amounts are unknown.\n" % ", ".join(unreadable))
+        return 2
+    partial = [slug for slug, per in data.items() if per.incomplete_reasons]
+    if partial:
+        sys.stderr.write("\nINCOMPLETE MEASUREMENT: %s. Recorded partial sums only.\n"
+                         % ", ".join(partial))
         return 2
     return 0
 

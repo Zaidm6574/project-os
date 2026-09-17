@@ -44,6 +44,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -90,6 +91,7 @@ class ShippedLogPreambleSurvivesTheHeartbeat(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls._tmp = tempfile.mkdtemp(prefix="os-nightly-preamble-")
+        cls.addClassCleanup(shutil.rmtree, cls._tmp, ignore_errors=True)
         cls.target = os.path.join(cls._tmp, "installed")
         cls.home = os.path.join(cls._tmp, "home")
         os.makedirs(cls.home)
@@ -97,7 +99,7 @@ class ShippedLogPreambleSurvivesTheHeartbeat(unittest.TestCase):
             [sys.executable, str(SETUP), "--target", cls.target],
             capture_output=True, text=True, timeout=300)
         if done.returncode != 0:
-            raise unittest.SkipTest("installer failed:\n" + done.stdout + done.stderr)
+            raise AssertionError("installer failed:\n" + done.stdout + done.stderr)
         cls.log = os.path.join(cls.target, "blackboard", "22-automation-log.md")
         cls.before = _read(cls.log)
         env = dict(os.environ)
@@ -398,8 +400,17 @@ class LogWriteIsAtomic(_InProcessLog):
     def test_the_swap_happens_inside_the_lock(self):
         """The atomic rename must not be moved out from under bb_lock."""
         self.ship_template()
-        self.beat(1)
-        self.assertEqual(self.calls, ["acquire", "release"])
+        replace = self.nightly.os.replace
+
+        def observed_replace(source, destination):
+            self.calls.append("replace")
+            self.assertEqual(os.path.abspath(destination), os.path.abspath(self.log))
+            return replace(source, destination)
+
+        with mock.patch.object(self.nightly.os, "replace", side_effect=observed_replace):
+            self.beat(1)
+        self.assertEqual(self.calls, ["acquire", "replace", "release"])
+        self.assertIn("OVERALL: OK", self.read())
 
     def test_the_swap_does_not_change_the_logs_permissions(self):
         """tempfile.mkstemp() always creates 0600 and rename carries that over.

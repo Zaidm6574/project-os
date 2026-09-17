@@ -16,7 +16,7 @@ Every Project OS workflow lives here in runtime-neutral form.
 | `adopt-project` | — | Adopt an existing codebase or docs folder into Project OS as a new run. |
 | `board-review` | ['optional focus', 'e.g. "focus on privacy risk"'] | Run the board-of-directors review (5 director viewpoints + CFO cost packet) |
 | `cost-check` | ['optional: balanced | cost-aware | max-effort'] | Estimate cost and set model routing (CFO) |
-| `deliver` | — | Close out a run — delivery report, memory/graph wiring, cost actuals, lesson export, and a mechanical validation gate. |
+| `deliver` | — | Close out a run with evidence, delivery notes, attributed costs, reviewed memory, and structural validation. |
 | `evaluate` | <path or short description of what to evaluate> | Run the evaluator quality-gate loop on an artifact or packet |
 | `kickoff` | <your rough idea> | Start a new Project OS project from a rough idea (CEO interviews you, picks tier + cost mode) |
 | `memory-sync` | ['optional: a lesson/preference to remember'] | Update memory — refresh the GraphOS graph and store durable lessons in OSVec |

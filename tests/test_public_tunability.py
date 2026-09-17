@@ -72,9 +72,9 @@ class PublicTunabilityTests(unittest.TestCase):
                 [sys.executable, str(ROOT / "memory/mneme_adapter.py"), "build"],
                 capture_output=True, text=True, cwd=ROOT, env=env,
             )
+            self.assertFalse(index.exists(), "invalid embedder wrote an index")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must be one of auto, neural, lexical", result.stderr)
-        self.assertFalse(index.exists())
         self.assertNotIn("Traceback", result.stderr)
 
     def test_ollama_batch_and_timeout_use_bounded_env_aliases(self):

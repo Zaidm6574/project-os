@@ -558,11 +558,32 @@ def _atomic_write_text(dest: Path, text: str) -> None:
 def write_report(target: Path) -> Path:
     target = target.expanduser().resolve()
     preflight = target / "blackboard" / "17-capability-preflight.md"
+    _validate_report_destination(target, preflight)
     preflight.parent.mkdir(parents=True, exist_ok=True)
+    _validate_report_destination(target, preflight)
     report = build_report(target)
     existing = preflight.read_text(encoding="utf-8") if preflight.exists() else ""
+    _validate_report_destination(target, preflight)
     _atomic_write_text(preflight, apply_report(existing, report))
     return preflight
+
+
+def _validate_report_destination(target: Path, destination: Path) -> None:
+    """Refuse linked or nonregular report paths before any read or mkdir."""
+    current = target
+    for part in destination.relative_to(target).parts:
+        current = current / part
+        try:
+            node = current.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(node.st_mode):
+            raise ValueError(f"unsafe report destination symlink: {current}")
+        if current == destination:
+            if not stat.S_ISREG(node.st_mode) or node.st_nlink != 1:
+                raise ValueError(f"unsafe report destination file: {current}")
+        elif not stat.S_ISDIR(node.st_mode):
+            raise ValueError(f"unsafe report destination directory: {current}")
 
 
 def main() -> int:
@@ -570,7 +591,11 @@ def main() -> int:
     parser.add_argument("--target", default=".", help="Project folder to inspect. Default: current folder.")
     args = parser.parse_args()
 
-    report_path = write_report(Path(args.target))
+    try:
+        report_path = write_report(Path(args.target))
+    except (ValueError, OSError) as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 1
     print(f"Wrote optional tool check to {report_path}")
     return 0
 

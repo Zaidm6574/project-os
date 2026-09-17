@@ -440,12 +440,11 @@ class FullEngineInstallerExitsNonzeroOnEscapingRefusal(unittest.TestCase):
                          "stderr:\n%s" % (r.stdout, r.stderr))
         self.assertNotIn("REFUSED", r.stdout + r.stderr)
 
-    def test_refusal_contained_inside_the_target_still_exits_zero(self):
-        """A link that stays inside the target is reported, not fatal.
+    def test_full_engine_abort_on_contained_link_exits_nonzero(self):
+        """A whole-activation refusal must not report successful installation.
 
-        This repo ships `AGENTS.md -> CLAUDE.md`; refusing to write through it
-        is correct, but it is not a reason to fail an otherwise good install,
-        and setup_project_os.py deliberately returns 0 for it.
+        The starter can skip individual contained links, but the full-engine
+        preflight aborts before activation and must communicate that failure.
         """
         os.makedirs(os.path.join(self.target, "memory"))
         inside = os.path.join(self.target, "inside.txt")
@@ -458,10 +457,11 @@ class FullEngineInstallerExitsNonzeroOnEscapingRefusal(unittest.TestCase):
         self.assertIn("REFUSED", r.stdout + r.stderr,
                       "the contained link was written through instead of "
                       "refused")
-        self.assertEqual(
+        self.assertNotEqual(
             r.returncode, 0,
-            "a refusal that stays INSIDE the target failed the install\n"
+            "full-engine activation aborted but reported success\n"
             "stdout:\n%s\nstderr:\n%s" % (r.stdout, r.stderr))
+        self.assertNotIn("install complete", r.stdout.lower())
         with open(inside) as f:
             self.assertEqual(f.read(), "# mine\n",
                              "the installer wrote through a contained link")

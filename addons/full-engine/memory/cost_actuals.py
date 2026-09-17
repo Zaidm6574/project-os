@@ -28,9 +28,12 @@ Codex local session logs: ~/.codex/sessions stores event records with
 payload.info.last_token_usage (per-turn usage) and payload.info.total_token_usage
 (cumulative session usage). Sum last_token_usage for the preferred local
 activity estimate, and use only the final total_token_usage per session file as
-a lower cross-check. Never sum every total_token_usage row. Codex's
+a cross-check. Never sum every total_token_usage row. Codex's
 cached_input_tokens are cached reads/subset of input tokens; these logs do not
 expose cache_creation_input_tokens/cache writes.
+This mode has no project/run/time filter or event deduplication; an explicit
+curated --sessions-dir is needed for run attribution. It exits 2 for unreadable,
+malformed, or invalid input, or when no per-turn counters can be measured.
 
 No network calls; stdlib only.
 """
@@ -44,6 +47,7 @@ import re
 import stat as stat_module
 import sys
 import tempfile
+from contextlib import nullcontext
 
 
 def _load_from_scripts(module_name, purpose):
@@ -507,12 +511,19 @@ def _empty_codex_counts():
 
 
 def _add_codex_counts(dest, usage):
+    """Validate one counter record before adding any of it."""
+    if not isinstance(usage, dict) or not any(key in usage for key in CODEX_TOKEN_FIELDS):
+        raise ValueError("usage must be an object with token counters")
+    counts = {}
     for key in CODEX_TOKEN_FIELDS:
         value = usage.get(key, 0)
-        if isinstance(value, bool):
-            continue
-        if isinstance(value, (int, float)):
-            dest[key] += int(value)
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or value < 0 or (isinstance(value, float)
+                                and (not math.isfinite(value) or not value.is_integer()))):
+            raise ValueError("%s must be a nonnegative integer" % key)
+        counts[key] = int(value)
+    for key, value in counts.items():
+        dest[key] += value
 
 
 def _uncached_codex_input(counts):
@@ -521,7 +532,9 @@ def _uncached_codex_input(counts):
 
 def _collect_codex_session_files(sessions_dir):
     if not sessions_dir.exists():
-        raise FileNotFoundError("%s not found; use --sessions-dir to specify a folder" % sessions_dir)
+        raise CostActualsError("%s not found; use --sessions-dir to specify a folder" % sessions_dir)
+    if not sessions_dir.is_dir():
+        raise CostActualsError("%s is not a sessions directory; use --sessions-dir to specify a folder" % sessions_dir)
     return sorted(sessions_dir.rglob("*.jsonl"))
 
 
@@ -548,6 +561,8 @@ def _parse_codex_session_usage(files):
         # line was dropped by a bare `continue`, understating the rollup with no
         # warning that anything had been skipped.
         "malformed_lines": [],
+        "unreadable_files": [],
+        "invalid_records": [],
     }
 
     for fpath in files:
@@ -564,6 +579,9 @@ def _parse_codex_session_usage(files):
                     except json.JSONDecodeError:
                         stats["malformed_lines"].append((fpath, lineno))
                         continue
+                    if not isinstance(event, dict):
+                        stats["invalid_records"].append((fpath, lineno, "event must be an object"))
+                        continue
                     payload = event.get("payload")
                     if not isinstance(payload, dict):
                         continue
@@ -571,17 +589,25 @@ def _parse_codex_session_usage(files):
                     if not isinstance(info, dict):
                         continue
                     last_usage = info.get("last_token_usage")
-                    if isinstance(last_usage, dict):
-                        _add_codex_counts(turn_totals, last_usage)
-                        stats["usage_events"] += 1
-                        file_has_usage = True
+                    if last_usage is not None:
+                        try:
+                            _add_codex_counts(turn_totals, last_usage)
+                        except ValueError as exc:
+                            stats["invalid_records"].append((fpath, lineno, "last_token_usage: %s" % exc))
+                        else:
+                            stats["usage_events"] += 1
+                            file_has_usage = True
                     total_usage = info.get("total_token_usage")
-                    if isinstance(total_usage, dict):
-                        final_total_for_file = total_usage
-                        _add_codex_counts(cumulative_row_totals, total_usage)
-                        stats["bad_cumulative_rows"] += 1
-        except OSError:
-            continue
+                    if total_usage is not None:
+                        try:
+                            _add_codex_counts(cumulative_row_totals, total_usage)
+                        except ValueError as exc:
+                            stats["invalid_records"].append((fpath, lineno, "total_token_usage: %s" % exc))
+                        else:
+                            final_total_for_file = total_usage
+                            stats["bad_cumulative_rows"] += 1
+        except (OSError, UnicodeError):
+            stats["unreadable_files"].append(fpath)
 
         if file_has_usage:
             stats["sessions_with_usage"] += 1
@@ -619,9 +645,14 @@ def _render_codex_session_rollup(stats, sessions_dir):
     if turn["total_tokens"] > 0:
         overcount_note = "%.1fx" % (bad["total_tokens"] / turn["total_tokens"])
 
-    agreement_note = "matches"
+    incomplete = any(stats.get(key) for key in ("unreadable_files", "malformed_lines", "invalid_records"))
+    agreement_note = "matches on parsed counters only; does not establish completeness"
     if turn != final:
         agreement_note = "differs; treat this as local activity, not billing-grade actuals"
+    if not stats["usage_events"]:
+        agreement_note = "not measured: no usable last_token_usage records"
+    elif incomplete:
+        agreement_note += "; INCOMPLETE input"
 
     lines = [
         "## Codex local session token rollup",
@@ -631,15 +662,17 @@ def _render_codex_session_rollup(stats, sessions_dir):
         "| Scope | Value |",
         "|---|---:|",
         "| Files scanned | %s |" % _fmt_tokens(stats["files_scanned"]),
+        "| Unreadable files | %s |" % _fmt_tokens(len(stats.get("unreadable_files", []))),
         "| Sessions with usage | %s |" % _fmt_tokens(stats["sessions_with_usage"]),
         "| Usage events | %s |" % _fmt_tokens(stats["usage_events"]),
         "| Malformed (undecodable) lines | %s |"
         % _fmt_tokens(len(stats.get("malformed_lines", []))),
+        "| Invalid records | %s |" % _fmt_tokens(len(stats.get("invalid_records", []))),
         "| Cached-input share of input | %s |" % _fmt_pct(turn["cached_input_tokens"], turn["input_tokens"]),
         "| Wrong cumulative-row overcount | %s |" % overcount_note,
         "| Final-session cross-check | %s |" % agreement_note,
         "",
-        "| Field | Preferred local activity estimate: sum `last_token_usage` | Lower cross-check: final `total_token_usage` per session | Do not use: sum every `total_token_usage` row |",
+        "| Field | Preferred local activity estimate: sum `last_token_usage` | Cross-check: final `total_token_usage` per session | Do not use: sum every `total_token_usage` row |",
         "|---|---:|---:|---:|",
     ]
     lines.extend(rows)
@@ -650,10 +683,16 @@ def _render_codex_session_rollup(stats, sessions_dir):
             "",
             "- `cached_input_tokens` are cache reads/a subset of input tokens in Codex local logs.",
             "- Codex local logs do not expose `cache_creation_input_tokens`, so they cannot prove cache-write/filing-fee cost.",
-            "- `total_token_usage` is cumulative inside each session file. Summing every row overcounts; use `last_token_usage` for local activity or only the final session total as a lower cross-check.",
+            "- `total_token_usage` is cumulative inside each session file. Summing every row overcounts; use `last_token_usage` for local activity or only the final session total as a cross-check.",
             "- This is local saved-session activity, not guaranteed account-wide billing across devices or unsaved chats.",
+            "- Selection includes every discovered `.jsonl` under this directory; no project, run, or time filter is applied. Supply a curated directory before attributing these counters to a run.",
+            "- Events are not deduplicated. Replayed/overlapping logs can overcount; missing fields default to zero and missing events can undercount. Matching totals do not prove complete usage or dollar cost.",
         ]
     )
+    if incomplete:
+        lines.extend(["", "> **INCOMPLETE input — recorded counters only.** Unreadable files or skipped records prevent a complete local-activity claim."])
+    if not stats["usage_events"]:
+        lines.extend(["", "> **Not measured:** no usable per-turn usage records were found; zero counters do not establish zero activity."])
     return "\n".join(lines)
 
 
@@ -665,10 +704,20 @@ def run_codex_sessions(sessions_dir):
     if malformed:
         sys.stderr.write(
             "\nMALFORMED SESSION LINE(S): %s\n"
-            "These could not be JSON-decoded, so the rollup above UNDERSTATES\n"
-            "local activity rather than measuring it.\n"
+            "These could not be JSON-decoded; the rollup has INCOMPLETE input.\n"
             % ", ".join("%s:%d" % (f, n) for f, n in malformed)
         )
+    unreadable = stats["unreadable_files"]
+    if unreadable:
+        sys.stderr.write("\nUNREADABLE SESSION FILE(S): %s\nINCOMPLETE input; recorded counters only.\n"
+                         % ", ".join(map(str, unreadable)))
+    invalid = stats["invalid_records"]
+    if invalid:
+        sys.stderr.write("\nINVALID SESSION RECORD(S): %s\nINCOMPLETE input; recorded counters only.\n"
+                         % ", ".join("%s:%d (%s)" % item for item in invalid))
+    if not stats["usage_events"]:
+        sys.stderr.write("\nNOT MEASURED: no usable per-turn usage records found.\n")
+    return 2 if unreadable or malformed or invalid or not stats["usage_events"] else 0
 
 
 def _build_table(
@@ -805,7 +854,7 @@ def _marker_layout(text, dest):
     ends, _ = _unfenced_marker_positions(text, end_tag)
     if fence_open:
         raise CostActualsError(
-            "unterminated Markdown code fence in %s — refusing to write" % dest)
+            "unterminated Markdown code fence in %s — refusing to select ACTUALS" % dest)
     if not starts and not ends:
         return None
     if len(starts) != 1 or len(ends) != 1:
@@ -821,7 +870,7 @@ class _LeaseLostError(Exception):
     """The writer's lock lease was reaped and re-owned before commit."""
 
 
-def _atomic_write_preserving_mode(dest, new_text, commit_check=None):
+def _atomic_write_preserving_mode(dest, new_text, commit_check=None, commit_fence=None):
     """Replace dest's contents atomically without changing its permissions.
 
     Write atomically (2026-07-25): a plain write_text() truncates dest before
@@ -898,7 +947,11 @@ def _atomic_write_preserving_mode(dest, new_text, commit_check=None):
             os.chmod(tmp_name, 0o666 & ~umask)
         if commit_check is not None:
             commit_check()
-        os.replace(tmp_name, str(real_dest))
+        # Renewal alone cannot exclude takeover between the check and rename.
+        # Enter the publication fence only after renewal: the stable lock guard
+        # is not reentrant, so renewing while inside it would deadlock.
+        with commit_fence if commit_fence is not None else nullcontext():
+            os.replace(tmp_name, str(real_dest))
     except BaseException:
         try:
             os.unlink(tmp_name)
@@ -948,8 +1001,10 @@ def _update_markers(dest, table_md):
             out_text = (
                 text[: si + len(start_tag)] + eol + table_md + eol + text[ei:])
         try:
-            _atomic_write_preserving_mode(dest, out_text, commit_check=_still_owner)
-        except _LeaseLostError:
+            _atomic_write_preserving_mode(
+                dest, out_text, commit_check=_still_owner,
+                commit_fence=bb_lock.fenced(str(dest), token))
+        except (_LeaseLostError, bb_lock.LockLeaseLost):
             lease_lost = True
             print(
                 "cost-actuals write lease lost for %s — a replacement writer "
@@ -1433,8 +1488,7 @@ def main():
 
     if args.codex_sessions:
         sessions_dir = pathlib.Path(args.sessions_dir).expanduser() if args.sessions_dir else pathlib.Path.home() / ".codex" / "sessions"
-        run_codex_sessions(sessions_dir)
-        return
+        sys.exit(run_codex_sessions(sessions_dir))
 
     prices = _load_prices(args.prices)
 

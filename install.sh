@@ -159,6 +159,7 @@ set -- --target "$TARGET"
 if [ "$FORCE" = "1" ]; then set -- "$@" --force; fi
 if [ "$DRY_RUN" = "1" ]; then set -- "$@" --dry-run; fi
 if [ "$ALLOW_UNSAFE_TARGET" = "1" ]; then set -- "$@" --allow-unsafe-target; fi
+if [ "$FULL_ENGINE" = "1" ]; then set -- "$@" --defer-resolvers; fi
 "$PYTHON" "$SETUP_SCRIPT" "$@"
 
 if [ "$FULL_ENGINE" = "1" ]; then
@@ -205,6 +206,16 @@ if [ "$CHECK_TOOLS" = "1" ]; then
 fi
 
 printf '%s\n' ""
+if [ "$DRY_RUN" = "1" ]; then
+  printf '%s\n' "Dry run finished. Run again without --dry-run to install."
+  if [ "${CLAUDE_ENGINE:-0}" = "1" ]; then
+    printf '%s\n' "The selected options would install Claude slash commands."
+  fi
+  if [ "${CODEX_ENGINE:-0}" = "1" ]; then
+    printf '%s\n' "The selected options would install Codex skills."
+  fi
+  exit 0
+fi
 printf '%s\n' "Install path finished."
 # 2026-07-27: this closed by telling every user to type "/project <your idea>",
 # which is a slash command -- and a starter install writes no .claude/ directory

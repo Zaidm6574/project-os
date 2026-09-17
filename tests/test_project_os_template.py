@@ -496,7 +496,7 @@ class SetupProjectOSTests(unittest.TestCase):
                     }
                 ],
             )
-            # Noise the collector must ignore: a non-jsonl file and a corrupt line.
+            # Non-JSONL files are not selected; a corrupt selected line makes the rollup incomplete.
             (sessions / "notes.txt").write_text("not a session log\n", encoding="utf-8")
             with open(sessions / "session-b.jsonl", "a", encoding="utf-8") as handle:
                 handle.write("{ this is not json\n")
@@ -507,7 +507,9 @@ class SetupProjectOSTests(unittest.TestCase):
                 text=True,
             )
 
-            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("MALFORMED SESSION LINE(S)", result.stderr)
+            self.assertIn("INCOMPLETE input", result.stdout)
             out = result.stdout
             self.assertIn("## Codex local session token rollup", out)
             self.assertIn(str(sessions), out)
@@ -522,7 +524,7 @@ class SetupProjectOSTests(unittest.TestCase):
             self.assertIn("| uncached_input_tokens | 260 | 260 | 320 |", out)
             self.assertIn("| Cached-input share of input | 25.7% |", out)
             self.assertIn("| Wrong cumulative-row overcount | 1.3x |", out)
-            self.assertIn("| Final-session cross-check | matches |", out)
+            self.assertIn("matches on parsed counters only; does not establish completeness; INCOMPLETE input", out)
 
     def test_codex_session_rollup_refuses_a_missing_sessions_dir(self):
         with tempfile.TemporaryDirectory() as tmp:

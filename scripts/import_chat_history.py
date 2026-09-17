@@ -219,7 +219,7 @@ def redact(text: str, patterns: list = None, counts: Counter = None) -> str:
         sys.path.insert(0, str(ROOT / "scripts"))
         try:
             from secret_patterns import redaction_pairs
-            patterns = redaction_pairs()
+            patterns = redaction_patterns(redaction_pairs())
         finally:
             sys.path.pop(0)
     for pattern, replacement in patterns:

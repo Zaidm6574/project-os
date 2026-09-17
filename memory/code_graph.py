@@ -132,8 +132,9 @@ def _scan_module(rel, full, unparsed=None):
             mod.defs[node.name] = (f"{mod.name}:{node.name}", node.lineno, "class")
             for item in node.body:
                 if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    kind = "test" if (mod.is_test and item.name.startswith("test")) else "function"
                     mod.defs[f"{node.name}.{item.name}"] = (
-                        f"{mod.name}:{node.name}.{item.name}", item.lineno, "function")
+                        f"{mod.name}:{node.name}.{item.name}", item.lineno, kind)
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 mod.import_modules[alias.asname or alias.name.split(".")[0]] = alias.name
@@ -300,7 +301,7 @@ def build(root, out=None):
                         target, method = bare_names[name][0], "inferred"
                 elif isinstance(callee, ast.Attribute) and isinstance(callee.value, ast.Name):
                     alias = callee.value.id
-                    if alias in mod.import_modules:
+                    if alias in mod.import_modules and alias not in local_names:
                         tmod = mod.import_modules[alias]
                         cand = f"{tmod}:{callee.attr}"
                         if cand in known_ids:

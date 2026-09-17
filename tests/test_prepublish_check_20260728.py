@@ -113,17 +113,57 @@ class ItCatchesEveryCanonicalShape(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("private-local.md", r.stdout + r.stderr)
 
-    def test_it_uses_every_pattern_not_a_subset(self):
-        """The old rg had 7 of 28. Prove the script sees all of them."""
-        pats = _canonical_patterns()
-        self.assertGreaterEqual(len(pats), 20, "canonical list unexpectedly small")
+    def test_list_matches_canonical_patterns_exactly(self):
+        """Listing parity is a drift check, separate from scanner behavior."""
         r = self._run("--list")
-        self.assertEqual(r.returncode, 0, "--list failed:\n%s" % r.stderr)
-        reported = [l for l in r.stdout.splitlines() if l.strip()]
-        self.assertGreaterEqual(
-            len(reported), len(pats),
-            "the checker reports %d patterns but the canonical list has %d -- it is "
-            "using a subset" % (len(reported), len(pats)))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.splitlines(), [p.pattern for p in _canonical_patterns()])
+
+    def test_each_credential_family_and_clean_near_miss(self):
+        # Construct shapes at runtime. No complete credential-shaped fixtures
+        # belong in tracked source, even when synthetic.
+        sized = [
+            ("sk-", 16), ("sk_live_", 16), ("rk_test_", 16),
+            ("AKIA", 16), ("ASIA", 16), ("ghp_", 20),
+            ("github_pat_", 20), ("AIza", 20), ("ya29.", 20),
+            ("xoxb-", 10), ("figd_", 20), ("SG.", 20),
+            ("AC", 32), ("SK", 32), ("glpat-", 16),
+            ("dop_v1_", 32), ("npm_", 30), ("hf_", 30),
+            ("ntn_", 40), ("lin_api_", 30), ("vercel_", 20),
+        ]
+        cases = [(prefix + "A" * size, prefix + "A" * (size - 1))
+                 for prefix, size in sized]
+        cases += [
+            ("https://" + "a" * 32 + "@example.invalid/1",
+             "https://" + "a" * 31 + "@example.invalid/1"),
+            ("AccountKey=" + "A" * 40, "AccountKey=" + "A" * 39),
+            ("https://hooks.slack.com/services/" + "T" + "A" * 20,
+             "https://hooks.slack.com/services/" + "T" + "A" * 19),
+            ("eyJ" + "A" * 10 + ".eyJ" + "B" * 10 + ".",
+             "eyJ" + "A" * 9 + ".eyJ" + "B" * 10 + "."),
+            ("postgres://user:" + "example" + "@example.invalid/db",
+             "postgres://user@example.invalid/db"),
+            ("-----BEGIN " + "PRIVATE KEY-----", "-----BEGIN PUBLIC KEY-----"),
+            ("api_key = " + "a" * 6, "api_key = " + "a" * 5),
+        ]
+        self.assertEqual(len(cases), len(_canonical_patterns()),
+                         "new canonical family needs an end-to-end fixture")
+        # Cover alternative branches within the families as well.
+        cases += [("GOCSPX-" + "A" * 20, "GOCSPX-" + "A" * 19),
+                  ("bearer " + "A" * 8, "bearer token")]
+        candidate = self.work / "candidate.md"
+        for number, (credential, near_miss) in enumerate(cases):
+            with self.subTest(family=number):
+                candidate.write_text(credential + "\n", encoding="utf-8")
+                result = self._run(str(self.work))
+                self.assertEqual(result.returncode, 1, "family was not detected")
+                self.assertIn("candidate.md:1", result.stdout)
+                self.assertTrue(credential not in result.stdout + result.stderr,
+                                "scanner exposed a matched value")
+                candidate.write_text(near_miss + "\n", encoding="utf-8")
+                clean = self._run(str(self.work))
+                self.assertEqual(clean.returncode, 0,
+                                 "clean near miss was reported as dirty")
 
 
 class ReadmePointsAtTheScript(unittest.TestCase):

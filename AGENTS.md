@@ -48,6 +48,22 @@ Project OS is a workflow template. Do not overclaim capabilities.
 - Keep current artifacts separate from draft, test, superseded, or broken artifacts.
 - UI quality is a real deliverable. For frontend work, record responsive layout, accessibility, interaction states, visual direction, and browser QA status instead of treating UI polish as optional.
 
+## Active workspace and shared notes
+
+Select one **active workspace root** before the read gate: an explicitly named `runs/<slug>/` for a run, or `blackboard/` for project-level work without a named run. Record it in `Context Used` and every delegated packet. Never infer the active run from modification time. A role or workflow receiving no root must resolve it from the caller's explicit task context before writing.
+
+In run instructions, `<run-root>/` and unqualified numbered filenames mean that selected root. Older `blackboard/<numbered-note>`, `blackboard/packets/`, and `blackboard/plans/` references in doctrine are path aliases for the active root during a named run. They do not authorize edits to shared notes. Read relevant project-shared notes as context and cite their source; write current-run goals, decisions, risks, costs, plans, evaluations, packets and closeout under the active root. Create an omitted slim-tier note only when the task needs it. Keep historical decisions and risks append-only.
+
+For shell examples, bind `run_root="runs/example-run"` from the actual selected run and keep the working directory at the project root. This shell variable is a convention, **not** an auto-routing feature. Pass explicit arguments supported by each helper:
+
+- graph: `python3 memory/build_graph.py --root "$run_root"`
+- prompt packets: `python3 scripts/promptsmith.py --task "bounded task" --brief-file examples/sample-brief.md --out-dir "$run_root/packets" --no-index`; `--out-dir` routes packet files only, while `--no-index` prevents the helper from appending to the shared blackboard index. Register the emitted worker/rubric paths explicitly in `<run-root>/05-agent-packets.md` (create it if needed), with paths relative to that run root and Draft status until reviewed.
+- plan commands: supply a path such as `"$run_root/plans/wave-1.json"`, including `create --id` and subsequent validate/approve/compile/complete calls; bare IDs use project-level defaults
+- delivery cost reports: `--target "$run_root/09-cost-estimate.md"` with an explicitly attributed input, as described in `prompts/workflows/deliver.md`
+- evolution/harvest: use the explicit run slug with the command's supported argument; do not pass a filesystem path where a slug is required
+
+Project-wide stores (`brain/`, `memory/`, `graphify-out/`), reviewed harvest proposals staged by `harvest.py` in `blackboard/packets/`, run catalogue (`runs/INDEX.md`), and scheduled maintenance log (`blackboard/22-automation-log.md`) remain shared. Memory promotion is a separate reviewed operation. `check_optional_tools.py --target .` writes a shared capability report; it does not accept a run report destination. Read that report during a run and log run-specific capability use in `<run-root>/17-capability-preflight.md`; refresh the shared report only as explicit project maintenance. Rebuilding a project-wide graph replaces its prior derived view, so record the graph's source root.
+
 ## Blackboard Read Gate
 
 Do not act from memory on serious Project OS work. Before planning, building, reviewing, delivering, or approving, read the current blackboard files that govern the task and report a short `Context Used` summary.
@@ -137,7 +153,7 @@ Prefer flat stages over giant nested swarms unless the project is genuinely larg
 These scripts exist and are smoke-tested. Use them; do not reimplement ad hoc.
 
 - **Locking.** Any write to a shared blackboard file or `~/.project-os/central-brain/shared-brain.jsonl` from a swarm or a second session goes through `scripts/bb_lock.py` (`acquire`/`release`, or `append` for JSONL lines, `run` to hold a lock around a command). Locks stale-reap after 60s.
-- **Promptsmith.** UI/creative worker prompts are compiled, not hand-rolled: `scripts/promptsmith.py --task "..."` fetches a brain brief and emits BOTH the worker prompt and the evaluator rubric from the same brief into `blackboard/packets/`. In Claude sessions you may call `mcp__brain__brief` yourself and pass `--brief-file`. DON'T violations are auto-fail. If the brain is unreachable the packets say BRAIN-UNAVAILABLE — never invent taste.
+- **Promptsmith.** UI/creative worker prompts are compiled, not hand-rolled: `scripts/promptsmith.py --task "..." --out-dir "$run_root/packets" --no-index` fetches a brain brief and emits BOTH the worker prompt and the evaluator rubric from the same brief into the explicitly selected run packet directory. The helper does not route its default index with `--out-dir`; keep `--no-index` for named runs and register emitted paths in the run-local `05-agent-packets.md` yourself. In Claude sessions you may call `mcp__brain__brief` yourself and pass `--brief-file`. DON'T violations are auto-fail. If the brain is unreachable the packets say BRAIN-UNAVAILABLE — never invent taste.
 - **Evolution records.** In evaluate → reject/approve → revise loops, record every scored variant with `scripts/evolution.py record`, and evolve the next variant from the BEST-scoring one (`evolution.py next`), never merely the latest. On rejection, also write a lesson line to `memory/self-improvement-loop.md`.
 - **Plans as data.** Mini/Full Swarm plans are JSON artifacts in `blackboard/plans/` via `scripts/plan_artifact.py` (create → validate → **approve = human gate** → compile to worker packets → complete). `compile` refuses unapproved plans (`--force` overrides approval only; validation always runs).
 - **Brain scale.** Run `scripts/brain_scale.py` at kickoff of serious runs. With a neural index live the active-entries ceiling is a soft 400; relieve pressure with `scripts/brain_archive.py` (moves entries to the archive tier — they STAY semantically searchable via Mneme) rather than deleting. Stale `interest` entries (>60d) are flagged as archive candidates automatically.
@@ -199,7 +215,7 @@ Use the UI lane to define:
 - visual direction that fits the domain rather than generic decoration
 - browser QA checks, screenshots, or manual viewport checks needed before approval
 
-If the full engine is installed, use `ui-ux-designer` for the design packet, `frontend-builder` for implementation, and `/ui-review` for the UI quality gate. For static HTML artifacts, run `python3 memory/browser_qa.py <path>` when available; for dev-server apps, use browser or Playwright QA when available. Always log whether browser QA passed, failed, or was unavailable.
+When the full engine is installed, use `ui-ux-designer` for the design packet, `frontend-builder` for implementation, and the `ui-review` workflow for the UI quality gate (`/ui-review` when the Claude adapter is activated). For static HTML artifacts, `python3 memory/browser_qa.py <path>` checks selected local link/asset references, not rendered layout, accessibility or interaction; for dev-server apps, use browser or Playwright QA when available. Always log whether browser QA passed, failed, or was unavailable.
 
 ## Code Orientation
 
@@ -282,9 +298,9 @@ This repository is a Python 3 CLI/template tool ("Project OS"), not a long-runni
 
 ## Context & cache economy (added 2026-07-05)
 
-Live billing analysis (2026-07-05) confirmed the audit's #1 cost finding: the **orchestrator's context — not the subagents — dominates spend.** Four rules, enforced by `memory/context_budget.py`:
+Historical workflow observations motivated these cost heuristics; their thresholds and ratios are not measurements or guarantees for every model or run. `memory/context_budget.py` reports available context signals. The host, not that one-shot helper, performs handoffs and applies the following policies:
 
 1. **Kickoff preflight:** run `python3 memory/context_budget.py`; record its output line in the run's `09-cost-estimate.md`. A fat harness (>25 enabled plugins or >200K baseline) gets fixed **before** wave 1 — the CFO cannot route costs it never measured.
-2. **Wave-boundary fresh-session rule:** when the check says CHECKPOINT (>200K live context), close the wave (packets + decisions to the blackboard), then continue in a **fresh session** that re-reads only the blackboard. Never let one orchestrator context run for hours — auto-compact summaries lose decisions AND re-write the whole cache prefix at 12.5x read price.
-3. **Fewer, bigger subagents:** each spawn cache-writes ~36K of agent prompt. 3 agents x 10 items beats 30 agents x 1.
-4. **Overnight wakes:** accept one cold cache write per wake. Never keep-warm ping at <5-minute intervals — six warm pings cost more than one cold write.
+2. **Wave-boundary fresh-session rule:** when the check says CHECKPOINT (>200K live context), close the wave (packets + decisions to the blackboard), then continue in a **fresh session** that re-reads only the blackboard. Never let one orchestrator context run for hours — summaries can lose decisions, and cache-write versus read pricing varies by provider and model. Use current attributed usage and pricing rather than a fixed multiplier.
+3. **Batch bounded work:** agent setup overhead varies by host and model. Compare measured context costs before choosing many small tasks versus fewer larger tasks.
+4. **Overnight wakes:** accept one cold cache write per wake. Never keep-warm ping at <5-minute intervals — compare the actual provider costs before using any keep-warm strategy.

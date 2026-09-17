@@ -16,16 +16,18 @@ living in Markdown -- where no test can reach it -- would recreate that defect o
 the surface where it matters most. Importing the list means it cannot drift.
 
 Usage:
-  python3 scripts/prepublish_check.py [PATH]     # default: repo root
-  python3 scripts/prepublish_check.py --tracked  # only files Git would publish
+  python3 scripts/prepublish_check.py [PATH]     # working directory/file; default: repo root
+  python3 scripts/prepublish_check.py --tracked  # stage-0 index blobs, not working files
+  python3 scripts/prepublish_check.py --tracked --working-tree  # index paths, local bytes
   python3 scripts/prepublish_check.py --list     # print the patterns in use
 
 Exit codes:
-  0  nothing matched
+  0  at least one selected file was scanned and nothing matched
   1  at least one credential shape found (the file and line are printed)
-  2  the canonical denylist could not be imported -- fails CLOSED on purpose:
+  2  invalid target/options, empty selection, unresolved index or unavailable denylist:
      a scanner that silently checks nothing is worse than no scanner at all
 """
+import argparse
 import os
 import subprocess
 import sys
@@ -65,76 +67,109 @@ def load_patterns():
 
 
 def iter_files(root):
+    """Select text candidates, including an explicitly named regular file."""
+    if os.path.isfile(root):
+        if root.lower().endswith(SKIP_SUFFIXES):
+            raise RuntimeError("explicit target has an excluded binary suffix")
+        yield root
+        return
+    if not os.path.isdir(root):
+        raise RuntimeError("target must be a regular file or directory")
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for name in filenames:
-            if name.lower().endswith(SKIP_SUFFIXES):
-                continue
-            yield os.path.join(dirpath, name)
+            if not name.lower().endswith(SKIP_SUFFIXES):
+                yield os.path.join(dirpath, name)
+
+
+def _git(root, *args):
+    try:
+        # Local replace refs must not substitute different bytes for a staged
+        # blob: the published tree still records the original object ID.
+        result = subprocess.run(["git", "--no-replace-objects", "-C", root, *args],
+                                capture_output=True, check=False)
+    except OSError:
+        raise RuntimeError("cannot run Git for --tracked") from None
+    if result.returncode:
+        # Git's diagnostics can contain data from the selected artifact.
+        raise RuntimeError("cannot read Git index/blob; --tracked requires a Git worktree")
+    return result.stdout
+
+
+def iter_index_files(target):
+    """Yield (path, blob ID) from stage 0, taking a snapshot of index object IDs.
+
+    Index-selected files do not have to exist in the working tree. Never follow
+    working-tree symlinks when reading the index; scan the stored link text.
+    Unmerged entries and gitlinks have no single text blob to certify.
+    """
+    directory = os.path.isdir(target) and not os.path.islink(target)
+    root = target if directory else os.path.dirname(target)
+    pathspec = [] if directory else ["--", ":(literal)" + os.path.basename(target)]
+    entries = _git(root, "ls-files", "--stage", "-z", *pathspec)
+    for entry in entries.split(b"\0"):
+        if not entry:
+            continue
+        metadata, raw_path = entry.split(b"\t", 1)
+        mode, oid, stage = metadata.split()
+        if stage != b"0":
+            raise RuntimeError("unresolved index entries; resolve conflicts before scanning")
+        if mode not in (b"100644", b"100755", b"120000"):
+            raise RuntimeError("index contains a non-blob entry (such as a submodule); scan it separately")
+        path = os.path.join(root, os.fsdecode(raw_path))
+        if path.lower().endswith(SKIP_SUFFIXES):
+            if not directory:
+                raise RuntimeError("explicit target has an excluded binary suffix")
+            continue
+        yield path, oid.decode("ascii")
 
 
 def iter_tracked_files(root):
-    """Yield regular, tracked files below ``root``.
-
-    A release check must inspect the candidate payload, not arbitrary local
-    state such as ignored builds, private worktrees, or package caches.  Git's
-    index is the authority for that payload.  Refuse when the target is not a
-    Git worktree rather than quietly broadening the scan.
-    """
-    try:
-        result = subprocess.run(
-            ["git", "-C", root, "ls-files", "-z"],
-            capture_output=True,
-            check=False,
-        )
-    except OSError as exc:
-        raise RuntimeError(f"cannot run git for --tracked: {exc}") from None
-    if result.returncode:
-        raise RuntimeError("--tracked requires a Git worktree")
-
-    root_real = os.path.realpath(root)
-    for raw in result.stdout.decode("utf-8", "surrogateescape").split("\0"):
-        if not raw:
-            continue
-        path = os.path.join(root, raw)
-        real = os.path.realpath(path)
-        try:
-            if os.path.commonpath((root_real, real)) != root_real:
-                continue
-        except ValueError:
-            continue
-        if os.path.isfile(path) and not path.lower().endswith(SKIP_SUFFIXES):
-            yield path
+    """Compatibility helper: index-selected paths, including locally missing files."""
+    for path, _ in iter_index_files(root):
+        yield path
 
 
 def main():
-    args = [a for a in sys.argv[1:]]
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("path", nargs="?", default=ROOT)
+    parser.add_argument("--tracked", action="store_true",
+                        help="scan stage-0 Git index blobs below PATH")
+    parser.add_argument("--working-tree", action="store_true",
+                        help="with --tracked, scan local bytes for index-selected paths")
+    parser.add_argument("--list", action="store_true", help="list canonical patterns")
+    args = parser.parse_args()
+    if args.working_tree and not args.tracked:
+        parser.error("--working-tree requires --tracked (plain PATH already scans local bytes)")
     patterns = load_patterns()
-
-    if "--list" in args:
+    if args.list:
         for p in patterns:
             print(getattr(p, "pattern", p))
         return 0
 
-    tracked = "--tracked" in args
-    if tracked:
-        args.remove("--tracked")
-    if len(args) > 1:
-        print("prepublish_check: expected at most one path", file=sys.stderr)
-        return 2
-
-    target = args[0] if args else ROOT
-    if not os.path.exists(target):
-        print("prepublish_check: no such path: %s" % target, file=sys.stderr)
-        return 2
-    target = os.path.abspath(target)
-
+    target = os.path.abspath(args.path)
     try:
-        files = iter_tracked_files(target) if tracked else iter_files(target)
-        files = list(files)
+        if args.tracked:
+            files = list(iter_index_files(target))
+        else:
+            files = [(path, None) for path in iter_files(target)]
     except RuntimeError as exc:
         print("prepublish_check: %s" % exc, file=sys.stderr)
         return 2
+    if not files:
+        print("prepublish_check: no eligible files selected; 0 files scanned", file=sys.stderr)
+        return 2
+    directory = os.path.isdir(target) and (not args.tracked or not os.path.islink(target))
+    base = target if directory else os.path.dirname(target)
+    source = "Git index" if args.tracked and not args.working_tree else "working tree"
+
+    def location(path):
+        # Even a path can contain a credential; never emit matching values.
+        label = os.path.relpath(path, base)
+        for pattern in patterns:
+            label = pattern.sub("[REDACTED]", label)
+        return repr(label)[1:-1]
 
     # Two tiers, because they need different amounts of your attention.
     #
@@ -153,19 +188,24 @@ def main():
     generic = [p for p in patterns
                if "api[_-]?key" in getattr(p, "pattern", "")]
 
-    for path in files:
+    scanned = 0
+    for path, oid in files:
         try:
-            with open(path, encoding="utf-8") as fh:
-                lines = fh.readlines()
-        except (OSError, UnicodeDecodeError):
+            if args.tracked and not args.working_tree:
+                lines = _git(base, "cat-file", "blob", oid).decode("utf-8").splitlines()
+            else:
+                with open(path, encoding="utf-8") as fh:
+                    lines = fh.readlines()
+            scanned += 1
+        except (OSError, UnicodeDecodeError, RuntimeError):
             # Unreadable or non-UTF-8: report rather than skip in silence.
             # An unscanned file is not a clean file.
-            unreadable.append(os.path.relpath(path, target))
+            unreadable.append(location(path))
             continue
         for lineno, line in enumerate(lines, start=1):
             for pat in patterns:
                 if pat.search(line):
-                    rel = os.path.relpath(path, target)
+                    rel = location(path)
                     # Location only -- never echo the matched value.
                     entry = (rel, lineno, getattr(pat, "pattern", pat))
                     (heuristic if pat in generic else specific).append(entry)
@@ -189,6 +229,8 @@ def main():
         for rel in unreadable:
             print("  %s" % rel)
 
+    print("prepublish_check: %d file(s) selected, %d scanned from %s"
+          % (len(files), scanned, source))
     total = len(specific) + len(heuristic) + len(unreadable)
     if total:
         print("\nprepublish_check: %d finding(s) across %d pattern(s). A match is "

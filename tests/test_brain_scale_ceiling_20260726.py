@@ -132,7 +132,7 @@ class TestBrainScaleFlatCeiling(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
 
     def test_neural_mode_keeps_relaxed_ceiling(self):
-        # The fix must change ONLY flat mode. With a neural embedder live the
+        # The fix must change ONLY flat mode. With neural index metadata the
         # active-entries ceiling stays the soft 400, so 150 entries is OK.
         # Guards the mirror mutation (making SOURCES_CEIL unconditional).
         self._write_store(150)
@@ -143,6 +143,9 @@ class TestBrainScaleFlatCeiling(unittest.TestCase):
         self.assertEqual(dim["ceiling"], 400)
         self.assertEqual(dim["status"], "OK")
         self.assertEqual(proc.returncode, 0)
+        self.assertIn("neural index configured", payload["rule"])
+        self.assertIn("service health unverified", payload["rule"])
+        self.assertNotIn("neural retrieval is live", payload["rule"])
 
 
 if __name__ == "__main__":

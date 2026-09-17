@@ -224,6 +224,15 @@ def verify(brain_path: Path | None = None, db_path: Path | None = None) -> list[
                 if stored.get(rec["line_no"]) != rec["record_sha256"]:
                     problems.append(f"per-record hash mismatch at jsonl line {rec['line_no']}")
                     break
+            # Cached hashes are metadata, not a measurement of the current
+            # row. Check every returned/stored field against the source too.
+            columns = ("line_no", "record_id", "ts", "type", "text", "raw", "record_sha256")
+            actual_rows = con.execute(
+                "SELECT " + ", ".join(columns) + " FROM records ORDER BY line_no"
+            ).fetchall()
+            expected_rows = [tuple(rec[column] for column in columns) for rec in records]
+            if actual_rows != expected_rows:
+                problems.append("record content mismatch (stored fields differ from jsonl)")
             if _fts_index_signature(con) != _expected_index_signature(records):
                 problems.append(
                     "fts index term signature mismatch (index damaged, poisoned, or stale)"

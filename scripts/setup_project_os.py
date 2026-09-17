@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import collections
+import importlib.util
+from functools import lru_cache
 import os
 import shutil
 import stat
@@ -33,10 +35,6 @@ FULL_ENGINE_MEMORY = TEMPLATE_ROOT / "addons" / "full-engine" / "memory"
 CANONICAL_MEMORY_ADAPTERS = ("mneme_adapter.py", "build_graph.py",
                              "context_budget.py", "code_graph.py")
 GITIGNORE_MARKER = "# Project OS private files"
-GENERATED_DIRS = {"__pycache__", "store", "out", "graphify-out", ".turbovec"}
-GENERATED_SUFFIXES = (".pyc", ".tvim", ".sidecar.json", ".manifest.json",
-                      ".db", ".db.tmp", ".db-wal", ".db-shm", ".db-journal",
-                      ".db.tmp-wal", ".db.tmp-shm", ".db.tmp-journal")
 
 # Directories that are never a "project" — installing ~120 files and appending
 # ignore rules into any of them is a mistake, not a choice. Compared by
@@ -107,6 +105,14 @@ def unsafe_destination(dst: Path, root=None):
     guard in scripts/wt.py -- catches whatever the walk cannot see.
     """
     dst = Path(dst)
+    try:
+        node = dst.lstat()
+    except FileNotFoundError:
+        node = None
+    if node is not None and stat.S_ISREG(node.st_mode) and node.st_nlink > 1:
+        # A hardlink can alias data outside the project without any symlink
+        # component. Treat unknown alias ownership as a fatal refusal.
+        return Refusal(dst, None, "hardlink destination: %s" % dst, True)
     if root is None:
         # No root to contain against (helper used standalone): still never
         # write through a link.
@@ -159,13 +165,19 @@ def unsafe_target_root(target: Path) -> str:
     return ""
 
 
+@lru_cache(maxsize=1)
+def _full_engine_module():
+    # Both install modes ship the same source trees; use one privacy policy.
+    # Load by sibling path so direct CLI and importlib callers behave alike.
+    path = Path(__file__).with_name("install_full_engine.py")
+    spec = importlib.util.spec_from_file_location("_project_os_distribution", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def is_distributable(src: Path, src_dir: Path) -> bool:
-    rel = src.relative_to(src_dir)
-    return (
-        src.name != "shared-brain.jsonl"
-        and not any(part in GENERATED_DIRS for part in rel.parts)
-        and not src.name.endswith(GENERATED_SUFFIXES)
-    )
+    return _full_engine_module().is_distributable(src, src_dir)
 
 
 def copy_file(src: Path, dst: Path, force: bool, dry_run: bool = False,
@@ -197,13 +209,16 @@ def copy_file(src: Path, dst: Path, force: bool, dry_run: bool = False,
 
 
 def copy_tree_files(src_dir: Path, dst_dir: Path, force: bool, dry_run: bool = False,
-                    root=None, refusals=None) -> list[str]:
+                    root=None, refusals=None, skip_paths=frozenset()) -> list[str]:
     results: list[str] = []
     # Without an explicit root the tree's own destination is the containment
     # boundary, so a standalone caller is guarded too.
     root = dst_dir if root is None else root
     for src in sorted(p for p in src_dir.rglob("*") if p.is_file() and is_distributable(p, src_dir)):
         rel = src.relative_to(src_dir)
+        if dst_dir / rel in skip_paths:
+            results.append(f"deferred resolver {dst_dir / rel} to full-engine transaction")
+            continue
         results.append(copy_file(src, dst_dir / rel, force, dry_run=dry_run,
                                  root=root, refusals=refusals))
     return results
@@ -337,7 +352,8 @@ def committed_memory_index_warning(target: Path) -> list[str]:
 
 
 def bootstrap(target: Path, force: bool, dry_run: bool = False,
-              allow_unsafe_target: bool = False, results=None, refusals=None) -> list[str]:
+              allow_unsafe_target: bool = False, results=None, refusals=None,
+              defer_resolvers: bool = False) -> list[str]:
     target = target.expanduser().resolve()
 
     wrong_root = unsafe_target_root(target)
@@ -360,12 +376,22 @@ def bootstrap(target: Path, force: bool, dry_run: bool = False,
     if not dry_run:
         target.mkdir(parents=True, exist_ok=True)
 
+    # install.sh preflights the old cohort, then activates it after the starter.
+    # Even --force must leave those bytes for the migration transaction to own.
+    deferred = set()
+    if defer_resolvers:
+        engine = _full_engine_module()
+        deferred = {target / path for path in
+                    {**engine.RESOLVER_COHORT_SOURCES, **engine.RUNTIME_DEPENDENCY_SOURCES}}
+
     def copy(src, dst):
+        if dst in deferred:
+            return f"deferred resolver {dst} to full-engine transaction"
         return copy_file(src, dst, force, dry_run=dry_run, root=target, refusals=refusals)
 
     def copy_tree(src_dir, dst_dir):
         return copy_tree_files(src_dir, dst_dir, force, dry_run=dry_run,
-                               root=target, refusals=refusals)
+                               root=target, refusals=refusals, skip_paths=deferred)
 
     results.append(copy(TEMPLATE_ROOT / "AGENTS.md", target / "AGENTS.md"))
     results.append(copy(TEMPLATE_ROOT / "CLAUDE.md", target / "CLAUDE.md"))
@@ -470,7 +496,7 @@ def report_refusals(refusals: list) -> int:
         groups.setdefault(str(refusal.link or refusal.dest), []).append(refusal)
     print("", file=sys.stderr)
     print(f"REFUSED to write {len(refusals)} path(s): the installer never writes "
-          "through a symlink or outside the target.", file=sys.stderr)
+          "through a symlink, hardlink, or outside the target.", file=sys.stderr)
     for group in groups.values():
         first = group[0]
         if first.link is None:
@@ -497,6 +523,7 @@ def main() -> int:
         help="Overwrite existing Project OS files. .gitignore privacy rules are merged, not overwritten.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Show what would be copied without writing files.")
+    parser.add_argument("--defer-resolvers", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--allow-unsafe-target",
         action="store_true",
@@ -511,7 +538,7 @@ def main() -> int:
     try:
         bootstrap(args.target, args.force, dry_run=args.dry_run,
                   allow_unsafe_target=args.allow_unsafe_target,
-                  results=results, refusals=refusals)
+                  results=results, refusals=refusals, defer_resolvers=args.defer_resolvers)
     except OSError as exc:
         return report_partial_install(exc, results)
     if args.dry_run:

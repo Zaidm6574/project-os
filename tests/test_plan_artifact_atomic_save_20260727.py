@@ -187,8 +187,13 @@ class PlanSaveIsAtomic(unittest.TestCase):
 
     def test_save_without_a_pid_uses_the_id_derived_path(self):
         """save(plan) with no pid must still resolve through plan_path(id)."""
-        self.assertEqual(plan_artifact.plan_path("p1"),
-                         os.path.join(plan_artifact.PLANS, "p1.json"))
+        from unittest import mock
+        plans = os.path.join(self.tmp, "default-plans")
+        with mock.patch.object(plan_artifact, "PLANS", plans):
+            plan = a_plan("default")
+            plan_artifact.save(plan)
+            with open(os.path.join(plans, "default.json"), encoding="utf-8") as saved:
+                self.assertEqual(json.load(saved), plan)
 
     def test_save_preserves_an_existing_plan_files_mode(self):
         """mkstemp() is 0600 and os.replace() carries the mode: don't narrow."""

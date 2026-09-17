@@ -257,7 +257,7 @@ def _append_archive(archive_lines, source_mode):
     if os.path.islink(ARCHIVE):
         raise OSError("refusing symlink archive path")
     permitted_mode = source_mode & 0o666
-    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    flags = os.O_RDWR | os.O_APPEND | os.O_CREAT
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     fd = os.open(ARCHIVE, flags, permitted_mode)
@@ -268,8 +268,17 @@ def _append_archive(archive_lines, source_mode):
         tightened_mode = current_mode & permitted_mode
         if tightened_mode != current_mode:
             os.fchmod(fd, tightened_mode)
+        # Inspect the same descriptor we append through. Preserve the damaged
+        # bytes for recovery, but terminate their physical JSONL line before
+        # adding a moved row (also preserves a valid record missing its newline).
+        needs_separator = False
+        if os.fstat(fd).st_size:
+            os.lseek(fd, -1, os.SEEK_END)
+            needs_separator = os.read(fd, 1) != b"\n"
         with os.fdopen(fd, "a", encoding="utf-8", newline="") as f:
             fd = None
+            if needs_separator:
+                f.write("\n")
             f.writelines(archive_lines)
             f.flush()
             os.fsync(f.fileno())
@@ -287,19 +296,19 @@ def _commit_if_owned(token, tmp, archive_lines, source_mode):
             return True
         except OSError:
             return False
-    lock_file = bb_lock.lock_path(BRAIN)
-    with bb_lock._guard(lock_file):
-        info = bb_lock.read_lock(lock_file)
-        if info is None or info.get("token") != token:
-            return False
-        # Keep the lease fresh at both ends of the transaction. All ownership
-        # transitions use this same stable guard, so no reaper/new owner can
-        # enter between the token check and active-file replacement.
-        os.utime(lock_file, None)
-        _append_archive(archive_lines, source_mode)
-        os.replace(tmp, BRAIN)
-        os.utime(lock_file, None)
-        return True
+    try:
+        with bb_lock.fenced(BRAIN, token):
+            # A valid lease may age while the guarded publication runs. Keep
+            # it fresh for the background renewer when this guard is released;
+            # never resurrect an expired lease before entering fenced().
+            lock_file = bb_lock.lock_path(BRAIN)
+            os.utime(lock_file, None)
+            _append_archive(archive_lines, source_mode)
+            os.replace(tmp, BRAIN)
+            os.utime(lock_file, None)
+            return True
+    except bb_lock.LockLeaseLost:
+        return False
 
 
 def _apply_locked(args, lease, token):

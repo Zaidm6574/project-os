@@ -185,15 +185,20 @@ def numbered_templates(tier):
 # of a "slim but closable run". A scaffold that cannot supply it is not a run.
 REQUIRED_PREFIXES = TIER_FILES["solo"]
 
-# Files that consumers open by EXACT NAME rather than by schema slot:
-# regenerate_index(), memory/validate_run.py, memory/goal_guard.py and
-# memory/adopt_project.py all open "00-project-goal.md" literally. A slot-only
-# check cannot see that contract -- an adversarial pass renamed one file to
-# "00-project-goal.archived.md" and the prefix "00" still read as covered, so
-# the scaffold reported success while every one of those consumers failed
-# (adopt_project with a raw FileNotFoundError). A required slot is satisfied by
-# the slot; a required FILE is satisfied only by the file.
-CANONICAL_FILES = ("00-project-goal.md",)
+# These run files are consumed by exact name: goal/index/adoption, graph
+# extraction (03/04/06), the approved-plan workflow, cost collection/rollup,
+# harvest (12/19), and closure validation (09/13/14/23). A renamed file can
+# occupy the same numeric slot without satisfying those consumers.
+CANONICAL_FILES = (
+    "00-project-goal.md", "03-decisions.md", "04-risks.md",
+    "06-open-questions.md", "07-approved-plan.md", "09-cost-estimate.md",
+    "12-evaluation-log.md", "13-delivery-report.md", "14-artifact-manifest.md",
+    "19-memory-harvest.md", "23-loop-closeout.md",
+)
+# The starter does not ship the goal guard or its roster. Require the roster
+# only where its consumer is available, including installed full-engine trees.
+if os.path.isfile(os.path.join(os.path.dirname(__file__), "goal_guard.py")):
+    CANONICAL_FILES += ("21-agent-roster.md",)
 
 
 def _missing_prefixes(tier, names):
@@ -207,7 +212,7 @@ def _missing_prefixes(tier, names):
     have = set(names)
     missing = required - set(n[:2] for n in names)
     missing |= {f for f in CANONICAL_FILES
-                if f[:2] in required and f not in have}
+                if (wanted is None or f[:2] in required) and f not in have}
     return sorted(missing)
 
 

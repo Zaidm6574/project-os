@@ -4,7 +4,7 @@ This is the simplest way to think about Project OS:
 
 ## 1. You start with an idea
 
-Example:
+With a host adapter installed, use the example below. On a plain install, say “Use Project OS to help me build…” or open `prompts/workflows/project.md`; `/project` is not registered automatically.
 
 ```text
 /project I want to build a simple study app that helps me stay focused.
@@ -22,7 +22,7 @@ If the idea is a website, web app, dashboard, mobile screen, game UI, form, or v
 
 ## 3. The blackboard becomes the shared project brain
 
-The assistant should write down:
+Select one explicit `runs/<slug>/` as the active root and pass it through every role/workflow. Shared `blackboard/` notes are read-only context during that run. The assistant should write the following into the active root:
 
 - the goal
 - user preferences
@@ -54,6 +54,7 @@ Before calling a serious run complete, the assistant should leave behind:
 - a delivery report
 - an artifact manifest
 - a memory harvest
+- `23-loop-closeout.md` with actual user-task evidence and one disposition
 
 For long AI sessions, closeout should also say whether the run needs a fresh continuation. The goal is to keep the project state in files, not trapped in a giant chat that keeps being rewritten into cache.
 
@@ -69,7 +70,7 @@ That pass should answer:
 - Should the project scope, roadmap, or stack change?
 - Are there Project OS workflow updates worth suggesting?
 
-The refresh result should be logged in `blackboard/20-research-refresh.md`. It can recommend updates, but major scope, roadmap, architecture, privacy, publishing, spending, or workflow changes still need human approval before they become the new plan.
+The refresh result should be logged in `<run-root>/20-research-refresh.md` (or explicitly selected project-level `blackboard/20-research-refresh.md` outside a named run). It can recommend updates, but major scope, roadmap, architecture, privacy, publishing, spending, or workflow changes still need human approval before they become the new plan.
 
 ## A Good Beginner Mental Model
 

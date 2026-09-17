@@ -281,16 +281,16 @@ def _append_new(path, records, agent):
         return added
 
     if bb_lock is None:
+        if CORE_SCRIPTS is not None:
+            raise RuntimeError("shared-brain locking support is required")
+        # A standalone portable copy has no shared installation or sync runtime.
+        # Its legacy single-process local-file mode remains supported.
         return append_locked()
     token = bb_lock.acquire(path, agent=agent, wait=10)
     if not token:
         raise RuntimeError("could not lock shared-brain.jsonl")
     try:
-        lock_file = bb_lock.lock_path(path)
-        with bb_lock._guard(lock_file):
-            info = bb_lock.read_lock(lock_file)
-            if not isinstance(info, dict) or info.get("token") != token:
-                raise RuntimeError("shared-brain lock lease was lost before append")
+        with bb_lock.fenced(path, token):
             return append_locked()
     finally:
         if not bb_lock.release(path, agent=agent, token=token):
@@ -479,7 +479,7 @@ def gate_record(record: dict, *, where: str) -> dict:
     field = record_secret_path(record)
     if field:
         sys.exit(
-            f"refuse: {where} record field '{field}' looks like it contains a "
+            "refuse: record looks like it contains a "
             "secret. Redact it and retry; the shared brain syncs to the central "
             "brain and must never carry credentials."
         )
@@ -491,11 +491,10 @@ def gate_records(records, *, where: str):
     for i, record in enumerate(records):
         field = record_secret_path(record)
         if field:
-            # a non-dict record has no .get; the gate must still report it
-            # rather than dying with an AttributeError inside the refusal path.
-            rid = record.get("id", f"#{i}") if isinstance(record, dict) else f"#{i}"
+            # Keys, IDs and paths are untrusted payload data. Use only the
+            # batch position; a refusal must not copy a secret into logs.
             sys.exit(
-                f"refuse: {where} record {rid} field '{field}' looks like it "
+                f"refuse: record #{i} looks like it "
                 "contains a secret. Redact it and retry."
             )
     return records

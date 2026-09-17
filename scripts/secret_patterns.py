@@ -110,11 +110,14 @@ def secret_reason(value, path="record", _seen=None):
         if marker in _seen:
             return None
         _seen.add(marker)
-        for key, child in value.items():
+        for index, (key, child) in enumerate(value.items()):
+            # Diagnostic locations must never contain payload-derived keys:
+            # even an ancestor key can carry part or all of a credential.
+            child_path = "%s[field %d]" % (path, index)
             if is_sensitive_key(key) and child not in (None, "", False):
-                return "sensitive field %s.%s" % (path, key)
+                return "sensitive field at %s" % child_path
             if looks_like_secret(str(key)):
-                return "secret-looking key at %s.%s" % (path, key)
+                return "secret-looking key at %s" % child_path
             if isinstance(key, str):
                 if isinstance(child, str):
                     joined = child
@@ -127,12 +130,12 @@ def secret_reason(value, path="record", _seen=None):
                     # `sk-ant-api03` plus the remaining token characters is
                     # individually clean but unsafe once reassembled.
                     if looks_like_secret(key + joined):
-                        return "split credential at %s.%s" % (path, key)
+                        return "split credential at %s" % child_path
                     if (joined.strip() and not re.search(r"\s", joined)
                             and joined.strip().upper() not in {"REDACTED", "***"}
                             and looks_like_secret(key + "=" + joined)):
-                        return "split credential at %s.%s" % (path, key)
-            found = secret_reason(child, "%s.%s" % (path, key), _seen)
+                        return "split credential at %s" % child_path
+            found = secret_reason(child, child_path, _seen)
             if found:
                 return found
         return None

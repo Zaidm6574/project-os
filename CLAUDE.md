@@ -17,11 +17,11 @@ Mirrored verbatim from `AGENTS.md` because this file is auto-loaded — if you e
 
 Everything below exists only in Claude sessions; Codex has its own equivalents documented in `AGENTS.md`.
 
-- **Skills.** When the full engine is installed, kickoff/status/evaluate/deliver/ui-review run as slash commands (`/kickoff`, `/status`, `/evaluate`, `/deliver`, `/ui-review`, `/project`). Prefer them over improvising the workflow from prose.
+- **Skills.** When installed with `--claude-engine`, kickoff/status/evaluate/deliver/ui-review are available as slash commands (`/kickoff`, `/status`, `/evaluate`, `/deliver`, `/ui-review`, `/project`). Prefer them over improvising the workflow from prose.
 - **Subagents.** Use `context-scout` on the smallest available model for the blackboard read gate before heavier agents act. `ui-ux-designer`, `frontend-builder`, `builder`, `researcher`, `evaluator`, and `board` are available as agent types.
 - **Brain MCP.** In Claude sessions you may call `mcp__brain__brief` directly and pass `--brief-file` to `scripts/promptsmith.py` instead of letting the script fetch the brief.
 - **Auto-continuation.** When Max-effort is selected, ask the auto-continuation preference (`Auto`, `Ask first`, or `Warn only/Disabled`) and record it — full rules in the Context Cache Hygiene section of `AGENTS.md`.
-- **Capability parity.** If a Claude-specific feature differs from Codex, record the limitation in `blackboard/17-capability-preflight.md` before serious work.
+- **Capability parity.** If a Claude-specific feature differs from Codex, record the limitation in `<run-root>/17-capability-preflight.md` (resolve the active root using `AGENTS.md`) before serious work.
 
 ## Friend Review Mode
 

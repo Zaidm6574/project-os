@@ -5,6 +5,11 @@ argument-hint: <path, artifact, or UI goal>
 ---
 
 <!-- GENERATED from prompts/workflows/ui-review.md by scripts/sync_runtime_assets.py — edit the canonical file, not this one. -->
+
+## Active workspace
+
+Resolve `<run-root>` explicitly from the run argument or the caller's packet before reading or writing. For a named run it is `runs/<slug>/`; do not choose the newest run automatically. For project-level work without a named run, explicitly select `blackboard/`. All numbered notes and `packets/` paths below are relative to that selected root. Pass the same root to every delegated role and follow-up workflow. Shared `blackboard/` notes are read-only context during a named run; promote reviewed cross-run lessons separately. See **Active workspace and shared notes** in `AGENTS.md` for helper arguments and project-level exceptions.
+
 Run a Project OS UI review for: **$ARGUMENTS**
 
 Use this workflow for websites, web apps, dashboards, mobile screens, browser games, forms, visual tools, and any UI artifact.
@@ -49,7 +54,7 @@ python3 memory/browser_qa.py <path>
 
 ## Output
 
-Append or create a packet at `blackboard/packets/<wave>-ui-review-<nnn>.md`:
+Append or create a packet at `<run-root>/packets/<wave>-ui-review-<nnn>.md`:
 
 ```text
 Packet ID:
@@ -73,4 +78,4 @@ Approve only when the UI meets the Definition of Done and the verification evide
 
 ## Capability note
 
-This workflow uses `subagents`. If your runtime does not have them, do the work inline yourself — do **not** skip the step and do **not** refuse. Record the substitution in `blackboard/17-capability-preflight.md` so the gap is visible instead of silent.
+This workflow uses `subagents`. If your runtime does not have them, do the work inline yourself — do **not** skip the step and do **not** refuse. Record the substitution in `<run-root>/17-capability-preflight.md`, using the active root selected by this workflow, so the gap is visible instead of silent.

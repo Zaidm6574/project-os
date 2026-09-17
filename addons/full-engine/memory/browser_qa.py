@@ -18,6 +18,7 @@ import html.parser
 import os
 import sys
 import tempfile
+from urllib.parse import unquote, urlsplit
 
 def _safe_path(path: str) -> str:
     return os.path.abspath(path)
@@ -48,28 +49,53 @@ def _collect_html_files(target: str) -> list[str]:
 
 
 def _is_local_ref(ref: str) -> bool:
-    if not ref or ref.startswith(("#", "data:", "javascript:", "mailto:", "http://", "https://")):
+    if not ref or ref.startswith("#"):
         return False
-    return True
+    parsed = urlsplit(ref)
+    # All schemes and network-path URLs are outside this local-file check,
+    # including uppercase HTTP, tel:, blob:, and protocol-relative CDN URLs.
+    return not parsed.scheme and not parsed.netloc and not ref.startswith("//")
+
+
+def _resolve_local_ref(ref: str, html_path: str, root: str) -> str:
+    """Resolve a URL path within the declared site root, never the OS root."""
+    path = unquote(urlsplit(ref).path, errors="strict")
+    if not path:
+        return html_path  # a query-only reference points to this document
+    if "\x00" in path or "\\" in path:
+        raise ValueError("unsupported local URL path")
+    base = root if path.startswith("/") else os.path.dirname(html_path)
+    resolved = os.path.realpath(os.path.join(base, path.lstrip("/")))
+    # Refuse traversal and symlink escapes. Existence outside the served tree
+    # cannot establish that a local web reference works.
+    if os.path.commonpath((root, resolved)) != root:
+        raise ValueError("reference leaves the declared site root")
+    return resolved
 
 
 def check(target: str, root: str | None = None) -> int:
     full = _safe_path(target)
-    root = _safe_path(root or (full if os.path.isdir(full) else os.path.dirname(full)))
+    root = os.path.realpath(root or (full if os.path.isdir(full) else os.path.dirname(full)))
+    if not os.path.isdir(root) or os.path.commonpath((root, os.path.realpath(full))) != root:
+        print("QA: FAIL (target must be within the declared site root)")
+        return 1
     html_files = _collect_html_files(full)
     if not html_files:
         print("QA: FAIL (no HTML files found)")
         return 1
     broken = []
     for html_path in html_files:
-        base = os.path.dirname(html_path)
         with open(html_path, encoding="utf-8", errors="replace") as fh:
             parser = _LinkParser()
             parser.feed(fh.read())
         for tag, ref in parser.refs:
-            if not _is_local_ref(ref):
+            try:
+                if not _is_local_ref(ref):
+                    continue
+                resolved = _resolve_local_ref(ref, html_path, root)
+            except (ValueError, UnicodeError) as exc:
+                broken.append((html_path, tag, ref, str(exc)))
                 continue
-            resolved = os.path.normpath(os.path.join(base, ref.split("?")[0].split("#")[0]))
             if not os.path.exists(resolved):
                 broken.append((html_path, tag, ref, resolved))
     if broken:
@@ -102,7 +128,8 @@ def selftest() -> int:
 def main():
     ap = argparse.ArgumentParser(description="Lightweight HTML link QA.")
     ap.add_argument("target", nargs="?", help="HTML file or directory")
-    ap.add_argument("--root", default=None, help="base dir for resolving refs")
+    ap.add_argument("--root", default=None,
+                    help="site root for / URLs and local path boundary (default: target directory)")
     ap.add_argument(
         "--with-playwright",
         action="store_true",

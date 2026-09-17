@@ -49,10 +49,11 @@ From the template folder:
 
 ```bash
 git status --short --ignored
-git log --format=fuller --max-count=5
-git remote -v
-rg -n --hidden --no-ignore -S "/Users|[A-Za-z]:\\\\|sk-|sk-proj-|ghp_|github_pat_|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|BEGIN [A-Z ]*PRIVATE KEY|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}|\\.env|graphify-out|private-memory|private-imports|YOUR_PRIVATE_NAME|YOUR_PRIVATE_TOOL" .
+python3 scripts/prepublish_check.py .
+python3 scripts/prepublish_check.py --tracked
 ```
+
+The first scanner command checks working files. `--tracked` checks stage-0 Git index blobs, including unchanged tracked files; `--tracked --working-tree` checks local bytes for those same selected paths. Inspect reported selection/scan counts, errors and locations. The scanner does not print matched values or certify history and metadata; review those privately without pasting sensitive text into a transcript.
 
 Expected benign hits may include documentation examples, `.gitignore` privacy rules, tests with fake keys, and redaction patterns. A real local path, real key, raw chat, private project name, private tool name, personal note, or unwanted Git author/remote metadata should block publishing until fixed.
 

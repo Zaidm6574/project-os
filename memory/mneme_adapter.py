@@ -128,29 +128,60 @@ def embed(text):
     return [v / norm for v in vec]
 
 
+def _validate_neural_vector(vec, dim=None):
+    if not isinstance(vec, list) or not vec:
+        raise RuntimeError("invalid neural vector: expected a nonempty list")
+    if dim is not None and len(vec) != dim:
+        raise RuntimeError("query vector dimension does not match index")
+    try:
+        valid = all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                    and math.isfinite(v) for v in vec)
+    except OverflowError:
+        valid = False
+    if not valid:
+        raise RuntimeError("invalid neural vector: expected finite numbers")
+    if not any(vec):
+        raise RuntimeError("invalid neural vector: zero magnitude")
+
+
 def _l2(vec):
-    norm = math.sqrt(sum(v * v for v in vec)) or 1.0
-    return [v / norm for v in vec]
+    _validate_neural_vector(vec)
+    # Scale first so large finite components cannot overflow during squaring.
+    scale = max(abs(v) for v in vec)
+    scaled = [v / scale for v in vec]
+    norm = math.sqrt(sum(v * v for v in scaled))
+    return [v / norm for v in scaled]
 
 
-def embed_neural_batch(texts):
+def embed_neural_batch(texts, model=None):
     """Embed via local Ollama /api/embed (batched). Raises on any failure —
     callers decide whether to fall back to lexical."""
     out = []
+    model = NEURAL_MODEL if model is None else model
+    dim = None
     batch_size = ollama_batch_size()
     timeout = ollama_timeout()
     for i in range(0, len(texts), batch_size):
         chunk = texts[i:i + batch_size]
         req = urllib.request.Request(
             OLLAMA_URL + "/api/embed",
-            data=json.dumps({"model": NEURAL_MODEL, "input": chunk}).encode(),
+            data=json.dumps({"model": model, "input": chunk}).encode(),
             headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            resp = json.load(r)
-        embs = resp.get("embeddings")
-        if not embs or len(embs) != len(chunk):
-            raise RuntimeError(f"bad /api/embed response for {NEURAL_MODEL}")
-        out += [_l2(e) for e in embs]
+            try:
+                resp = json.load(r)
+            except (ValueError, UnicodeError) as exc:
+                raise RuntimeError(f"bad /api/embed JSON response for {model}") from exc
+        embs = resp.get("embeddings") if isinstance(resp, dict) else None
+        if not isinstance(embs, list) or len(embs) != len(chunk):
+            raise RuntimeError(f"bad /api/embed response for {model}")
+        for embedding in embs:
+            vector = _l2(embedding)
+            if dim is None:
+                dim = len(vector)
+            elif len(vector) != dim:
+                raise RuntimeError("neural vector dimension changed within batch")
+            out.append(vector)
     return out
 
 
@@ -180,6 +211,8 @@ def pick_embedder():
 
 
 def cosine(a, b):
+    if len(a) != len(b):
+        raise ValueError("vector dimension mismatch")
     return sum(x * y for x, y in zip(a, b))
 
 
@@ -419,7 +452,7 @@ def _build_locked():
     embedder = pick_embedder()
     gathered = [(i, s, t) for i, s, t in _gather() if (t or "").strip()]
     if embedder.startswith("neural-"):
-        vecs = embed_neural_batch([t for _, _, t in gathered])
+        vecs = embed_neural_batch([t for _, _, t in gathered], model=embedder[len("neural-"):])
     else:
         vecs = [embed(t) for _, _, t in gathered]
     if len(vecs) != len(gathered):
@@ -513,10 +546,11 @@ def query(text, k=5):
     emb = idx.get("embedder", "lexical-hash-v1")
     if emb.startswith("neural-"):
         try:
-            q = embed_neural_batch([text])[0]
+            q = embed_neural_batch([text], model=emb[len("neural-"):])[0]
+            _validate_neural_vector(q, idx["dim"])
         except Exception as e:
             # mixing embedders would return garbage cosines — refuse instead
-            sys.exit(f"[mneme] index was built with {emb} but Ollama is unreachable ({e}).\n"
+            sys.exit(f"[mneme] index was built with {emb} but Ollama returned no usable vector ({e}).\n"
                      f"Start Ollama, or rebuild lexical: OSVEC_EMBEDDER=lexical "
                      f"python3 memory/mneme_adapter.py build")
     else:

@@ -1,6 +1,6 @@
 # Project OS Loop Closeout
 
-Use this receipt at every serious run boundary. Record direct evidence, do not replace user-authored content, and choose exactly one disposition.
+Write this receipt under the explicitly selected active run root at every serious run boundary. A structurally valid receipt does not prove that its evidence ran or that its artifacts work; record the actual primary-task check. Record direct evidence, do not replace user-authored content, and choose exactly one disposition.
 
 Loop ID: `L-__`
 Date: `YYYY-MM-DD`

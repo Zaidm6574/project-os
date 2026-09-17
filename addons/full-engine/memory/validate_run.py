@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
-"""Mechanical end-of-run closure check for a run directory.
+"""Mechanical, structural closure check for a run directory.
 
-Verifies the invariants that make a run actually "done" and prints a checklist
-plus a machine-readable summary line: 'VALIDATE: PASS' or 'VALIDATE: FAIL'.
+Checks recorded declarations and prints a checklist plus a machine-readable
+summary line: 'VALIDATE: PASS' or 'VALIDATE: FAIL'. It does not authenticate
+approvals, execute evaluation, or prove that the user's goal was achieved.
 
 Invariants:
-  1. 00-project-goal.md Definition of Done has no remaining 'TBD'.
+  1. 00-project-goal.md Definition of Done has substantive checked items.
   2. A tier line marked Locked is present.
   3. 09-cost-estimate.md Actuals (between the ACTUALS markers) is populated,
      not the dashes-only placeholder.
   4. At least one packet exists under <run_dir>/packets/, OR an explicit
      'no-packets: solo run' note is present. For a Full Swarm run that packet
-     must be marked 'Status: Approved' -- the wave gate the CEO agent doc and
-     new_run.py's solo waiver both promise.
+     must be marked 'Status: Approved'. The declaration is not authenticated
+     or bound to a current wave.
   5. An artifact manifest is present.
-  6. A non-empty, machine-readable graph/memory artifact exists at the project
-     root — proof the memory/graph layer actually fired at close.
+  6. A populated loop closeout receipt declares CLOSED.
+  7. A non-empty, machine-readable graph/memory artifact exists at the project
+     root. Its freshness and relationship to this run are not checked.
 
 Usage:
   python3 memory/validate_run.py <run_dir>
@@ -103,35 +105,44 @@ def _dod_no_tbd(goal_text):
     return saw_item
 
 
-def _tier_locked(goal_text):
-    if goal_text is None:
-        return False
+def _tier_metadata(goal_text):
+    """Read and normalize tier declarations once for both closure gates.
+
+    Keep invalid and empty fields so a later valid field cannot hide them.
+    """
     tiers = []
     locks = []
-    for line in _unfenced_lines(goal_text):
+    for line in _unfenced_lines(goal_text or ""):
         stripped = line.strip()
         tier = re.fullmatch(
             r"(?:[-*+]\s*)?(?:\*\*)?\s*(?:chosen\s+)?tier\s*"
-            r"(?:\*\*)?\s*:\s*(.+?)\s*",
+            r"(?:\*\*)?\s*:\s*(.*?)\s*",
             stripped,
             flags=re.IGNORECASE,
         )
         lock = re.fullmatch(
             r"(?:[-*+]\s*)?(?:\*\*)?\s*locked\s*(?:\*\*)?\s*"
-            r":\s*(.+?)\s*",
+            r":\s*(.*?)\s*",
             stripped,
             flags=re.IGNORECASE,
         )
         if tier:
-            tiers.append(tier.group(1).casefold())
+            value = re.fullmatch(
+                r"(solo(?: agent loop)?|mini(?: swarm)?|full(?: swarm)?)"
+                r"(?:\s+\([^()\r\n]+\))?",
+                tier.group(1).casefold(),
+            )
+            tiers.append(value.group(1).split()[0] if value else None)
         elif lock:
             locks.append(lock.group(1).casefold())
+    return tiers, locks
+
+
+def _tier_locked(goal_text):
+    tiers, locks = _tier_metadata(goal_text)
     return (
         len(tiers) == 1
-        and bool(re.fullmatch(
-            r"(?:solo(?: agent loop)?|mini(?: swarm)?|full(?: swarm)?)(?:\s+\([^()\r\n]+\))?",
-            tiers[0],
-        ))
+        and tiers[0] is not None
         and len(locks) == 1
         and locks[0] in ("yes", "true")
     )
@@ -175,26 +186,30 @@ def _finite_nonnegative_amount(value):
     return amount.is_finite() and amount >= 0
 
 
-TIER_FIELD = re.compile(r"\s*(?:[-*]\s*)?\**\s*Tier\s*\**\s*:\s*(.+?)\s*$", re.I)
+# Capture empty and malformed values as well: a second blank Status must not
+# disappear and leave an earlier Approved field in charge. Match one line at a
+# time so whitespace cannot consume the next line's value.
 STATUS_FIELD = re.compile(
-    r"^\s*(?:[-*]\s*)?\**\s*Status\s*\**\s*:\s*(.+?)\s*$", re.I | re.M)
+    r"^[ \t]*(?:[-*+][ \t]*)?\**[ \t]*Status[ \t]*\**[ \t]*:"
+    r"[ \t]*(.*?)[ \t]*$", re.I)
+APPROVED_STATUS_FIELD = re.compile(
+    r"[ \t]*(?:[-*+][ \t]+)?"
+    r"(?:Status[ \t]*:|\*\*Status\*\*[ \t]*:|\*\*Status[ \t]*:\*\*)"
+    r"[ \t]*(?:Approved|\*\*Approved\*\*|\*Approved\*|`Approved`)[ \t]*",
+    re.I,
+)
 
 
 def _is_full_swarm(goal_text):
-    """True when a `Tier:` field in the goal doc names Full Swarm.
+    """True when a supported tier declaration names the Full tier.
 
     Fail closed the way `_tier_locked` does: the Approved-packet branch is the
     STRICTER one, so any Tier line naming Full Swarm selects it. A goal doc
     that still advertises Full Swarm in a rejected-option block is ambiguous,
     and refusing to close an ambiguous run is the safe direction.
     """
-    if not goal_text:
-        return False
-    for line in _unfenced_lines(goal_text):
-        m = TIER_FIELD.match(line)
-        if m and re.search(r"\bfull\s*swarm\b", m.group(1), re.I):
-            return True
-    return False
+    tiers, _ = _tier_metadata(goal_text)
+    return "full" in tiers
 
 
 def _packet_is_approved(text):
@@ -210,9 +225,11 @@ def _packet_is_approved(text):
     evaluator later downgraded ("## Re-review / Status: Rejected") does not
     keep its earlier approval on a first-match-wins read.
     """
-    values = [m.group(1).strip().strip("*`").strip().lower()
-              for m in STATUS_FIELD.finditer(text or "")]
-    return bool(values) and all(v == "approved" for v in values)
+    approvals = []
+    for line in _unfenced_lines(text or ""):
+        if STATUS_FIELD.fullmatch(line):
+            approvals.append(bool(APPROVED_STATUS_FIELD.fullmatch(line)))
+    return bool(approvals) and all(approvals)
 
 
 def _has_packets(run_dir, goal_text=None):

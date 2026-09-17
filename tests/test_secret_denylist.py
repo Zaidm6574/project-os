@@ -222,6 +222,12 @@ class ImportChatRedactionTests(unittest.TestCase):
 class CentralBrainLeakTests(unittest.TestCase):
     """A cross-project push must not carry credentials, and must say so."""
 
+    def setUp(self):
+        environment = mock.patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("PROJECT_OS_SHARED_BRAIN", None)
+
     def _layout(self, root, lessons):
         central_script = root / "brain" / "central_brain.py"
         central_script.parent.mkdir(parents=True)

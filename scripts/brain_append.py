@@ -194,12 +194,7 @@ def main():
         sys.exit(1)
     outcome = None
     try:
-        lock_file = bb_lock.lock_path(SHARED_BRAIN)
-        with bb_lock._guard(lock_file):
-            lock_info = bb_lock.read_lock(lock_file)
-            if not isinstance(lock_info, dict) or lock_info.get("token") != token:
-                print("FAILED: shared-brain lock lease was lost before append", file=sys.stderr)
-                sys.exit(1)
+        with bb_lock.fenced(SHARED_BRAIN, token):
             if record.get("id") in _existing_ids(SHARED_BRAIN):
                 outcome = "kept"
             else:
@@ -235,6 +230,9 @@ def main():
                     f.flush()
                     os.fsync(f.fileno())
                 outcome = "appended"
+    except bb_lock.LockLeaseLost:
+        print("FAILED: shared-brain lock lease was lost before append", file=sys.stderr)
+        sys.exit(1)
     finally:
         released = bb_lock.release(SHARED_BRAIN, agent=agent, token=token)
     if not released:

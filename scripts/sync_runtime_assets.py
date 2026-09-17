@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Keep every runtime's workflow assets generated from one canonical source.
 
-AGENTS.md unified DOCTRINE across runtimes. This unifies CAPABILITY. The 11
+AGENTS.md unified DOCTRINE across runtimes. This unifies CAPABILITY. The
 Project OS workflows live once, runtime-neutral, in `prompts/workflows/`. Thin
 host adapters are GENERATED from them:
 
@@ -177,7 +177,7 @@ def capability_note(wf: Workflow) -> str:
                                        parity
 
     (b) is implemented because AGENTS.md already tells agents to record
-    limitations in blackboard/17-capability-preflight.md, so this makes the
+    limitations in the active root's 17-capability-preflight.md, so this makes the
     existing rule executable rather than inventing a new one.
     """
     if not wf.capabilities:
@@ -187,8 +187,9 @@ def capability_note(wf: Workflow) -> str:
         f"\n## Capability note\n\n"
         f"This workflow uses {caps}. If your runtime does not have them, do the "
         f"work inline yourself — do **not** skip the step and do **not** refuse. "
-        f"Record the substitution in `blackboard/17-capability-preflight.md` so "
-        f"the gap is visible instead of silent.\n"
+        f"Record the substitution in `<run-root>/17-capability-preflight.md`, "
+        f"using the active root selected by this workflow, so the gap is visible "
+        f"instead of silent.\n"
     )
     if wf.degradation:
         note += f"\n{wf.degradation}\n"

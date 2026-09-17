@@ -667,7 +667,10 @@ class AdoptProjectStubTests(unittest.TestCase):
         self.assertIn("<!-- inferred from README.md -->\nWidget Tracker", body)
         self.assertNotIn("- [ ] TBD\n- [ ] TBD", body)
         self.assertIn("meets its stated purpose", body)
-        self.assertIn("VALIDATE: PASS", body)
+        self.assertIn("- [ ] Complete /deliver and record the actual closure validation result", body)
+        self.assertNotIn("VALIDATE: PASS", body)
+        validator = load_memory_module("validate_run.py", "adoption_pending_validator")
+        self.assertFalse(validator._dod_no_tbd(body), "adoption cannot mark verification complete")
 
         index = (self.project / "runs" / "INDEX.md").read_text(encoding="utf-8")
         self.assertIn("adopted", index)
@@ -690,7 +693,10 @@ class AdoptProjectStubTests(unittest.TestCase):
         self.assertIn("## Canonical Goal (one sentence)", body)
         self.assertIn("Widget Tracker", body)
         self.assertIn("## Definition of Done", body)
-        self.assertIn("VALIDATE: PASS", body)
+        self.assertIn("- [ ] Complete /deliver and record the actual closure validation result", body)
+        self.assertNotIn("VALIDATE: PASS", body)
+        validator = load_memory_module("validate_run.py", "adoption_fallback_pending_validator")
+        self.assertFalse(validator._dod_no_tbd(body), "adoption cannot mark verification complete")
 
     def test_adopt_ignores_readme_symlink_outside_the_project(self):
         (self.source / "README.md").unlink()

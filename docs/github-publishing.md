@@ -2,7 +2,7 @@
 
 Use this after reviewing the template for private information.
 
-Before publishing, make sure Git, Python 3.10+, and ripgrep (`rg`) are installed; you can sign in to GitHub; and you know the GitHub username or organization that will own the repo.
+Before publishing, make sure Git and Python 3.10+ are installed; you can sign in to GitHub; and you know the GitHub username or organization that will own the repo.
 
 ## 1. Create The Repo
 
@@ -17,24 +17,24 @@ Recommended names:
 
 ## 2. Push From Your Computer
 
-From this folder:
+From this folder, first inspect the intended public files. Stage the complete, explicitly reviewed file list for your release; the three-file list below is only a syntax example. Run each step separately and stop on a failed review or scanner error. An assistant must obtain the user's explicit publishing approval before the final push:
 
 ```bash
 git init
 git status --short --ignored
-git log --format=fuller --max-count=5
-git remote -v
-rg -n --hidden --no-ignore -S "/Users|[A-Za-z]:\\\\|sk-|sk-proj-|ghp_|github_pat_|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|BEGIN [A-Z ]*PRIVATE KEY|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}|\\.env|graphify-out|private-memory|private-imports" .
-git add .
+python3 scripts/prepublish_check.py .
+# Review and stage only the intended public files, then check their staged bytes.
+git add README.md AGENTS.md CLAUDE.md
+python3 scripts/prepublish_check.py --tracked
 git commit -m "Initial Project OS template"
 git branch -M main
 git remote add origin https://github.com/YOUR-USERNAME/project-os.git
 git push -u origin main
 ```
 
-Replace `YOUR-USERNAME` with your GitHub username or organization name. If `git remote add origin` says the remote already exists, run `git remote -v` and confirm it points to the intended empty GitHub repo before pushing.
+Replace `YOUR-USERNAME` with your GitHub username or organization name. If `git remote add origin` says the remote already exists, inspect its configured destination locally and confirm it points to the intended empty GitHub repo before pushing; do not print a credential-bearing URL into shared logs.
 
-Expected benign `rg` hits include `.gitignore` entries, documentation that mentions privacy checks, tests with fake keys, and redaction regexes in `scripts/import_chat_history.py`. Stop before `git add .` if the scan shows real local paths, real keys, raw exports, personal notes, or unwanted Git author/remote metadata.
+The scanner prints match locations, not credential values. `--tracked` scans stage-0 index blobs, including unchanged tracked files; add `--working-tree` only for a separate audit of local edits. It reports selected/scanned counts and refuses empty or ambiguous selection. Review synthetic fixture matches locally and block real private information. Never paste a matching line into a chat or log. The scanner does not review Git history, author metadata or remote configuration; inspect those privately as a separate release check, including any credential-bearing remote URL. Recheck staged bytes after any edits or re-staging.
 
 Also read `docs/friend-review.md` before pushing if other people will use the template. It lists the checks a beginner or skeptical reviewer should run.
 
@@ -64,11 +64,7 @@ cd their-project
 git status --short --ignored
 ```
 
-Then they can say:
-
-```text
-/project I want to build...
-```
+Then open the project in the AI tool and say “Use Project OS to help me build…” or ask it to follow `prompts/workflows/project.md`. A plain install does not register `/project`. For Claude commands use `--claude-engine`; for Codex skills use `--codex-engine`; either flag activates the full engine. See `docs/install-from-github.md`.
 
 If they are cloning your template repo directly instead of using **Use this template**, send them `docs/install-from-github.md`.
 

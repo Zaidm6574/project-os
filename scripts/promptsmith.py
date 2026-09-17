@@ -147,9 +147,10 @@ def main():
     query = flag("--query", task)
     today = datetime.date.today().isoformat()
     pid = flag("--packet-id", f"psmith-{today}-{slug(task)}")
-    if "/" in pid or "\\" in pid or ".." in pid:
-        print(f"usage error: refusing --packet-id: must not contain path separators or '..' "
-              f"(got {pid!r}) — it is joined into output filenames", file=sys.stderr)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,119}", pid):
+        print("usage error: refusing --packet-id: use 1–120 ASCII letters, digits, "
+              "hyphens or underscores, starting with a letter or digit",
+              file=sys.stderr)
         sys.exit(2)
     out_dir = flag("--out-dir", os.path.join(ROOT, "blackboard", "packets"))
     brief_file = flag("--brief-file")
@@ -271,8 +272,9 @@ Compiled: {today} by promptsmith from the SAME brief as the worker prompt
         if os.path.exists(idx):
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
             import bb_lock
-            row = (f"| {pid} | promptsmith | {_table_cell(task)[:60]} | Draft | "
-                   f"packets/{os.path.basename(wp)} |")
+            cells = (pid, "promptsmith", _table_cell(task)[:60], "Draft",
+                     f"packets/{os.path.basename(wp)}")
+            row = "| " + " | ".join(_table_cell(cell) for cell in cells) + " |"
             token = bb_lock.acquire(idx, agent="promptsmith", wait=10)
             if token:
                 try:

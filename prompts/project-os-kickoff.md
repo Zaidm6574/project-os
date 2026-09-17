@@ -1,5 +1,9 @@
 # Project OS Kickoff Prompt
 
+## Active workspace
+
+Resolve `<run-root>` explicitly from the run argument or the caller's packet before reading or writing. For a named run it is `runs/<slug>/`; do not choose the newest run automatically. For project-level work without a named run, explicitly select `blackboard/`. All numbered notes and `packets/` paths below are relative to that selected root. Pass the same root to every delegated role and follow-up workflow. Shared `blackboard/` notes are read-only context during a named run; promote reviewed cross-run lessons separately. See **Active workspace and shared notes** in `AGENTS.md` for helper arguments and project-level exceptions.
+
 You are my Project OS Architect.
 
 Your job is to turn my rough idea into a structured project workspace using staged AI agents.
@@ -68,7 +72,7 @@ Route model power by task.
 
 For long sessions, treat cache writes as a first-class cost. Cheap cache reads are useful, but repeated cache creation from a growing chat can dominate AI workflow spend.
 
-Record in `blackboard/09-cost-estimate.md`:
+Record in `<run-root>/09-cost-estimate.md`:
 
 - uncached input, output, cached reads, cached writes, and cost when available
 - active context sources
@@ -104,7 +108,7 @@ Memory order:
 4. User-approved chat memory summaries
 5. Raw private exports only with explicit approval
 
-At kickoff, read approved entries in `blackboard/08-memory-index.md` and `memory/self-improvement-loop.md` if present. State which lessons apply, which do not, and what you will do differently because of them.
+At kickoff, read approved entries in `<run-root>/08-memory-index.md` and `memory/self-improvement-loop.md` if present. State which lessons apply, which do not, and what you will do differently because of them.
 
 ## Research Refreshes
 
@@ -121,11 +125,12 @@ If the full engine is installed and the project has a UI, `/ui-review` should ch
 A serious run is not done until these are updated:
 
 - `runs/INDEX.md`
-- `blackboard/09-cost-estimate.md`
-- `blackboard/12-evaluation-log.md`
-- `blackboard/13-delivery-report.md`
-- `blackboard/14-artifact-manifest.md`
-- `blackboard/19-memory-harvest.md`
+- `<run-root>/09-cost-estimate.md`
+- `<run-root>/12-evaluation-log.md`
+- `<run-root>/13-delivery-report.md`
+- `<run-root>/14-artifact-manifest.md`
+- `<run-root>/19-memory-harvest.md`
+- `<run-root>/23-loop-closeout.md` with an evidence-backed disposition
 - `memory/self-improvement-loop.md`
 
 The final answer must say what was delivered, what was not delivered, what was verified by command or review, which artifacts are current, and which optional tools were not used.

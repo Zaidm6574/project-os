@@ -553,12 +553,13 @@ def _recognized_sections(md):
 
 
 # A bullet or a table row: the two shapes bullets_by_section can harvest.
-_ROW = re.compile(r"^\s*[-*]\s+\S|^\s*\|")
+_BULLET = re.compile(r"^\s*[-*]\s+(\S.*)$")
+_TABLE_ROW = re.compile(r"^\s*\|")
 
 
 def _has_rows(md):
     """True when the file carries content the extractor could have harvested."""
-    return any(_ROW.match(line) for line in md.splitlines())
+    return any(_BULLET.match(line) or _TABLE_ROW.match(line) for line in md.splitlines())
 
 
 def bullets_by_section(md):
@@ -601,7 +602,7 @@ def bullets_by_section(md):
             continue
         if not cur:
             continue
-        b = re.match(r"^[-*]\s+(.+)$", line)
+        b = _BULLET.match(line)
         if b:
             if cur is _EXCLUDED:
                 DROPPED.append(line.strip()[:120])

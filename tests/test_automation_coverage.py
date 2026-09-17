@@ -565,7 +565,7 @@ class TestNightlyGaugeCrash(unittest.TestCase):
             stderr="Traceback (most recent call last):\n  boom\nValueError: kaput\n")
         with mock.patch.object(os_nightly.subprocess, "run", return_value=fake):
             status, code = os_nightly.run_gauge()
-        self.assertEqual(code, 1)
+        self.assertIsNone(code, "a crashed process has no capacity severity")
         self.assertIn("CRASHED", status)
         self.assertIn("exit 1", status)
         self.assertIn("ValueError: kaput", status)

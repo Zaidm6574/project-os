@@ -55,7 +55,6 @@ tracks the plugin). Verified end-to-end with the live server: `setup` (venv+webs
 `listen` (msgs → stdout JSONL). Codex runs `python3 scripts/codex_bus.py listen --name codex`.
 `shared-brain.jsonl` remains the durable memory layer; the bus is ephemeral signaling.
 
-## Decision
+## Historical adoption decision
 
-Adopt for Claude↔Claude peer messaging once installed; keep locked JSONL for
-Claude↔Codex. Logged in `blackboard/03-decisions.md`.
+The initial decision used peer messaging for Claude↔Claude and locked JSONL for Claude↔Codex. The later Codex bridge described above superseded that transport limitation. These are dated integration notes, not a current live-service check. Durable memory still uses reviewed JSONL; ephemeral messages are neither durable memory nor authorization.

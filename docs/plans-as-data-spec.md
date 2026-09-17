@@ -1,6 +1,10 @@
 # Plans as Data — replayable artifact specification
 
-Status: specification of the implemented baseline and the next contract. No new implementation in this lane because Lane A is blocked.
+Status: design specification combining a shipped baseline with a proposed stronger contract. This is not a list of current guarantees. `scripts/plan_artifact.py` and its tests define the implemented behavior.
+
+Current helpers check plan structure, selected provenance and approval digests, then emit packets; a host executes the work. The result-record requirement, an append-only execution log, transaction-wide publication and a no-backwards-transition lifecycle described below are future requirements, not assurances supplied by a boolean completion flag. Approval metadata does not authenticate the human approver. The CLI permits `compile --force` to bypass approval (not validation); normal use should keep the approval gate.
+
+For a named run, substitute its explicit `<run-root>` for project-level `blackboard/` paths below and pass full plan paths to the CLI. See the active-workspace rule in `AGENTS.md`.
 
 ## Goal
 

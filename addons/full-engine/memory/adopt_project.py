@@ -123,8 +123,9 @@ def _replace_canonical_goal(text: str, goal: str, source: str) -> str:
     return "\n".join(lines[:at] + [""] * bool(at) + block + lines[at:]) + "\n"
 
 
-def _add_adoption_criteria(text: str, project_path: str) -> str:
-    """Ensure the two adoption criteria exist under '## Success Criteria'.
+def _add_adoption_criteria(text: str, project_path: str,
+                           section: str = "Success Criteria") -> str:
+    """Add pending adoption criteria without claiming work has been verified.
 
     The old code did a literal replace of '- [ ] TBD\\n- [ ] TBD'. Any template
     whose Success Criteria were reworded (or already populated, as when
@@ -133,27 +134,25 @@ def _add_adoption_criteria(text: str, project_path: str) -> str:
     than pattern-match, and drop an empty placeholder bullet if one is there.
     """
     added = [
-        "- [ ] Adopted project at `%s` meets its stated purpose" % project_path,
-        "- [ ] Run closed with /deliver and VALIDATE: PASS",
+        "- [ ] Verify adopted project at `%s` meets its stated purpose" % project_path,
+        "- [ ] Complete /deliver and record the actual closure validation result",
     ]
-    if added[1] in text:
-        return text
-
     lines = text.splitlines()
     for i, line in enumerate(lines):
-        if not line.strip().lower().startswith("## success criteria"):
+        if line.strip().casefold() != "## " + section.casefold():
             continue
         j = i + 1
-        while j < len(lines) and not lines[j].strip().startswith("#"):
+        while j < len(lines) and not re.match(r"^#{1,2}\s", lines[j].strip()):
             j += 1
         block = lines[i + 1:j]
         # Drop a bare placeholder bullet ("- " / "- [ ] TBD") and trailing blanks.
         block = [b for b in block if b.strip() not in ("-", "- [ ] TBD")]
         while block and not block[-1].strip():
             block.pop()
-        return "\n".join(lines[:i + 1] + block + added + [""] + lines[j:]) + "\n"
+        pending = [item for item in added if item not in block]
+        return "\n".join(lines[:i + 1] + block + pending + [""] + lines[j:]) + "\n"
 
-    return text.rstrip("\n") + "\n\n## Success Criteria\n\n" + "\n".join(added) + "\n"
+    return text.rstrip("\n") + "\n\n## " + section + "\n\n" + "\n".join(added) + "\n"
 
 
 def _write_goal_stub(run_dir: str, goal: str, source: str, project_path: str) -> None:
@@ -174,20 +173,12 @@ def _write_goal_stub(run_dir: str, goal: str, source: str, project_path: str) ->
 
     text = _replace_canonical_goal(text, goal, source)
     text = _add_adoption_criteria(text, project_path)
+    text = _add_adoption_criteria(text, project_path, "Definition of Done")
     if missing:
         text = text.replace(
             "## Canonical Goal\n", "## Canonical Goal (one sentence)\n", 1
         )
         text += "\n<!-- appended by adopt_project.py: template anchors were missing -->\n"
-    done_items = (
-        "- [x] Adopted project at `%s` meets its stated purpose\n"
-        "- [x] Run closed with /deliver and VALIDATE: PASS" % project_path
-    )
-    if "- [ ] TBD\n- [ ] TBD" in text:
-        text = text.replace("- [ ] TBD\n- [ ] TBD", done_items, 1)
-    elif "definition-of-done anchor" in missing:
-        text += "\n## Definition of Done\n\n" + done_items + "\n"
-
     _replace_goal_file_atomically(goal_path, text, goal)
 
 
@@ -353,7 +344,8 @@ def _selftest_body() -> int:
     try:
         dest_a, body_a = _adopt_one("Widget Tracker", "Track widgets locally.", slugs[0])
         assert "Widget Tracker" in body_a, "inferred goal was not written"
-        assert "VALIDATE: PASS" in body_a, "adoption criteria were not written"
+        assert "- [ ] Complete /deliver and record the actual closure validation result" in body_a, "adoption criteria were not written"
+        assert "- [x] Run closed" not in body_a, "adoption claimed unverified completion"
         with open(os.path.join(ROOT, "runs", "INDEX.md"), encoding="utf-8") as fh:
             assert slugs[0] in fh.read()
 

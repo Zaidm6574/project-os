@@ -20,7 +20,7 @@ Chosen by:
 
 ## Actuals (estimate vs measured)
 
-Filled by `memory/cost_actuals.py --write` at closeout. Keep the markers; the tool replaces everything between them.
+For Claude, fill using `python3 memory/cost_actuals.py --transcript /path/to/this-run.jsonl --write --target "$run_root/09-cost-estimate.md"` only after attributing that transcript to the run. Keep the markers; the writer replaces everything between them. For Codex or missing logs, enter attributable activity manually and mark unknown dollar totals `Unmeasured` with a reason; do not use zero for missing data. See `prompts/workflows/deliver.md`.
 
 <!-- ACTUALS:START -->
 | Model | Est $ | Measured $ | Variance |
@@ -52,7 +52,7 @@ Use provider request logs, API logs, usage dashboards, request IDs, token column
 
 ### Codex local session logs
 
-Use this only for local activity rollups, not guaranteed account-wide billing.
+Use this only for local activity rollups, not guaranteed account-wide billing. `--codex-sessions --sessions-dir /path/to/run-only-sessions` reads every JSONL below the selected directory; it has no project/time filter, event deduplication, dollar pricing or Markdown writer. Check that the input directory is attributable to this run before reporting its totals.
 
 ```text
 Source: ~/.codex/sessions

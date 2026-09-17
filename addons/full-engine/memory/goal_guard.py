@@ -79,17 +79,23 @@ def canonical_goal(goal_md_text):
         # drift-blindness this guard exists to prevent, verified end-to-end
         # through the documented install flow (2026-07-25).
         if in_comment:
-            if "-->" in s:
-                in_comment = False
-                rest = s.split("-->", 1)[1].strip()
-                if rest and not rest.startswith("#"):
-                    return rest
-            continue
-        if s.startswith("<!--"):
             if "-->" not in s:
+                continue
+            in_comment = False
+            s = s.split("-->", 1)[1].strip()
+        while s.startswith("<!--"):
+            if "-->" in s:
+                s = s.split("-->", 1)[1].strip()
+            else:
                 in_comment = True
+                break
+        if in_comment:
             continue
 
+        # Comment tails are goal candidates, not a shortcut around the same
+        # placeholder and section-boundary checks used for ordinary lines.
+        if s.startswith("## "):
+            break
         if not s or s.startswith("#"):
             continue
         if _is_placeholder(s):

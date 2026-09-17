@@ -498,7 +498,8 @@ class BrainMigrationInstallerTests(unittest.TestCase):
                     return outcome
 
                 return types.SimpleNamespace(
-                    acquire=acquire, renew=renew, release=release
+                    acquire=acquire, renew=renew, release=release,
+                    fenced=module.fenced, LockLeaseLost=module.LockLeaseLost
                 )
 
             with synthetic_legacy_cohort(self.installer, target):

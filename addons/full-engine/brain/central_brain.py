@@ -99,72 +99,42 @@ def _create_private(path) -> bool:
     return True
 
 
-# --------------------------------------------------------------------------- #
-# Concurrent-write lock (audit 2026-07-27)
-# --------------------------------------------------------------------------- #
-# append_new() below is an UNLOCKED read-modify-append on shared-brain.jsonl:
-# it reads the existing id set, decides which records are new, then appends
-# them. scripts/brain_archive.py rewrites that SAME file and guards every
-# mutation with scripts/bb_lock.py (an O_CREAT|O_EXCL lockfile keyed by the
-# file's realpath). This writer took no lock at all, so two concurrent agents
-# (a push racing another push, or a push racing brain_archive) each read the
-# pre-append snapshot, both judge the same record "new", and both append it --
-# a duplicated record and an over-counted return in the CROSS-PROJECT brain.
-#
-# We deliberately reuse bb_lock rather than a bare fcntl.flock on the data
-# file: bb_lock serialises through a *separate* lockfile, so a flock on the
-# JSONL itself would not be mutually exclusive with brain_archive's lock and
-# the two would still race. Reusing bb_lock is the only way the two "don't
-# fight". bb_lock lives in the base Project OS `scripts/` dir (a prerequisite
-# of the full-engine add-on), which sits at a different depth in the repo than
-# in an installed project, so we search upward for it rather than hard-coding a
-# relative path. If it cannot be found or loaded (e.g. a non-POSIX target with
-# no fcntl), locking degrades to best-effort and never blocks the caller.
+# A central sync shares the canonical writers' lease and stable publication
+# guard. Missing locking support must refuse writes, not silently downgrade.
 def _load_bb_lock():
     try:
-        here = Path(__file__).resolve()
-        for parent in here.parents:
-            candidate = parent / "scripts" / "bb_lock.py"
-            if candidate.is_file():
-                spec = importlib.util.spec_from_file_location(
-                    "project_os_central_brain_bb_lock", candidate)
-                module = importlib.util.module_from_spec(spec)
-                # Not registered in sys.modules on purpose: keeps the module's
-                # env-derived LOCK_DIR re-readable if the process re-imports us
-                # under a changed BB_LOCK_DIR (the tests rely on this).
-                spec.loader.exec_module(module)
-                return module
-    except Exception:
-        pass
-    return None
+        return _load_from_scripts("bb_lock")
+    except (ImportError, OSError, RuntimeError):
+        return None
 
 
 bb_lock = _load_bb_lock()
 _BB_LOCK = bb_lock
 
 
-def _acquire_brain_lock(path: Path):
-    """Take the shared-brain lock for `path`; return a fencing token or None.
+class CentralBrainLockError(RuntimeError):
+    """A shared-brain write could not acquire or retain its lock."""
 
-    Best-effort: a missing/unloadable bb_lock, or a wait that times out under
-    contention, returns None and the caller proceeds unlocked rather than
-    raising -- append_new() must still return an int count."""
-    if _BB_LOCK is None:
-        return None
+
+def _acquire_brain_lock(path: Path):
+    if _BB_LOCK is None or not callable(getattr(_BB_LOCK, "fenced", None)):
+        raise CentralBrainLockError("shared-brain locking support is required")
     try:
         token = _BB_LOCK.acquire(str(path), agent="central-brain", wait=30)
     except Exception:
-        return None
-    return token or None
+        raise CentralBrainLockError("could not acquire shared-brain lock") from None
+    if not token:
+        raise CentralBrainLockError("could not acquire shared-brain lock")
+    return token
 
 
 def _release_brain_lock(path: Path, token) -> None:
-    if _BB_LOCK is None or not token:
-        return
     try:
-        _BB_LOCK.release(str(path), agent="central-brain", force=True, token=token)
+        released = _BB_LOCK.release(str(path), agent="central-brain", token=token)
     except Exception:
-        pass
+        raise CentralBrainLockError("shared-brain lock release failed") from None
+    if not released:
+        raise CentralBrainLockError("shared-brain lock release failed")
 
 
 def looks_like_secret(text: str) -> bool:
@@ -305,40 +275,44 @@ def append_new(path: Path, records: list[dict]) -> int:
     # Same lock scripts/brain_archive.py holds for this file, so a push here
     # and an archive rewrite there also serialise against each other.
     token = _acquire_brain_lock(path)
+    failed = True
     try:
-        existing = {record.get("id") for record in read_jsonl(path)}
-        added = 0
-        # open("a") CREATES at 0666 & ~umask. init_central is not always the
-        # one that got here first (append_new is called directly, and by pull
-        # against a project brain), so the private creation has to be here too
-        # -- a fix at some of the creation sites is not a fix.
-        _create_private(path)
-        with path.open("a", encoding="utf-8") as handle:
-            # Never weld onto a crash-truncated last line: appending to a partial
-            # JSON fragment makes ONE unparseable line, destroying the damaged
-            # record AND the one being written, while read_jsonl skips it silently
-            # and this function reports success. scripts/brain_append.py was healed
-            # in d71aeca; this writer -- which serves BOTH push and pull, i.e. the
-            # CROSS-PROJECT brain -- was not (adversarial verify 2026-07-26).
-            if handle.tell():
-                with path.open("rb") as probe:
-                    probe.seek(-1, os.SEEK_END)
-                    if probe.read(1) != b"\n":
-                        handle.write("\n")
-            for record in records:
-                rid = record.get("id")
-                if not rid or rid in existing:
-                    continue
-                handle.write(json.dumps(record, sort_keys=True) + "\n")
-                existing.add(rid)
-                added += 1
+        with _BB_LOCK.fenced(str(path), token):
+            existing = {record.get("id") for record in read_jsonl(path)}
+            added = 0
+            _create_private(path)
+            with path.open("a", encoding="utf-8") as handle:
+                # Preserve an incomplete tail on its own physical line.
+                if handle.tell():
+                    with path.open("rb") as probe:
+                        probe.seek(-1, os.SEEK_END)
+                        if probe.read(1) != b"\n":
+                            handle.write("\n")
+                for record in records:
+                    rid = record.get("id")
+                    if not rid or rid in existing:
+                        continue
+                    handle.write(json.dumps(record, sort_keys=True) + "\n")
+                    existing.add(rid)
+                    added += 1
+                handle.flush()
+                os.fsync(handle.fileno())
+        failed = False
         return added
+    except _BB_LOCK.LockLeaseLost:
+        raise CentralBrainLockError("shared-brain lock lease lost before append") from None
     finally:
-        _release_brain_lock(path, token)
+        try:
+            _release_brain_lock(path, token)
+        except CentralBrainLockError:
+            # Preserve the first failure, but never report an uncertain release
+            # as a successful append. A retry is deduplicated by record ID.
+            if not failed:
+                raise
 
 
 def project_brain_path(project: Path) -> Path:
-    return project.expanduser().resolve() / PROJECT_BRAIN
+    return _brain_paths.resolve_shared_brain(project)
 
 
 def syncable_summary(record: dict) -> bool:
@@ -513,7 +487,7 @@ def pull(path: Path, project: Path, explicit_project_id: str | None = None,
         if not incoming:
             dest = project_brain_path(project)
             dest.parent.mkdir(parents=True, exist_ok=True)
-            _create_private(dest)
+            append_new(dest, [])
         return 0, tally
     dest = project_brain_path(project)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -547,6 +521,17 @@ def report_unparsable(path: Path, lines: list, action: str) -> bool:
 
 
 def selftest() -> int:
+    # Exercise scratch projects even if the operator configured an external
+    # shared brain. Never read or write that store during a selftest.
+    previous = os.environ.pop("PROJECT_OS_SHARED_BRAIN", None)
+    try:
+        return _selftest_local()
+    finally:
+        if previous is not None:
+            os.environ["PROJECT_OS_SHARED_BRAIN"] = previous
+
+
+def _selftest_local() -> int:
     with tempfile.TemporaryDirectory(prefix="central-brain-selftest-") as tmp:
         base = Path(tmp)
         central = base / "central"
@@ -672,6 +657,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except CentralBrainInitError as exc:
+    except (CentralBrainInitError, CentralBrainLockError, _brain_paths.BrainPathError) as exc:
         print(f"refuse: {exc}", file=sys.stderr)
         raise SystemExit(2)

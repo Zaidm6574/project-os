@@ -95,6 +95,24 @@ RESOLVER_COHORT_SOURCES = {
     "scripts/brain_paths.py": "scripts/brain_paths.py",
 }
 
+# The resolver's locking API must upgrade with it, including without --force.
+# Lock versions do not decide brain location, so recognize their exact public
+# bytes independently of the pre-canonical/local data-migration cohorts.
+RUNTIME_DEPENDENCY_SOURCES = {"scripts/bb_lock.py": "scripts/bb_lock.py"}
+RUNTIME_DEPENDENCY_SIGNATURES = {
+    "scripts/bb_lock.py": {
+        "f034ea5": "97be1f8e29c59bddbda792c965689274f6c3bd6411d7ec821b1309c478b38a43",
+        "df17b3f": "4672f0370f8b0f20329f38fcd0dd4d845af7411331f08c0d0e631ce5adf2d6c9",
+        "e4c6ca0": "6a3e97a5050b4091c37bab88c81fb199227fa7a7f42958607c1c6095f968c5ee",
+        "ef0cb9b": "c9d6d608ce1daa1ebf29434640e6aa0cb8b5ce2c2f3392c10ee132b50f18c4a2",
+        "b4cc70f": "5a708c23f9caa57d3cbf8bff6592b4d4a549d2a34ee2c598c1ea7cae862197d1",
+        "421f2af": "217c70afe44d8c1dbedcc64782053e97ad745ba3a14cd66b64f8fb0f8a85af63",
+        "54adf7b": "a230987dad50f6645add20241ba50c0bbdbda844377fc78573898edc3bce8756",
+        "77e84e3": "a7c8d1bba1ec8ab8d430837c69ef9c2bf700f3bba90ea6bc2b463258eecd5fd3",
+        "6ba4b6c-through-272c600": "979a36ff50caa20d3adff93ab5a401d711eb78a6fd1b5a8c911de086f5422599",
+    },
+}
+
 
 def _resolver_cohort_signatures(
     *,
@@ -105,6 +123,7 @@ def _resolver_cohort_signatures(
     harvest=None,
     brain=None,
     central=None,
+    paths=None,
 ):
     signatures = {}
     values = (
@@ -113,6 +132,7 @@ def _resolver_cohort_signatures(
         ("scripts/brain_archive.py", archive),
         ("scripts/brain_scale.py", scale),
         ("scripts/harvest.py", harvest),
+        ("scripts/brain_paths.py", paths),
     )
     signatures.update((relative, digest) for relative, digest in values if digest)
     if brain:
@@ -127,6 +147,16 @@ def _resolver_cohort_signatures(
 # Known unedited resolver cohorts only. A present non-current file must agree
 # with one of these complete revision maps; mixed cohorts fail closed.
 LEGACY_RESOLVER_SIGNATURES = {
+    "published-272c600": _resolver_cohort_signatures(
+        mneme="38578b9a0cf9d61d48bc705583919e251f998dfe736020ceceae2086d20a77fb",
+        append="96c4097e0a907598fccc21a9e6070108c3f96d95aee218d97aaeb2a36067a836",
+        archive="1c02d02060823eaef82f83eef2d71d0e54eb4aa1c002fa607aa6167143e993d0",
+        scale="82e6585ea4e7b7bcbb23628f0ad20785ade844c4ff67c3037630028ab2ec0f75",
+        harvest="130210c1a295e5454a6542f0acdbbf08b20fb108d35d4b29ae9f95f9fabfb3c9",
+        brain="fc509428adc997ab40c21d15c171023a1985a5a16ec735d1baa2f06eb42ae4fa",
+        central="28ea5c702301e25a4ff7c91fe7e1ffa89af963f8a89ae6e79cf69b84bda125c2",
+        paths="12f3020679c22865d36676fa7a086fcea7f9238f746d229f5193cc8dc4c73bf0",
+    ),
     "published-v0.1.0-v0.1.1": _resolver_cohort_signatures(
         brain="74df69f9c1f4db51e497fc779866d8f70e96da51500b169e016c7d1c571c5c6c",
         central="04f95e4ccb8b5419fca1fcc3f5f6ade5c09fa3eded469310262ed0031e0b8359",
@@ -185,6 +215,10 @@ LEGACY_RESOLVER_SIGNATURES = {
         central="d163b1a6ca1a5619a7ba903d5220004a407254651b2e710e888a0def3adbde15",
     ),
 }
+
+# These exact cohorts already resolve project-local data. Their code can be
+# upgraded, but they must never trigger an import from the old HOME default.
+KNOWN_LOCAL_RESOLVER_COHORTS = frozenset({"published-272c600"})
 
 
 
@@ -550,7 +584,8 @@ def _preflight_resolver_cohort(target: Path, target_real: Path):
     current_hashes = {}
     target_snapshots = {}
     present_hashes = {}
-    for installed_relative, source_relative in RESOLVER_COHORT_SOURCES.items():
+    managed_sources = {**RESOLVER_COHORT_SOURCES, **RUNTIME_DEPENDENCY_SOURCES}
+    for installed_relative, source_relative in managed_sources.items():
         source = TEMPLATE_ROOT / source_relative
         validate_source_file(source, TEMPLATE_ROOT)
         source_snapshot = _safe_regular_snapshot(source, "resolver source")
@@ -573,9 +608,16 @@ def _preflight_resolver_cohort(target: Path, target_real: Path):
         )
         target_snapshots[installed_relative] = destination_snapshot
         if destination_snapshot["exists"]:
-            present_hashes[installed_relative] = _sha256(
-                destination_snapshot["data"]
-            )
+            digest = _sha256(destination_snapshot["data"])
+            if installed_relative in RUNTIME_DEPENDENCY_SOURCES:
+                known = RUNTIME_DEPENDENCY_SIGNATURES.get(installed_relative, {}).values()
+                if digest != current_hashes[installed_relative] and digest not in known:
+                    raise ValueError(
+                        "resolver runtime dependency has edited or unknown content at "
+                        f"{installed_relative}; automatic upgrade refused even with --force"
+                    )
+            else:
+                present_hashes[installed_relative] = digest
 
     legacy_cohort = match_resolver_cohort(present_hashes, current_hashes)
     return {
@@ -685,6 +727,11 @@ def _publish_transaction(
                     _restore_snapshot(destination, originals[destination])
                 except BaseException as rollback_error:
                     rollback_errors.append(f"{destination}: {rollback_error}")
+                    # Earlier outputs may be prerequisites for the output we
+                    # could not restore (brain data precedes resolver code).
+                    # Keep them published; removing them could leave current
+                    # resolvers hiding a failed migration on the next attempt.
+                    break
             if rollback_errors:
                 raise OSError(
                     "migration publication failed and rollback was incomplete: "
@@ -696,7 +743,9 @@ def _publish_transaction(
             temporary_path.unlink(missing_ok=True)
 
 
-def _copy_resolver_cohort(plan, target: Path, dry_run: bool):
+def _resolver_outputs(plan, target: Path, dry_run: bool):
+    outputs = []
+    expected = {}
     results = []
     for relative, source in plan["sources"].items():
         destination = target / relative
@@ -708,13 +757,16 @@ def _copy_resolver_cohort(plan, target: Path, dry_run: bool):
             action = "update" if snapshot["exists"] else "write"
             results.append(f"would {action} resolver {destination}")
             continue
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        _publish_transaction(
-            [(destination, source["data"], source["mode"])],
-            {destination: snapshot},
-            target,
-        )
+        outputs.append((destination, source["data"], source["mode"]))
+        expected[destination] = snapshot
         results.append(f"wrote current resolver {destination}")
+    return outputs, expected, results
+
+
+def _copy_resolver_cohort(plan, target: Path, dry_run: bool):
+    outputs, expected, results = _resolver_outputs(plan, target, dry_run)
+    if outputs:
+        _publish_transaction(outputs, expected, target)
     return results
 
 
@@ -729,13 +781,15 @@ def _locked_legacy_snapshots(active: Path, archive: Path):
         raise OSError(f"could not acquire legacy shared-brain lock: {active}")
     release_ok = False
     try:
-        snapshots = {
-            active: _safe_regular_snapshot(active, "legacy active brain"),
-            archive: _safe_regular_snapshot(archive, "legacy archive brain"),
-        }
         if not bb_lock.renew(str(active), token):
             raise OSError("legacy shared-brain lock lease was lost during preflight")
-        return snapshots
+        with bb_lock.fenced(str(active), token):
+            return {
+                active: _safe_regular_snapshot(active, "legacy active brain"),
+                archive: _safe_regular_snapshot(archive, "legacy archive brain"),
+            }
+    except bb_lock.LockLeaseLost as exc:
+        raise OSError("legacy shared-brain lock lease was lost during preflight") from exc
     finally:
         release_ok = bb_lock.release(
             str(active),
@@ -796,7 +850,8 @@ def _preflight_brain_migration(
         explicit = brain_paths.explicit_shared_brain(os.environ)
     except brain_paths.SharedBrainPathError as exc:
         raise ValueError(str(exc)) from exc
-    if explicit is not None or resolver_plan["legacy_cohort"] is None:
+    if (explicit is not None or resolver_plan["legacy_cohort"] is None
+            or resolver_plan["legacy_cohort"] in KNOWN_LOCAL_RESOLVER_COHORTS):
         return None
 
     # Resolve the legacy directory chain (macOS /tmp and friends are
@@ -837,10 +892,28 @@ def _preflight_brain_migration(
         target_snapshots[destination] = _safe_regular_snapshot(
             destination, "brain migration target"
         )
+    # Publication orders the data and receipt before the resolvers. If a
+    # process stopped after the receipt but midway through the resolver cohort,
+    # recognize only that exact completed migration, never arbitrary local data.
+    completed = False
+    if brain_migration == "migrate":
+        receipt_data = _compact_json_bytes(brain_paths.receipt_payload(
+            brain_migration, legacy_active, legacy_archive
+        ))
+        completed = target_snapshots[receipt].get("data") == receipt_data
+        for local, legacy in ((local_active, legacy_active), (local_archive, legacy_archive)):
+            source = legacy_snapshots[legacy]
+            destination = target_snapshots[local]
+            if source["exists"]:
+                completed = completed and destination.get("data") == source["data"]
+            elif local == local_active:
+                completed = completed and destination.get("data") == b""
+            else:
+                completed = completed and not destination["exists"]
     if brain_migration == "migrate":
         for destination in (local_active, local_archive):
             snapshot = target_snapshots[destination]
-            if snapshot["exists"] and snapshot["data"]:
+            if snapshot["exists"] and snapshot["data"] and not completed:
                 raise ValueError(
                     f"migrate refuses nonempty local target: {destination}"
                 )
@@ -856,13 +929,29 @@ def _preflight_brain_migration(
         "binding": binding,
         "receipt": receipt,
         "target_snapshots": target_snapshots,
+        "completed": completed,
     }
 
 
-def _apply_brain_migration(plan, target: Path, dry_run: bool):
+def _apply_brain_migration(plan, target: Path, dry_run: bool, resolver_plan=None):
     mode = plan["mode"]
+    resolver_outputs, resolver_expected, resolver_results = (
+        _resolver_outputs(resolver_plan, target, dry_run)
+        if resolver_plan is not None else ([], {}, [])
+    )
     if dry_run:
-        return [f"would {mode} legacy shared brain"]
+        return [f"would {mode} legacy shared brain"] + resolver_results
+
+    if plan.get("completed"):
+        if resolver_outputs:
+            _publish_transaction(resolver_outputs, resolver_expected, target)
+        return ["kept verified completed brain migration"] + resolver_results
+
+    def publish(outputs, expected, **kwargs):
+        # Resolver upgrades and migration are one rollback unit. The data and
+        # receipt go first: a current cohort must never hide an unfinished copy.
+        _publish_transaction(outputs + resolver_outputs,
+                             {**expected, **resolver_expected}, target, **kwargs)
 
     brain_paths = plan["brain_paths"]
     receipt_bytes = _compact_json_bytes(
@@ -882,21 +971,19 @@ def _apply_brain_migration(plan, target: Path, dry_run: bool):
                 0o600,
             )
         ]
-        _publish_transaction(
+        publish(
             outputs,
             {plan["binding"]: plan["target_snapshots"][plan["binding"]]},
-            target,
         )
-        return [f"bound shared brain to {plan['legacy_active']}"]
+        return [f"bound shared brain to {plan['legacy_active']}"] + resolver_results
 
     if mode == "fresh-local":
         outputs = [(plan["receipt"], receipt_bytes, 0o600)]
-        _publish_transaction(
+        publish(
             outputs,
             {plan["receipt"]: plan["target_snapshots"][plan["receipt"]]},
-            target,
         )
-        return [f"recorded fresh-local brain migration at {plan['receipt']}"]
+        return [f"recorded fresh-local brain migration at {plan['receipt']}"] + resolver_results
 
     bb_lock = _load_sibling_module("bb_lock")
     token = bb_lock.acquire(
@@ -910,48 +997,49 @@ def _apply_brain_migration(plan, target: Path, dry_run: bool):
         )
     release_ok = False
     try:
-        final_snapshots = {
-            plan["legacy_active"]: _safe_regular_snapshot(
-                plan["legacy_active"], "legacy active brain"
-            ),
-            plan["legacy_archive"]: _safe_regular_snapshot(
-                plan["legacy_archive"], "legacy archive brain"
-            ),
-        }
-        if final_snapshots != plan["legacy_snapshots"]:
-            raise OSError("legacy shared brain changed after migration preflight")
+        if not bb_lock.renew(str(plan["legacy_active"]), token):
+            raise OSError("legacy shared-brain lock lease was lost before publication")
+        with bb_lock.fenced(str(plan["legacy_active"]), token):
+            final_snapshots = {
+                plan["legacy_active"]: _safe_regular_snapshot(
+                    plan["legacy_active"], "legacy active brain"
+                ),
+                plan["legacy_archive"]: _safe_regular_snapshot(
+                    plan["legacy_archive"], "legacy archive brain"
+                ),
+            }
+            if final_snapshots != plan["legacy_snapshots"]:
+                raise OSError("legacy shared brain changed after migration preflight")
 
-        active_snapshot = final_snapshots[plan["legacy_active"]]
-        active_data = active_snapshot["data"] if active_snapshot["exists"] else b""
-        active_mode = (
-            active_snapshot["mode"] & 0o600
-            if active_snapshot["exists"]
-            else 0o600
-        )
-        outputs = [(plan["local_active"], active_data, active_mode)]
-        archive_snapshot = final_snapshots[plan["legacy_archive"]]
-        if archive_snapshot["exists"]:
-            outputs.append(
-                (
-                    plan["local_archive"],
-                    archive_snapshot["data"],
-                    archive_snapshot["mode"] & 0o600,
-                )
+            active_snapshot = final_snapshots[plan["legacy_active"]]
+            active_data = active_snapshot["data"] if active_snapshot["exists"] else b""
+            active_mode = (
+                active_snapshot["mode"] & 0o600
+                if active_snapshot["exists"]
+                else 0o600
             )
-        outputs.append((plan["receipt"], receipt_bytes, 0o600))
-        expected = {
-            destination: plan["target_snapshots"][destination]
-            for destination, _, _ in outputs
-        }
-        _publish_transaction(
-            outputs,
-            expected,
-            target,
-            verify_fence=lambda: bb_lock.renew(
-                str(plan["legacy_active"]), token
-            ),
-        )
-        return [f"migrated legacy shared brain to {plan['local_active']}"]
+            outputs = [(plan["local_active"], active_data, active_mode)]
+            archive_snapshot = final_snapshots[plan["legacy_archive"]]
+            if archive_snapshot["exists"]:
+                outputs.append(
+                    (
+                        plan["local_archive"],
+                        archive_snapshot["data"],
+                        archive_snapshot["mode"] & 0o600,
+                    )
+                )
+            outputs.append((plan["receipt"], receipt_bytes, 0o600))
+            expected = {
+                destination: plan["target_snapshots"][destination]
+                for destination, _, _ in outputs
+            }
+            publish(
+                outputs,
+                expected,
+            )
+            return [f"migrated legacy shared brain to {plan['local_active']}"] + resolver_results
+    except bb_lock.LockLeaseLost as exc:
+        raise OSError("legacy shared-brain lock lease was lost before publication") from exc
     finally:
         release_ok = bb_lock.release(
             str(plan["legacy_active"]),
@@ -1152,7 +1240,10 @@ def install_full_engine(
         validate_destination(target, target, target_real, destination_kind="directory")
         target.mkdir(parents=True, exist_ok=True)
 
-    results.extend(_copy_resolver_cohort(resolver_plan, target, dry_run))
+    if migration_plan is not None:
+        results.extend(_apply_brain_migration(migration_plan, target, dry_run, resolver_plan))
+    else:
+        results.extend(_copy_resolver_cohort(resolver_plan, target, dry_run))
 
     for src_dir, dst_dir, skipped in tree_copies[:3]:
         results.extend(copy_tree(src_dir, dst_dir, force, dry_run=dry_run,
@@ -1186,9 +1277,6 @@ def install_full_engine(
             results.append(f"wrote {shared_brain}")
     elif not skip_local_brain:
         results.append(f"kept existing {shared_brain}")
-
-    if migration_plan is not None:
-        results.extend(_apply_brain_migration(migration_plan, target, dry_run))
 
     for src_dir, dst_dir, skipped in runtime_tree_copies:
         results.extend(copy_tree(src_dir, dst_dir, force, dry_run=dry_run,
@@ -1296,21 +1384,12 @@ def main() -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except ValueError as exc:
-        # Destination validation aborts before any write when a symlink is in
-        # the planned path.  Make that refusal observable and preserve the
-        # sibling installer's exit contract: an in-target link is skipped,
-        # while a link resolving outside the target fails the install.
+        # Unlike the starter's per-file skip, this aborts the whole activation.
+        # Every refusal must stop install.sh before it reports installed hosts.
         detail = str(exc)
         if detail.startswith("unsafe destination symlink"):
             print(f"REFUSED: {detail}", file=sys.stderr)
-            link_text = detail.rsplit(": ", 1)[-1]
-            try:
-                target_root = absolute_path(args.target).resolve()
-                link_real = Path(link_text).resolve()
-                escapes = Path(os.path.commonpath((str(target_root), str(link_real)))) != target_root
-            except (OSError, ValueError):
-                escapes = True
-            return 1 if escapes else 0
+            return 1
         print(f"error: {exc}", file=sys.stderr)
         return 1
     if args.dry_run:

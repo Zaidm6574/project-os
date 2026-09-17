@@ -22,10 +22,12 @@ To preview the files first, run:
 
 Dry run prints the files and folders that would be created or overwritten. It does not create the target project or run the optional tool check.
 
-Then open `../my-new-project` in Codex, Claude, or another AI coding tool and say:
+Then open `../my-new-project` in your AI coding tool and say “Use Project OS to help me build…” or ask it to follow `prompts/workflows/project.md`. Plain installation copies the workflows but does not register slash commands or host skills. Activate Claude commands with `--claude-engine`, or Codex project skills with `--codex-engine`; both flags imply the full engine. For example:
 
-```text
-/project I want to build...
+```bash
+./install.sh ../my-new-project --claude-engine
+# Or, for Codex:
+./install.sh ../my-new-project --codex-engine
 ```
 
 ## Option B: Use This Repository As A Template
@@ -125,11 +127,11 @@ To connect a central brain at the same time:
 ./install.sh /path/to/project --full-engine --central-brain ~/.project-os/central-brain --project-id project-name --check-tools
 ```
 
-This is additive and local-only. It copies `memory/`, `brain/`, and `blackboard/21-agent-roster.md` add-on files into the project, and it does not overwrite existing files unless `--force` is passed.
+This is additive and local-only. It copies `memory/`, `brain/`, and `blackboard/21-agent-roster.md` add-on files into the project, and normally preserves existing files unless `--force` is passed. The recognized, unedited legacy resolver cohort is a deliberate migration exception; unknown or edited resolver combinations require review. See `docs/legacy-resolver-cohort.md`.
 
 Use `--dry-run` with `--full-engine` when you want to see those add-on files before copying them.
 
-For UI projects, use `/ui-review` after planning or building to record responsive layout, accessibility, interaction-state, visual-quality, and browser QA findings in a Project OS packet.
+For UI projects, follow `prompts/workflows/ui-review.md` after planning or building (`/ui-review` when installed with `--claude-engine`) to record responsive layout, accessibility, interaction-state, visual-quality, and browser QA findings in a Project OS packet.
 
 From inside a project that already has the starter files:
 
@@ -175,7 +177,7 @@ Those folders are ignored by Git.
 The installer does not:
 
 - upload private files
-- activate the full engine unless `--full-engine` is passed
+- activate the full engine unless `--full-engine`, `--claude-engine`, or `--codex-engine` is passed
 - create or connect a central brain unless `--central-brain PATH` is passed
 - install external TurboVec, Graphify, embedding, or graph database packages
 - create a real autonomous swarm runtime

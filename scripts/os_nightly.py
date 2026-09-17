@@ -62,7 +62,7 @@ ENTRY_END = "<!-- os-nightly:entry:end -->"
 
 
 def run_gauge():
-    """Run brain_scale.py; return (one_line_summary, exit_code)."""
+    """Return (summary, severity_code), or (failure_summary, None) on a crash."""
     r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "brain_scale.py")],
                        capture_output=True, text=True, timeout=120)
     out = (r.stdout or "").strip()
@@ -72,7 +72,7 @@ def run_gauge():
         # output are legitimate severities: 1 WATCH, 2 CUTOVER, 3 n/a);
         # the LAST stderr line carries the actual error for a traceback
         detail = err.splitlines()[-1].strip() if err else "no stderr"
-        return f"brain_scale CRASHED (exit {r.returncode}): {detail}", r.returncode
+        return f"brain_scale CRASHED (exit {r.returncode}): {detail}", None
     # brain_scale prints an "OVERALL:" line; fall back to the last line
     status = next((l for l in out.splitlines() if "OVERALL" in l.upper() or "STATUS" in l.upper()),
                   out.splitlines()[-1] if out else "no output")
@@ -344,10 +344,13 @@ def main():
         )
         sys.exit(2)
     lines = []
+    gauge_failed = False
     try:
         gauge, code = run_gauge()
+        gauge_failed = code is None
     except Exception as e:  # keep the heartbeat alive even if the gauge breaks
-        gauge, code = f"brain_scale FAILED: {e}", 2
+        gauge, code = f"brain_scale FAILED: {e}", None
+        gauge_failed = True
     lines.append(f"gauge: {gauge}")
     lines.append(f"locks reaped: {reap_locks()}")
     sp = stale_packets()
@@ -368,7 +371,9 @@ def main():
         print(l)
     # ONE actionable headline, highest-priority first; silence when all clear.
     issues = []
-    if code == 2:
+    if gauge_failed:
+        issues.append("brain_scale failed — inspect the nightly automation log")
+    elif code == 2:
         issues.append("Brain past CUTOVER — run scripts/brain_archive.py")
     elif code == 1:
         issues.append("Brain gauge WATCH — review brain_scale output")

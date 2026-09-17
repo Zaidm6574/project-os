@@ -4,9 +4,9 @@
 
 [![Tests](https://github.com/Zaidm6574/project-os/actions/workflows/test.yml/badge.svg)](https://github.com/Zaidm6574/project-os/actions/workflows/test.yml)
 
-A workflow template for AI coding assistants — a goal file, a shared blackboard, and operating rules the assistant reads at the start of every session — plus the Python that keeps the template from lying to you: file locks with fencing tokens, a plan gate that refuses a plan which never says how the result will be checked, atomic writes that survive a crash mid-rewrite, and a secret gate that fails closed before chat memory syncs anywhere.
+A workflow template for AI coding assistants: goals, shared project notes, isolated run notes, and operating rules the assistant reads at the start of each session. Python helpers provide cooperative file locks, structural plan validation, atomic file replacement and known-credential screening for memory exchange. These guards support review; they do not execute the project or certify its results.
 
-The template is Markdown. The tooling underneath it is not: **38,000+ lines of Python against ~4,000 lines of Markdown, and roughly two thirds of that Python is tests.** 900+ tests, zero third-party dependencies, running on the Python that already ships with macOS — no `pip install`, no virtualenv, no `requirements.txt`.
+The template is Markdown. The tooling underneath it is not: a standard-library core with 900+ tests discoverable without installing packages. Optional paths depend on the interpreter, installed packages and platform; discovery counts include skips. Installation requires Python 3.10+, while the suite also supports older interpreters with explicit skips.
 
 Don't take the README's word for any of that. On a fresh clone:
 
@@ -16,7 +16,7 @@ git clone https://github.com/Zaidm6574/project-os.git && cd project-os
 /usr/bin/python3 -m unittest discover -s tests   # 900+ tests, zero dependencies
 ```
 
-That takes a couple of minutes and ends `OK`. Every skip names the specific dependency it needs — all but one want `numpy` for the optional vector-memory layer. If you have six seconds instead:
+Inspect the final test count, failures and skip reasons. Skips can cover optional NumPy, interpreter requirements, filesystem behavior and explicit opt-in integration or stress tests; a skipped test is not executed coverage. For a smaller check:
 
 ```bash
 /usr/bin/python3 -m unittest tests.test_docs_claims_20260726 \
@@ -24,23 +24,25 @@ That takes a couple of minutes and ends `OK`. Every skip names the specific depe
   tests.test_bb_lock_hardening 2>&1 | tail -1     # -> OK (skipped=1)
 ```
 
-The first of those four parses this README, runs the commands in it, and fails if the output does not match what the page claims.
+The first of those modules checks selected README claims against commands and source. It is not a check of every statement on this page.
 
 Scope, stated plainly so you can stop reading if it isn't what you want: the "agents" here are prompt roles executed by a Claude or Codex session — structured instructions, not autonomous background processes. Nothing in this repo runs on its own, and the plan gate proves a plan *declares* a check, never that the check was executed.
 
 ## Check these claims yourself
 
-Every load-bearing claim in this README has a command a stranger can run on a fresh clone:
+These checks exercise specific claims on a fresh clone; they do not certify every workflow or optional capability:
 
 | Claim | Check it |
 |---|---|
-| The full suite passes with zero dependencies | `python3 -m unittest discover -s tests` |
-| Cooperative agents cannot silently overwrite each other's work — token-fenced locks surface a stale holder for recovery | `python3 -m unittest tests.test_bb_lock_hardening -v` |
+| Run the core suite without third-party dependencies; inspect skips separately | `python3 -m unittest discover -s tests` |
+| Cooperative lock ownership checks reject stale tokens; correctness also requires guarded writes by every writer | `python3 -m unittest tests.test_bb_lock_hardening -v` |
 | A plan whose verification step is empty or a placeholder (`-`, `n/a`, `tbd`, …) is rejected, with the reason — structural proof the plan *declares* a check, never proof the check ran | the two commands below |
-| Chat-derived memory never syncs to the shared brain without explicit approval | `python3 -m unittest tests.test_brain_privacy -v` |
+| Memory sync checks approval metadata and known credential shapes; approval flags are caller-supplied, not authenticated human consent | `python3 -m unittest tests.test_brain_privacy -v` |
 | The installer fails closed below Python 3.10 and names the interpreter it found | `PATH=/usr/bin:/bin sh install.sh /tmp/demo --dry-run` (on a machine whose only `python3` is older than 3.10, e.g. stock macOS: exits 1, prints `found python3 = 3.9.6 (/usr/bin/python3); ...`) |
 
-![Fresh clone, the full suite green with zero dependencies, a sham plan rejected, a real plan accepted — a real terminal, played back time-compressed](docs/proof.gif)
+![Historical terminal demonstration of tests and plan checks](docs/proof.gif)
+
+The recording is a historical demonstration, not evidence for the current revision or hosted CI status.
 
 The plan gate, live — the checker's `verification.method`/`expected` are placeholders, so the plan never gets created:
 
@@ -66,7 +68,7 @@ Four pieces worth opening, each with the reason it exists and the command that s
 # OK
 ```
 
-**`scripts/brain_archive.py` — the path check is not the guard; the descriptor is.** `os.path.islink()` cannot see a hard link, so a path test can never be the only defence. The archive append opens with `O_WRONLY|O_CREAT|O_APPEND|O_NOFOLLOW` and then checks `os.fstat(fd).st_nlink > 1` on the descriptor it is holding, refusing before any write. The rewrite path deliberately uses `abspath()` and not `realpath()` — resolving re-follows a symlink at write time and hands the guard back to an attacker who swapped the target after the check — and it restores the destination's original mode after `rename`, so a deliberately-0600 file is not silently republished 0644. Both tests below include near-miss cases asserting the guards do not fire on ordinary input.
+**`scripts/brain_archive.py` — the path check is not the guard; the descriptor is.** `os.path.islink()` cannot see a hard link, so a path test can never be the only defence. The archive append opens with `O_RDWR|O_CREAT|O_APPEND|O_NOFOLLOW` and then checks `os.fstat(fd).st_nlink > 1` on the descriptor it is holding, refusing before any write. Read access checks an unterminated tail on that same descriptor so a moved record begins on its own line. The rewrite path deliberately uses `abspath()` and not `realpath()` — resolving re-follows a symlink at write time and hands the guard back to an attacker who swapped the target after the check — and it restores the destination's original mode after `rename`, so a deliberately-0600 file is not silently republished 0644. Both tests below include near-miss cases asserting the guards do not fire on ordinary input.
 
 ```bash
 /usr/bin/python3 -m unittest tests.test_brain_archive_security_20260726 \
@@ -74,7 +76,7 @@ Four pieces worth opening, each with the reason it exists and the command that s
 # OK
 ```
 
-**`scripts/bb_lock.py` — two sessions editing one blackboard cannot silently overwrite each other.** Same-user cross-process locking in stdlib only: a uuid4 fencing token written into the lockfile is the only proof of ownership (`--force` cannot override a tokened lease), leases renew via `os.utime`, stale ones are reaped, and `--wait N` is bounded against `time.monotonic()` rather than wall-clock so a wedged holder cannot make it wait forever.
+**`scripts/bb_lock.py` — cooperative lock ownership and stale holder detection.** Same-user cross-process locking in stdlib only: a uuid4 fencing token written into the lockfile is the only proof of ownership (`--force` cannot override a tokened lease), leases renew via `os.utime`, stale ones are reaped, and `--wait N` is bounded against `time.monotonic()` rather than wall-clock so a wedged holder cannot make it wait forever.
 
 ```bash
 /usr/bin/python3 -m unittest tests.test_bb_lock_hardening \
@@ -96,6 +98,7 @@ The skip is deliberate: the end-to-end version of the lease-loss test suspends a
 
 - A clear goal file (`00-project-goal.md`) so the assistant knows what done looks like
 - A shared blackboard for decisions, research, risks, cost, and next steps
+- One explicit active root per run (`runs/<slug>/`), passed through every workflow and role; `blackboard/` remains shared project context. See the active-workspace rule in `AGENTS.md`.
 - `AGENTS.md` + `CLAUDE.md` — operating rules for Codex-style tools and Claude Code
 - Three workflow tiers — a solo loop, and the multi-role "mini swarm" / "full swarm" patterns from `AGENTS.md` (structured prompt roles for one AI tool, per the first paragraph — not autonomous background processes)
 - A self-improvement loop: each serious run fills a memory harvest that can be promoted to the shared brain after review
@@ -124,7 +127,7 @@ What is not automatic without additional setup: external vector/graph packages, 
 
 ## Quick start
 
-Requirements: Git, Python 3.10+, and an AI coding tool that reads `AGENTS.md` or `CLAUDE.md`. Also install [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) if you intend to publish: the pre-publish privacy check below is an `rg` command, and `--check-tools` reports file search as `Not configured` without it. Nothing else in Project OS needs it.
+Requirements: Git, Python 3.10+ (`python3` for the commands below), and an AI coding tool that reads `AGENTS.md` or `CLAUDE.md`. [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) is optional fast file search. The pre-publish scanner uses Python and Git, not `rg`.
 
 The installer probes these names on your PATH, in exactly this order — `python3 python python3.13 python3.12 python3.11 python3.10 python3.14` — and takes the first one that reports 3.10 or newer. Note the ordering: the unversioned names are tried first, and 3.14 is probed last. So a stock macOS python (3.9) is fine as long as a newer interpreter is installed under any of those names. If none qualifies, `install.sh` stops and tells you which one it found instead.
 
@@ -136,7 +139,7 @@ cd project-os
 
 Then open `../my-new-project` in your AI tool and describe what you want to build. `CLAUDE.md` and `AGENTS.md` are read automatically, so no special command is needed.
 
-If you want the workflows as slash commands (`/project`, `/kickoff`, `/status`, …), add the engine flag for your tool — the plain install above deliberately writes no `.claude/` directory:
+To activate host adapters, add the flag for your tool. Claude receives slash commands (`/project`, `/kickoff`, `/status`, …); Codex receives project skills. The plain install writes neither host adapter directory:
 
 ```bash
 ./install.sh ../my-new-project --full-engine --claude-engine   # Claude
@@ -188,7 +191,7 @@ No Ollama means it stays lexical. Indexes built with one embedder are never quer
 
 ## Optional: daily heartbeat
 
-`scripts/os_nightly.py` checks memory pressure, cleans stale locks, and flags stuck plans into `blackboard/22-automation-log.md`. Run it manually or schedule it — the header of `blackboard/22-automation-log.md` itself carries a macOS launchd snippet and the `launchctl bootstrap` line.
+`scripts/os_nightly.py` checks memory pressure, cleans stale locks, and flags stuck plans into `blackboard/22-automation-log.md`. It runs once when invoked; scheduling requires separate OS configuration. Run it manually or schedule it — the header of `blackboard/22-automation-log.md` itself carries a macOS launchd snippet and the `launchctl bootstrap` line.
 
 ## Project structure after install
 
@@ -222,15 +225,15 @@ git status --short --ignored
 python3 scripts/prepublish_check.py --tracked
 ```
 
-`prepublish_check.py` imports the same credential denylist the brain's privacy gate uses, so the check you run before publishing is never weaker than the one running inside the tools. It prints the file and line of every match and never the matched value; `--list` shows the patterns it checked.
+`--tracked` scans stage-0 Git index blobs: the candidate staged bytes, including unchanged tracked files. Use `--tracked --working-tree` separately to inspect local edits for the same selected paths. Plain `PATH` scans a working directory or a supported regular file. The scanner reports selected/scanned counts and match locations without matched values; empty or ambiguous Git selections fail closed. It screens known patterns, not every kind of private information. It does not scan Git history, author metadata or remote configuration; review those locally without copying sensitive values into a transcript. `--list` shows the checked patterns.
 
 This repository's redaction tests intentionally contain synthetic credential-shaped fixtures, so the check is a fail-closed review gate rather than a command expected to exit cleanly. Treat every non-test-source match as a release blocker; review test-source matches before publishing.
 
 ## Status
 
-Built by someone with ADHD who needed project state to live outside his head. The first version of a booking site I shipped for a working auto-detailing business looked finished but couldn't take a booking — it failed silently, for real people. Project OS is what I built so that never happens again: plans are rejected unless they declare how the result will be checked, concurrent agents can't silently erase each other's work (fencing-token file locks), and chat-derived memory never syncs without explicit approval (privacy fail-closed). Nearly every guard in here exists because something failed first.
+Project OS keeps goals, evidence and unfinished work outside a single conversation. Its checks cover specific failure modes; the host still performs the work and reviewers still judge whether it meets the user's need.
 
-Active. Loop tooling added July 2026. CI passing. Template is safe to publish after the privacy check above.
+Active. Check the linked CI badge for hosted results on the revision you intend to use. Publication requires review of the actual staged content, history and metadata; a scanner pass alone is not a safety certification.
 
 Sharing it with an AI reviewer? Paste `docs/for-ai-reviewers.md` first — it gives the short architecture summary and the implemented-versus-optional boundary without requiring the whole README.
 

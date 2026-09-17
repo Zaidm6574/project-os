@@ -5,11 +5,16 @@ argument-hint: [optional: a lesson/preference to remember]
 capabilities: [subagents]
 claude-tools: Read Write Edit Grep Glob Task Bash
 ---
+
+## Active workspace
+
+Resolve `<run-root>` explicitly from the run argument or the caller's packet before reading or writing. For a named run it is `runs/<slug>/`; do not choose the newest run automatically. For project-level work without a named run, explicitly select `blackboard/`. All numbered notes and `packets/` paths below are relative to that selected root. Pass the same root to every delegated role and follow-up workflow. Shared `blackboard/` notes are read-only context during a named run; promote reviewed cross-run lessons separately. See **Active workspace and shared notes** in `AGENTS.md` for helper arguments and project-level exceptions.
+
 Sync project memory. Optional item to remember: **{{ARGUMENTS}}**
 
 Run the `memory-librarian` role — launch it as a subagent if your runtime has them, otherwise adopt the role yourself. It should:
-1. Run `python3 scripts/check_optional_tools.py --target .` when the script exists. If the report finds local full-engine files, do not call GraphOS/OSVec unavailable just because external Graphify/TurboVec commands are missing.
-2. (Re)build the GraphOS graph when `memory/build_graph.py` exists: `python3 memory/build_graph.py --root blackboard` or `python3 memory/build_graph.py --root runs/<slug>` -> `graphify-out/graph.json` + Mermaid. Note status in `08-memory-index.md`.
+1. Read the existing project capability report or inspect the helper files. `python3 scripts/check_optional_tools.py --target .` writes the project-shared `blackboard/17-capability-preflight.md`; run it as explicit project maintenance, not as an implicit run-local update. If the report finds local full-engine files, do not call GraphOS/OSVec unavailable just because external Graphify/TurboVec commands are missing.
+2. (Re)build the GraphOS graph when `memory/build_graph.py` exists: `python3 memory/build_graph.py --root "$run_root"` -> `graphify-out/graph.json` + Mermaid. Note status in `08-memory-index.md`.
 3. Promote durable items (preferences, reusable patterns, lessons from failures, key decisions) into OSVec via `memory/osvec_adapter.py` when present. If only legacy `memory/turbovec_adapter.py` exists, run its selftest and record the legacy status. Record status in `10-osvec-index.md`. Never store secrets/keys.
 4. If I gave a specific lesson above, store it with a stable id and a link back to its source blackboard file/packet.
 

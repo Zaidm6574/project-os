@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,6 +24,12 @@ def load_module(path: Path, name: str):
 
 
 class BrainPrivacyTests(unittest.TestCase):
+    def setUp(self):
+        environment = mock.patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("PROJECT_OS_SHARED_BRAIN", None)
+
     def test_raw_chat_save_is_not_automatically_approved(self):
         brain = load_module(BRAIN, "brain_raw_chat_approval")
         with tempfile.TemporaryDirectory() as tmp:
@@ -155,6 +162,7 @@ class BrainPrivacyTests(unittest.TestCase):
             central = base / "central"
             project = base / "project"
             receiving = base / "receiving"
+            receiving.mkdir()
             brain_file = project / "brain" / "shared-brain.jsonl"
             brain_file.parent.mkdir(parents=True)
             source_file = project / "from.jsonl"

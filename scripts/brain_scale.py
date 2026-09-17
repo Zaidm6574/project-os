@@ -176,8 +176,8 @@ def main():
     taste = count_json_entries(TASTE_INV)
     stale_interest, skipped_malformed = count_stale_interest(SHARED_BRAIN, INTEREST_STALE_DAYS)
 
-    # Neural retrieval changes the entries calibration: agents query top-k
-    # instead of flat-reading, so the active-file ceiling relaxes to 400.
+    # Neural index metadata selects the relaxed active-file ceiling of 400.
+    # This heuristic does not validate the index or probe the model service.
     embedder = ""
     try:
         with open(OSVEC, encoding="utf-8") as f:
@@ -211,7 +211,7 @@ def main():
                     "embedder": embedder or "none"},
         "overall": worst,
         "rule": (("CUTOVER: past even the neural soft ceiling — archive with scripts/brain_archive.py (entries stay searchable) and split md sprawl. "
-                  "WATCH: neural retrieval is live; relieve pressure via scripts/brain_archive.py and md cleanup. "
+                  "WATCH: neural index configured (metadata only; service health unverified); relieve pressure via scripts/brain_archive.py and md cleanup. "
                   "OK: healthy.") if neural else
                  ("CUTOVER: make Mneme (or a neural upgrade behind the same interface) "
                   "the PRIMARY retrieval path and demote the flat index to fallback. "

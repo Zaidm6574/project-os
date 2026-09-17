@@ -269,8 +269,9 @@ def _prepare_store_directory(store_dir):
 def _store_lock(store_dir=None, shared=False):
     """Lock an OSVec store; readers use shared mode, writers exclusive mode."""
     directory = _prepare_store_directory(store_dir or STORE_DIR)
-    # Keep the historical sentinel for store-layout integrity checks, while the
-    # short-lived project.lock carries the advisory reader/writer flock.
+    # Keep the historical sentinel for store-layout integrity checks. The
+    # advisory project.lock must also persist: unlinking it while another
+    # reader/waiter holds its inode lets a new writer lock a different inode.
     sentinel = os.path.join(directory, ".osvec.lock")
     sentinel_fd = os.open(sentinel, os.O_RDWR | os.O_CREAT, 0o600)
     os.close(sentinel_fd)
@@ -285,10 +286,6 @@ def _store_lock(store_dir=None, shared=False):
     finally:
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
-        try:
-            os.unlink(lock_path)
-        except FileNotFoundError:
-            pass
 
 
 # --------------------------------------------------------------------------- #

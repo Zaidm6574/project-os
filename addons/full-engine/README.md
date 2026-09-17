@@ -32,7 +32,7 @@ To also install the Claude Code agents and slash commands:
 python3 scripts/install_full_engine.py --target /path/to/project --claude
 ```
 
-The installer is local-only. It does not use the network, install packages, publish anything, or overwrite existing files unless `--force` is passed.
+The installer is local-only. It does not use the network, install packages or publish anything. Existing files are normally preserved without `--force`; recognized unedited resolver cohorts are an intentional upgrade exception. See `docs/legacy-resolver-cohort.md` for the known-local versus pre-canonical migration rules.
 
 To preview the add-on files first:
 
@@ -104,13 +104,14 @@ Use `context-scout` before expensive or high-reasoning agents when the host supp
 
 For long sessions, treat the blackboard as durable memory and the chat as temporary working space. At phase boundaries, write a receipt or handoff packet and continue from that packet when the active chat has become mostly historical context.
 
-When the host exposes usage logs, run:
+Bind `run_root` to the explicitly selected run. For Claude, identify a transcript belonging to that run before executing:
 
 ```bash
-python3 memory/cost_actuals.py --transcript /path/to/session.jsonl --write
+python3 memory/cost_actuals.py --transcript /path/to/this-run.jsonl --write \
+  --target "$run_root/09-cost-estimate.md"
 ```
 
-The report separates uncached input, output, cached reads, cached writes, and measured dollars. It also has `--codex-sessions` for local Codex activity rollups from `~/.codex/sessions`; that mode sums `last_token_usage`, warns against summing cumulative `total_token_usage`, and labels `cached_input_tokens` as cached reads rather than cache writes. If cached writes dominate the cost in provider logs, checkpoint the run before doing more work.
+The report separates uncached input, output, cached reads, cached writes, and measured dollars. For Codex, `--codex-sessions --sessions-dir /path/to/run-only-sessions` prints activity for every discovered JSONL below that directory. It sums `last_token_usage`, warns against summing cumulative `total_token_usage`, and labels `cached_input_tokens` as cached reads rather than cache writes. It does not filter by project/time, deduplicate events, compute dollars or write the Markdown report. Attribute inputs first, check completeness diagnostics and record results manually; unknown dollars remain unmeasured. See `prompts/workflows/deliver.md`. If cached writes dominate the cost in provider logs, checkpoint the run before doing more work.
 
 ## Why This Is Separate
 

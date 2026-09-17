@@ -539,7 +539,7 @@ class OSVecIntegrityTests(unittest.TestCase):
                             mem.save()
 
                 remaining = {path.name for path in store.iterdir()}
-                self.assertEqual(remaining, {".osvec.lock"})
+                self.assertEqual(remaining, {".osvec.lock", "project.lock"})
 
     @numpy_runtime_test
     def test_corrupt_index_is_refused_instead_of_silently_rebuilt(self):

@@ -11,7 +11,7 @@ Project OS is a local, file-backed workflow and verification layer for an AI cod
 In the CMU agent-system taxonomy, Project OS sits between a fixed pipeline and a dynamically scheduled DAG:
 
 1. `AGENTS.md` and workflow prompts define a mostly fixed outer loop: read state, choose a tier, plan, execute, verify, close.
-2. `blackboard/` is explicit shared state. Decisions, risks, approved plans, packets, evidence, and memory remain inspectable on disk.
+2. `blackboard/` holds shared project state; named runs use an explicit `runs/<slug>/` active root for their decisions, risks, plans, packets and evidence. The root is passed to every workflow/role, not inferred from the newest directory.
 3. `scripts/plan_artifact.py` permits a bounded dynamic DAG inside that loop. A JSON plan declares steps and dependencies; validation rejects cycles and missing maker/checker coverage; human approval precedes compilation.
 4. Worker roles are prompt templates, not persistent processes. Project OS does not implement search-based controller policies such as MCTS.
 
@@ -47,7 +47,7 @@ It does not currently implement automatic context-window compaction, learned evi
 1. Local files are authoritative; derived indexes can be rebuilt.
 2. Plan validation proves declared structure, not that verification actually ran.
 3. `build_verify.py` executes project-controlled code and is not a sandbox; `--isolated` protects only the source tree.
-4. Chat-derived memory does not cross into shared durable memory without approval.
+4. Memory exchange checks approval metadata and known secret patterns. A CLI flag or record field is a caller assertion, not authenticated human consent; the host must establish the authorized storage scope.
 5. Generated runtime assets must match their workflow source through `scripts/sync_runtime_assets.py --check`.
 6. Publishing is outside the runtime and requires a human privacy review.
 

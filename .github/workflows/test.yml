@@ -17,15 +17,26 @@ jobs:
         # "3.9" pins the below-floor world (stock-mac python3): installer
         # tests must skip with a reason there, never fail (2026-07-17)
         python-version: ["3.9", "3.10", "3.x"]
+        include:
+          # Exercise the optional vector backend and concurrent-store checks.
+          - python-version: "3.14"
+            numpy: true
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          # Historical public install fixtures validate upgrade compatibility.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+
+      - name: Install optional vector dependency
+        if: matrix.numpy
+        run: python3 -m pip install "numpy>=2.4,<3"
 
       - name: Run unit tests
         run: python3 -m unittest discover -s tests -v

@@ -24,10 +24,10 @@ installer:
    only recognizes the *exact, unedited* cohorts listed below. Anything
    edited, unknown, or mixed between cohorts refuses the upgrade — even with
    `--force` — and asks you to review the local changes and migrate manually.
-2. Checks the legacy central brain (active + archive) under the current
+2. For older pre-canonical cohorts only, checks the legacy central brain (active + archive) under the current
    user's home for data, holding a `scripts/bb_lock.py` lease on the active
    brain while it snapshots.
-3. If a recognized legacy cohort coexists with populated legacy data, requires
+3. If a recognized pre-canonical cohort coexists with populated legacy data, requires
    an explicit decision: `--brain-migration {migrate,bind,fresh-local}`.
 
 Modes:
@@ -44,12 +44,32 @@ Modes:
 - `fresh-local` — leave the legacy data untouched in place, start an empty
   local brain, and record the decision in the migration receipt.
 
+The shared locking helper `scripts/bb_lock.py` is a managed runtime dependency. The installer recognizes its exact current or allowlisted public bytes and upgrades it in the same publication transaction as the resolver files, including without `--force`. An edited or unknown helper refuses automatic replacement. Its version is checked separately from brain-location cohorts: upgrading a lock helper alone must not trigger migration of a legacy brain. See `RUNTIME_DEPENDENCY_SIGNATURES` in the installer for the historical lock hashes.
+
 ## Recognized cohort signatures (SHA-256)
 
 The addon copies `addons/full-engine/brain/brain.py` and
 `addons/full-engine/brain/central_brain.py` install as `brain/brain.py` and
 `brain/central_brain.py`; they share the digests listed for those installed
 paths.
+
+### `published-272c600`
+
+Known-local cohort: these files already use the canonical resolver. A routine
+upgrade recognizes the exact signatures and preserves the project's current
+brain/binding; it does not inspect or import a HOME legacy brain. Only the older
+pre-canonical cohorts below need the legacy-data migration preflight.
+
+| Installed file | SHA-256 |
+| --- | --- |
+| `memory/mneme_adapter.py` | `38578b9a0cf9d61d48bc705583919e251f998dfe736020ceceae2086d20a77fb` |
+| `scripts/brain_append.py` | `96c4097e0a907598fccc21a9e6070108c3f96d95aee218d97aaeb2a36067a836` |
+| `scripts/brain_archive.py` | `1c02d02060823eaef82f83eef2d71d0e54eb4aa1c002fa607aa6167143e993d0` |
+| `scripts/brain_scale.py` | `82e6585ea4e7b7bcbb23628f0ad20785ade844c4ff67c3037630028ab2ec0f75` |
+| `scripts/harvest.py` | `130210c1a295e5454a6542f0acdbbf08b20fb108d35d4b29ae9f95f9fabfb3c9` |
+| `brain/brain.py` | `fc509428adc997ab40c21d15c171023a1985a5a16ec735d1baa2f06eb42ae4fa` |
+| `brain/central_brain.py` | `28ea5c702301e25a4ff7c91fe7e1ffa89af963f8a89ae6e79cf69b84bda125c2` |
+| `scripts/brain_paths.py` | `12f3020679c22865d36676fa7a086fcea7f9238f746d229f5193cc8dc4c73bf0` |
 
 ### `published-v0.1.0-v0.1.1`
 

@@ -15,17 +15,17 @@ The goal is not to make a magic autonomous platform. The goal is to make AI proj
 Starter mode is what users get from a normal install:
 
 - `AGENTS.md` and `CLAUDE.md` workflow instructions
-- numbered `blackboard/` files for goals, plans, decisions, risks, memory, cost, preflight, evaluation, and delivery
+- numbered project-shared `blackboard/` notes and `runs/<slug>/` scaffolds; each run selects an explicit root and passes it through roles/workflows for goals, plans, decisions, risks, memory, costs and closeout
 - `install.sh` and setup scripts
 - lightweight local GraphOS/OSVec helper scripts, optional and inactive until run
 - optional tool checks
 - privacy-first `.gitignore` rules
 - docs and prompts for project kickoff, research refresh, friend review, and chat import
 
-Full engine mode is explicit opt-in with `--full-engine`:
+Full engine mode is explicit opt-in with `--full-engine` or either host-adapter flag (`--claude-engine`, `--codex-engine`). A plain install does not register host commands or skills:
 
 - local run helpers such as `new_run.py`, `validate_run.py`, `score_rubric.py`, `goal_guard.py`, `cost_actuals.py`, and `browser_qa.py`
-- local brain and central-brain scripts for privacy-gated lesson memories (chat-derived records sync only as approved summaries)
+- local brain and central-brain scripts for privacy-gated lesson memories (summary approval metadata is checked, but caller flags do not authenticate a human approval event)
 - optional Claude Code agents and commands, including `context-scout`, `ui-ux-designer`, `frontend-builder`, and `/ui-review`
 
 ## Implemented Now

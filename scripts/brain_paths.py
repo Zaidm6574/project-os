@@ -272,7 +272,7 @@ def record_type(record: object) -> str | None:
         return None
     values = {value for _, value in found}
     if len(values) != 1:
-        detail = ", ".join(f"{field}={value!r}" for field, value in found)
+        detail = ", ".join(field for field, _ in found)
         raise BrainRecordError(f"memory type alias conflict: {detail}")
     return found[0][1]
 

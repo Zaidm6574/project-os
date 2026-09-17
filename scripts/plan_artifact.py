@@ -37,7 +37,7 @@ to the digest recorded at approve time, and it appends an audit record to
 plan["migrations"]. Anything else — edited steps, a backwards schema, a plan
 approved before content digests were recorded — needs the human gate again.
 """
-import os, sys, json, re, datetime, hashlib, copy, tempfile, stat
+import os, sys, json, re, datetime, hashlib, copy, tempfile, stat, shlex
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project-os/
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
@@ -251,7 +251,16 @@ def locked_update(pid, mutate):
             print("FAILED: plan lock lease lost during update; aborting "
                   "without saving", file=sys.stderr)
             sys.exit(1)
-        save(plan, pid)
+        # Ownership must remain exclusive until the atomic replacement has
+        # finished, not merely until the renewal above. A stopped process can
+        # otherwise resume after takeover and overwrite the newer owner.
+        try:
+            with bb_lock.fenced(p, token):
+                save(plan, pid)
+        except bb_lock.LockLeaseLost as exc:
+            print("FAILED: plan lock lease lost during update; aborting "
+                  "without saving: %s" % exc, file=sys.stderr)
+            sys.exit(1)
         return plan
     finally:
         # token-fenced release: if our lease was reaped and re-acquired by
@@ -986,7 +995,14 @@ def main():
 
     if cmd == "approve":
         def _approve(plan):
-            probs = validate(plan)
+            # This explicit human gate reviews the proposed content anew.
+            # Old approval pins must not make their own documented recovery
+            # command impossible. Validate a copy without those pins, leaving
+            # every structural, provenance and goal-anchor check intact.
+            candidate = copy.deepcopy(plan)
+            for field in ("approved_at", "approved_schema", "approved_digest"):
+                candidate.pop(field, None)
+            probs = validate(candidate)
             if probs:
                 print("cannot approve, INVALID:\n- " + "\n- ".join(probs), file=sys.stderr)
                 sys.exit(1)
@@ -1081,6 +1097,12 @@ def main():
         except PlanInputError as e:
             print("cannot compile: %s" % e, file=sys.stderr)
             sys.exit(1)
+        # Retain an explicit source path instead of falling back to a possibly
+        # unrelated same-id plan under this compiler's default blackboard.
+        # Absolute paths survive a worker's cwd change; shell quoting keeps
+        # spaces and metacharacters in the path inside one argument.
+        completion_plan = shlex.quote(os.path.abspath(pid) if pid.endswith(".json")
+                                      else plan["id"])
         for i, s in enumerate(ordered_steps, 1):
             fp = packet_paths[i - 1]
             # build the full packet body BEFORE touching disk, then write
@@ -1125,7 +1147,7 @@ Recommended Next Step: {("after: " + ", ".join(s['depends_on'])) if s['depends_o
 Status: Draft
 
 Plan: {plan['id']} · step {i}/{len(plan['steps'])} · expected outputs: {", ".join(s['outputs']) or "(unspecified)"}
-{f"Isolation: WORKTREE — before touching code run: python3 scripts/wt.py create {plan['id']}-{s['id']}  (work + commit there; merge via wt.py merge)" + chr(10) if s.get('isolation') == 'worktree' else ""}On completion run: python3 scripts/plan_artifact.py complete {plan['id']} --step {s['id']}
+{f"Isolation: WORKTREE — before touching code run: python3 scripts/wt.py create {plan['id']}-{s['id']}  (work + commit there; merge via wt.py merge)" + chr(10) if s.get('isolation') == 'worktree' else ""}On completion run: python3 scripts/plan_artifact.py complete {completion_plan} --step {s['id']}
 """
             # The packet path itself is validated above, but the write went
             # through the SIBLING `fp + ".tmp"` with a symlink-following
